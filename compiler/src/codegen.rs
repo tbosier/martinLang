@@ -25,6 +25,14 @@ pub struct Opts {
     pub vecmath: bool,
     /// rows of A per pass in the Gram kernel (1 disables register blocking)
     pub gram_block: usize,
+    /// store matrices that are scanned along their last dimension column-major
+    pub scan_layout: bool,
+    /// Mint's own inlinable exp instead of the vector math library's
+    pub inline_exp: bool,
+    /// fuse consecutive statements that stream the rows of one matrix
+    pub row_fusion: bool,
+    /// run scan statements as one fused, row-blocked loop nest
+    pub scan_fusion: bool,
 }
 
 #[derive(Clone)]
@@ -35,9 +43,194 @@ enum Loc {
     Post(String),
 }
 
+/// One statement of a fused row group (see `Cg::stmt_list`).
+enum RowStmt<'e> {
+    /// let name = elementwise(..., X * v, ...), one value per row of X
+    Prod { name: String, e: &'e TExpr, mv: &'e TExpr },
+    /// let name = X' * f + rest
+    Trans { name: String, f: &'e TExpr, rest: Option<&'e TExpr>, x: &'e TExpr, ty: &'e Ty },
+    /// let name = X' * diag(w) * X + rest
+    Gram { name: String, w: Option<&'e TExpr>, rest: Option<&'e TExpr>, x: &'e TExpr, ty: &'e Ty },
+}
+
+impl RowStmt<'_> {
+    fn name(&self) -> &str {
+        match self {
+            RowStmt::Prod { name, .. } | RowStmt::Trans { name, .. } | RowStmt::Gram { name, .. } => name,
+        }
+    }
+    fn ty(&self) -> &Ty {
+        match self {
+            RowStmt::Prod { e, .. } => &e.ty,
+            RowStmt::Trans { ty, .. } | RowStmt::Gram { ty, .. } => ty,
+        }
+    }
+    fn matrix(&self) -> &str {
+        let m: &TExpr = match self {
+            RowStmt::Prod { mv, .. } => match &mv.kind {
+                TK::MatVec { m, .. } => m,
+                _ => unreachable!(),
+            },
+            RowStmt::Trans { x, .. } | RowStmt::Gram { x, .. } => x,
+        };
+        match &m.kind {
+            TK::Var(n) => n.as_str(),
+            _ => unreachable!(),
+        }
+    }
+    fn matrix_ty(&self) -> Option<&Ty> {
+        match self {
+            RowStmt::Prod { mv, .. } => match &mv.kind {
+                TK::MatVec { m, .. } => Some(&m.ty),
+                _ => None,
+            },
+            RowStmt::Trans { x, .. } | RowStmt::Gram { x, .. } => Some(&x.ty),
+        }
+    }
+}
+
+fn children(e: &TExpr) -> Vec<&TExpr> {
+    match &e.kind {
+        TK::Bin(_, a, b) | TK::Dot(a, b) => vec![a, b],
+        TK::Neg(a) | TK::Func(_, a) | TK::Transpose(a) | TK::AssumeSpd(a) | TK::Sum(a) | TK::Cumsum(a) | TK::Norm(a) => vec![a],
+        TK::MatVec { m, v, .. } => vec![m, v],
+        TK::Gram { a, w } => {
+            let mut c = vec![&**a];
+            if let Some(w) = w {
+                c.push(w);
+            }
+            c
+        }
+        TK::MatMul { a, b, .. } => vec![a, b],
+        TK::Solve { h, g } => vec![h, g],
+        TK::VecLit(xs) => xs.iter().collect(),
+        TK::Call { args, .. } | TK::ModelInst { data: args, .. } => args.iter().collect(),
+        TK::Sample { inst, .. } => vec![inst],
+        _ => vec![],
+    }
+}
+
+fn mentions_any(e: &TExpr, names: &[&str]) -> bool {
+    if let TK::Var(n) = &e.kind {
+        if names.contains(&n.as_str()) {
+            return true;
+        }
+    }
+    children(e).into_iter().any(|c| mentions_any(c, names))
+}
+
+/// An elementwise tree over vectors of the row dimension that can be
+/// evaluated one row at a time. `mv` receives its one X * v node when it is
+/// a producer; group names may appear only as earlier producers.
+fn ew_rows_ok<'e>(e: &'e TExpr, group: &[&str], prods: &[&str], x: &str, mv: &mut Option<Option<&'e TExpr>>) -> bool {
+    if e.ty.is_scalar() {
+        return !mentions_any(e, group);
+    }
+    match &e.kind {
+        TK::Bin(_, a, b) => ew_rows_ok(a, group, prods, x, mv) && ew_rows_ok(b, group, prods, x, mv),
+        TK::Neg(a) | TK::Func(_, a) => ew_rows_ok(a, group, prods, x, mv),
+        TK::Fill(_) => true,
+        TK::Var(n) => !group.contains(&n.as_str()) || prods.contains(&n.as_str()),
+        TK::MatVec { m, trans: false, v } => {
+            let is_x = matches!(&m.kind, TK::Var(n) if n == x);
+            match mv {
+                Some(slot @ None) if is_x && !mentions_any(v, group) => {
+                    *slot = Some(e);
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn classify_row_stmt<'e>(name: &str, value: &'e TExpr, group: &[&str], prods: &[&str], x: Option<&str>, vars: &HashMap<String, Loc>) -> Option<RowStmt<'e>> {
+    let is_buf_var = |m: &TExpr| match &m.kind {
+        TK::Var(n) => matches!(vars.get(n), Some(Loc::Buf(_))) && x.is_none_or(|x| x == n),
+        _ => false,
+    };
+    // X' * f  or  X' diag(w) X, possibly plus a term that does not stream X
+    let (core, rest) = match &value.kind {
+        TK::Bin(BinOp::Add, a, b) if matches!(a.kind, TK::MatVec { trans: true, .. } | TK::Gram { .. }) => (&**a, Some(&**b)),
+        TK::Bin(BinOp::Add, a, b) if matches!(b.kind, TK::MatVec { trans: true, .. } | TK::Gram { .. }) => (&**b, Some(&**a)),
+        _ => (value, None),
+    };
+    if let Some(r) = rest {
+        // the fused loop builds the product in the result buffer and adds the
+        // other term element by element: no broadcasting, no scalars
+        if mentions_any(r, &[name]) || !same_shape(&r.ty, &core.ty) || !same_shape(&value.ty, &core.ty) {
+            return None;
+        }
+    }
+    match &core.kind {
+        TK::MatVec { m, trans: true, v } if is_buf_var(m) => {
+            let xn = match &m.kind {
+                TK::Var(n) => n.as_str(),
+                _ => unreachable!(),
+            };
+            let mut none = None;
+            if !ew_rows_ok(v, group, prods, xn, &mut none) {
+                return None;
+            }
+            Some(RowStmt::Trans { name: name.to_string(), f: v, rest, x: m, ty: &value.ty })
+        }
+        TK::Gram { a, w } if is_buf_var(a) => {
+            let xn = match &a.kind {
+                TK::Var(n) => n.as_str(),
+                _ => unreachable!(),
+            };
+            if let Some(w) = w {
+                let mut none = None;
+                if !ew_rows_ok(w, group, prods, xn, &mut none) {
+                    return None;
+                }
+            }
+            Some(RowStmt::Gram { name: name.to_string(), w: w.as_deref(), rest, x: a, ty: &value.ty })
+        }
+        _ if rest.is_none() && matches!(value.ty, Ty::Vector(..)) => {
+            // a producer: find its X
+            let mut slot: Option<Option<&TExpr>> = Some(None);
+            let xn = x.map(str::to_string).or_else(|| find_matvec_x(value, vars))?;
+            if !ew_rows_ok(value, group, prods, &xn, &mut slot) {
+                return None;
+            }
+            let mv = slot.flatten()?;
+            Some(RowStmt::Prod { name: name.to_string(), e: value, mv })
+        }
+        _ => None,
+    }
+}
+
+/// Same vector length or matrix dimensions (domains and structure aside).
+fn same_shape(a: &Ty, b: &Ty) -> bool {
+    match (a, b) {
+        (Ty::Vector(n, _), Ty::Vector(m, _)) => n == m,
+        (Ty::Matrix(r, c, _), Ty::Matrix(r2, c2, _)) => r == r2 && c == c2,
+        _ => false,
+    }
+}
+
+fn find_matvec_x(e: &TExpr, vars: &HashMap<String, Loc>) -> Option<String> {
+    if let TK::MatVec { m, trans: false, .. } = &e.kind {
+        if let TK::Var(n) = &m.kind {
+            if matches!(vars.get(n), Some(Loc::Buf(_))) {
+                return Some(n.clone());
+            }
+        }
+    }
+    children(e).into_iter().find_map(|c| find_matvec_x(c, vars))
+}
+
+/// Rows per chunk of the tiled Gram kernel (the chunk's two scratch copies
+/// then fit in L1 for up to about 64 columns).
+const GRAM_CHUNK: u32 = 32;
+
 enum Prep {
     Scalar(String),
     Buf(String),
+    /// row i of matrix m (c columns) dotted with vector v, computed per element
+    RowDot { m: String, v: String, c: String },
 }
 
 pub struct Cg<'a> {
@@ -50,6 +243,8 @@ pub struct Cg<'a> {
     /// Shape of the matrix loop currently being emitted, so vectors inside it
     /// can be broadcast along the dimension with the matching name.
     mat_shape: Option<(Dim, Dim)>,
+    /// fuse consecutive statements that stream the rows of one matrix
+    row_fusion: bool,
 }
 
 impl HasFb for Cg<'_> {
@@ -60,7 +255,8 @@ impl HasFb for Cg<'_> {
 
 pub fn declare_runtime(m: &mut Module) {
     for d in [
-        "declare ptr @mint_alloc(i64)",
+        // fresh memory, like malloc: LLVM may assume it overlaps nothing else
+        "declare noalias ptr @mint_alloc(i64)",
         "declare void @mint_free(ptr)",
         "declare double @mint_clock()",
         "declare void @mint_check_dim(i64, i64, ptr)",
@@ -87,6 +283,11 @@ pub fn declare_runtime(m: &mut Module) {
 
 pub fn compile(p: &TProgram, opts: &Opts) -> String {
     let mut m = Module::default();
+    m.inline_exp = opts.inline_exp && !opts.strict_fp;
+    #[cfg(target_arch = "x86_64")]
+    {
+        m.avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    }
     declare_runtime(&mut m);
     for tm in &p.models {
         model::gen_model(&mut m, tm, opts);
@@ -99,7 +300,7 @@ pub fn compile(p: &TProgram, opts: &Opts) -> String {
 }
 
 fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
-    let mut cg = Cg { m, f: Fb::new(opts.strict_fp), vars: HashMap::new(), dims: HashMap::new(), prog, gram_block: opts.gram_block, mat_shape: None };
+    let mut cg = Cg { m, f: Fb::new(opts.strict_fp), vars: HashMap::new(), dims: HashMap::new(), prog, gram_block: opts.gram_block, mat_shape: None, row_fusion: opts.row_fusion && !opts.strict_fp };
     let mut params = Vec::new();
     for (k, (name, ty)) in f.params.iter().enumerate() {
         let a = format!("%a{k}");
@@ -248,11 +449,7 @@ impl Cg<'_> {
             },
             TStmt::Repeat { count, body } => {
                 let n = self.gen_int(count);
-                for_range(self, "0", &n, |cg, _| {
-                    for st in body {
-                        cg.stmt(st);
-                    }
-                });
+                for_range(self, "0", &n, |cg, _| cg.stmt_list(body));
             }
             TStmt::Print(vals) => {
                 for (k, v) in vals.iter().enumerate() {
@@ -693,6 +890,9 @@ impl Cg<'_> {
     /// an elementwise tree, before the fused loop runs.
     fn ew_prepare(&mut self, e: &TExpr, prep: &mut HashMap<usize, Prep>) {
         let key = e as *const TExpr as usize;
+        if prep.contains_key(&key) {
+            return; // prepared by the caller (a row dot product in a fused group)
+        }
         if e.ty.is_scalar() {
             let v = self.gen_scalar(e);
             prep.insert(key, Prep::Scalar(v));
@@ -716,7 +916,10 @@ impl Cg<'_> {
         let key = e as *const TExpr as usize;
         if let Some(p) = prep.get(&key) {
             return match p {
-                Prep::Scalar(v) => v.clone(),
+                Prep::Scalar(v) => {
+                    let v = v.clone();
+                    self.f.splat(&v)
+                }
                 Prep::Buf(b) => {
                     // a vector inside a matrix loop repeats along the other dimension
                     let at = match (&e.ty, ij, &self.mat_shape) {
@@ -728,6 +931,19 @@ impl Cg<'_> {
                         _ => idx.to_string(),
                     };
                     self.f.load(b, &at)
+                }
+                Prep::RowDot { m, v, c } => {
+                    let (m, v, c) = (m.clone(), v.clone(), c.clone());
+                    let row = self.f.imul(idx, &c);
+                    let acc = self.f.acc_new(&fconst(0.0));
+                    for_range(self, "0", &c, |cg, k| {
+                        let a = cg.f.iadd(&row, k);
+                        let x = cg.f.load(&m, &a);
+                        let y = cg.f.load(&v, k);
+                        let t = cg.f.fmul(&x, &y);
+                        cg.f.acc_add(&acc, &t);
+                    });
+                    self.f.acc_get(&acc)
                 }
             };
         }
@@ -829,6 +1045,38 @@ impl Cg<'_> {
     /// load/store of a destination row feeds four FMAs (register blocking);
     /// w's elementwise expression is fused in, never materialised.
     fn gram(&mut self, a: &TExpr, w: Option<&TExpr>, dest: &str) {
+        if self.gram_block > 1 && !self.f.strict {
+            let ab = self.gen_buf(a);
+            let (r, c) = self.mat_dims(a);
+            let mut prep = HashMap::new();
+            if let Some(w) = w {
+                self.ew_prepare(w, &mut prep);
+            }
+            let st = self.gram_start(&c);
+            let ab2 = ab.clone();
+            let chunks = self.f.iop("add nsw", &r, &(GRAM_CHUNK - 1).to_string());
+            let chunks = self.f.iop("sdiv", &chunks, &GRAM_CHUNK.to_string());
+            for_range(self, "0", &chunks, |cg, ch| {
+                let i0 = cg.f.imul(ch, &GRAM_CHUNK.to_string());
+                let i1 = cg.f.iadd(&i0, &GRAM_CHUNK.to_string());
+                let over = cg.f.reg();
+                cg.f.emit(format!("{over} = icmp sgt i64 {i1}, {r}"));
+                let i1c = cg.f.reg();
+                cg.f.emit(format!("{i1c} = select i1 {over}, i64 {r}, i64 {i1}"));
+                let nrows = cg.f.iop("sub nsw", &i1c, &i0);
+                for_range(cg, "0", &nrows, |cg, ii| {
+                    let i = cg.f.iadd(&i0, ii);
+                    let wi = match w {
+                        Some(w) => cg.ew_elem(w, &prep, &i, None),
+                        None => fconst(1.0),
+                    };
+                    cg.gram_row(&st, &ab2, &c, &i, ii, &wi);
+                });
+                cg.gram_chunk(&st, &nrows);
+            });
+            self.gram_finish(&st, &c, dest);
+            return;
+        }
         let b_rows = self.gram_block;
         let ab = self.gen_buf(a);
         let (r, c) = self.mat_dims(a);
@@ -890,6 +1138,325 @@ impl Cg<'_> {
                 let jk = cg.f.imul(j, &c);
                 let jk = cg.f.iadd(&jk, k);
                 cg.f.store(&x, &dest, &jk);
+            });
+        });
+    }
+
+    // ---- row fusion
+    //
+    // Newton and IRLS iterations compute, one statement after another,
+    //   let mu = f(X * w)                      (a producer: one value per row)
+    //   let g  = X' * r(mu, ...) + ...         (a transposed product)
+    //   let H  = X' * diag(s(mu, ...)) * X + ...  (a weighted Gram product)
+    // and each statement streams all of X. When consecutive statements only
+    // stream the rows of the same X and only use earlier producers of the
+    // group elementwise, they run as one loop over chunks of rows: each
+    // chunk of X is read from memory once and used by all of them from L1.
+
+    fn stmt_list(&mut self, body: &[TStmt]) {
+        let mut k = 0;
+        while k < body.len() {
+            if self.row_fusion {
+                let n = self.try_row_fusion(&body[k..]);
+                if n > 0 {
+                    k += n;
+                    continue;
+                }
+            }
+            self.stmt(&body[k]);
+            k += 1;
+        }
+    }
+
+    /// Fuses the longest run of fusible statements at the start of `body`;
+    /// returns how many it consumed (0: none).
+    fn try_row_fusion(&mut self, body: &[TStmt]) -> usize {
+        let mut group: Vec<RowStmt> = Vec::new();
+        let mut x: Option<String> = None;
+        for st in body {
+            let TStmt::Let { name, value } = st else { break };
+            let names: Vec<&str> = group.iter().map(|r| r.name()).collect();
+            let prods: Vec<&str> = group.iter().filter_map(|r| if let RowStmt::Prod { name, .. } = r { Some(name.as_str()) } else { None }).collect();
+            let Some(r) = classify_row_stmt(name, value, &names, &prods, x.as_deref(), &self.vars) else { break };
+            // the fused loop uses the tiled Gram kernel, so --no-gram-blocking
+            // keeps Gram products out of it
+            if matches!(r, RowStmt::Gram { .. }) && self.gram_block <= 1 {
+                break;
+            }
+            if x.is_none() {
+                x = Some(r.matrix().to_string());
+            }
+            group.push(r);
+        }
+        // at least two statements, one of which consumes rows
+        while group.len() >= 2 && matches!(group.last(), Some(RowStmt::Prod { .. })) {
+            group.pop();
+        }
+        if group.len() < 2 {
+            return 0;
+        }
+        self.emit_row_group(&group, x.as_deref().unwrap());
+        group.len()
+    }
+
+    fn emit_row_group(&mut self, group: &[RowStmt], xname: &str) {
+        let xb = match &self.vars[xname] {
+            Loc::Buf(b) => b.clone(),
+            _ => unreachable!(),
+        };
+        let xty = self.var_ty_of(group, xname);
+        let (rd, cd) = match &xty {
+            Ty::Matrix(r, c, _) => (r.clone(), c.clone()),
+            _ => unreachable!(),
+        };
+        let (n, c) = (self.dim(&rd), self.dim(&cd));
+        // destination buffers, visible to later statements of the group
+        let mut dests = Vec::new();
+        for r in group {
+            let b = self.alloc_buf(r.ty());
+            self.vars.insert(r.name().to_string(), Loc::Buf(b.clone()));
+            dests.push(b);
+        }
+        let mut prep = HashMap::new();
+        let mut coef_bufs: Vec<Option<String>> = Vec::new();
+        let mut grams: Vec<Option<(String, String, String, String)>> = Vec::new();
+        let chunk_buf = |cg: &mut Cg| {
+            let p = cg.f.hoisted(|f| {
+                let p = f.reg();
+                f.emit(format!("{p} = call ptr @mint_alloc(i64 {GRAM_CHUNK})"));
+                p
+            });
+            cg.f.frees.push(p.clone());
+            p
+        };
+        for (r, d) in group.iter().zip(&dests) {
+            let (mut cbuf, mut gst) = (None, None);
+            match r {
+                RowStmt::Prod { e, mv, .. } => {
+                    // X * v is one dot product per row, computed in the row loop
+                    let TK::MatVec { v, .. } = &mv.kind else { unreachable!() };
+                    let vb = self.gen_buf(v);
+                    prep.insert(*mv as *const TExpr as usize, Prep::RowDot { m: xb.clone(), v: vb, c: c.clone() });
+                    self.ew_prepare(e, &mut prep);
+                }
+                RowStmt::Trans { f, .. } => {
+                    self.ew_prepare(f, &mut prep);
+                    self.f.memzero(self.m, d, &c);
+                    cbuf = Some(chunk_buf(self));
+                }
+                RowStmt::Gram { w, .. } => {
+                    if let Some(w) = w {
+                        self.ew_prepare(w, &mut prep);
+                    }
+                    gst = Some(self.gram_start(&c));
+                }
+            }
+            coef_bufs.push(cbuf);
+            grams.push(gst);
+        }
+        let chunks = self.f.iop("add nsw", &n, &(GRAM_CHUNK - 1).to_string());
+        let chunks = self.f.iop("sdiv", &chunks, &GRAM_CHUNK.to_string());
+        for_range(self, "0", &chunks, |cg, ch| {
+            let i0 = cg.f.imul(ch, &GRAM_CHUNK.to_string());
+            let i1 = cg.f.iadd(&i0, &GRAM_CHUNK.to_string());
+            let over = cg.f.reg();
+            cg.f.emit(format!("{over} = icmp sgt i64 {i1}, {n}"));
+            let i1c = cg.f.reg();
+            cg.f.emit(format!("{i1c} = select i1 {over}, i64 {n}, i64 {i1}"));
+            let nrows = cg.f.iop("sub nsw", &i1c, &i0);
+            let base = cg.f.imul(&i0, &c);
+            let xc = cg.f.gep(&xb, &base);
+            // 1: per row, the producers (a dot product each), then the
+            // consumers' coefficients and weights. Each row of X is read from
+            // memory here and is in L1 for everything after. This loop has
+            // inner loops, so LLVM does not vectorise it and Mint's own
+            // (inline) exp is the fast choice in it.
+            let per_row = |cg: &mut Cg, ii: &str| {
+                let i = cg.f.iadd(&i0, ii);
+                for (k, r) in group.iter().enumerate() {
+                    match r {
+                        RowStmt::Prod { e, .. } => {
+                            let v = cg.ew_elem(e, &prep, &i, None);
+                            cg.f.store(&v, &dests[k], &i);
+                        }
+                        RowStmt::Trans { f, .. } => {
+                            let v = cg.ew_elem(f, &prep, &i, None);
+                            cg.f.store(&v, coef_bufs[k].as_ref().unwrap(), ii);
+                        }
+                        RowStmt::Gram { w, .. } => {
+                            let v = match w {
+                                Some(w) => cg.ew_elem(w, &prep, &i, None),
+                                None => fconst(1.0),
+                            };
+                            cg.gram_row(grams[k].as_ref().unwrap(), &xb, &c, &i, ii, &v);
+                        }
+                    }
+                }
+            };
+            cg.f.scalar_inline_exp = true;
+            for_range(cg, "0", &nrows, |cg, ii| per_row(cg, ii));
+            cg.f.scalar_inline_exp = false;
+            // 2: the consumers' updates
+            for (k, r) in group.iter().enumerate() {
+                match r {
+                    RowStmt::Trans { .. } => {
+                        let cb = coef_bufs[k].clone().unwrap();
+                        rows_axpy_blocked(cg, &xc, &c, &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
+                    }
+                    RowStmt::Gram { .. } => cg.gram_chunk(grams[k].as_ref().unwrap(), &nrows),
+                    RowStmt::Prod { .. } => {}
+                }
+            }
+        });
+        for (k, r) in group.iter().enumerate() {
+            if let RowStmt::Gram { .. } = r {
+                self.gram_finish(grams[k].as_ref().unwrap(), &c, &dests[k]);
+            }
+        }
+        // the terms outside X, in statement order
+        for (k, r) in group.iter().enumerate() {
+            let rest = match r {
+                RowStmt::Trans { rest, .. } | RowStmt::Gram { rest, .. } => *rest,
+                RowStmt::Prod { .. } => None,
+            };
+            let Some(rest) = rest else { continue };
+            let rb = self.gen_buf(rest);
+            let size = self.size(r.ty());
+            let d = dests[k].clone();
+            for_range(self, "0", &size, |cg, j| {
+                let a = cg.f.load(&d, j);
+                let b = cg.f.load(&rb, j);
+                let s = cg.f.fadd(&a, &b);
+                cg.f.store(&s, &d, j);
+            });
+        }
+    }
+
+    /// The type of variable `name` as the group's statements see it.
+    fn var_ty_of(&self, group: &[RowStmt], name: &str) -> Ty {
+        for r in group {
+            if let Some(t) = r.matrix_ty() {
+                return t.clone();
+            }
+        }
+        unreachable!("row group without its matrix ({name})")
+    }
+
+    // ---- tiled Gram kernel: H = A' diag(w) A, in chunks of rows
+    //
+    // Each chunk of GRAM_CHUNK rows is copied into L1 scratch twice, as X
+    // (the rows) and W (the rows scaled by their weights), with the columns
+    // padded with zeros to a multiple of 8 (pp). The upper triangle of the
+    // padded H is then updated tile by tile: a 4 x 8 tile lives in eight
+    // vector registers while the chunk streams through it, so each step is
+    // six loads for eight vector FMAs (the row-by-row form needs a load and a
+    // store of H for every four). Padding makes every tile full-size.
+
+    /// Allocates and zeroes the scratch: (X chunk, W chunk, padded H, pp).
+    fn gram_start(&mut self, c: &str) -> (String, String, String, String) {
+        let c = c.to_string();
+        let (xs, ws, hs, pp) = self.f.hoisted(|f| {
+            let pp = f.iop("add nsw", &c, "7");
+            let pp = f.iop("sdiv", &pp, "8");
+            let pp = f.imul(&pp, "8");
+            let n = f.imul(&pp, &GRAM_CHUNK.to_string());
+            let hh = f.imul(&pp, &pp);
+            let mut al = |n: &str| {
+                let p = f.reg();
+                f.emit(format!("{p} = call ptr @mint_alloc(i64 {n})"));
+                p
+            };
+            let (xs, ws, hs) = (al(&n), al(&n), al(&hh));
+            (xs, ws, hs, pp)
+        });
+        for b in [&xs, &ws, &hs] {
+            self.f.frees.push(b.clone());
+        }
+        let n = self.f.imul(&pp, &GRAM_CHUNK.to_string());
+        let hh = self.f.imul(&pp, &pp);
+        self.f.memzero(self.m, &xs, &n);
+        self.f.memzero(self.m, &ws, &n);
+        self.f.memzero(self.m, &hs, &hh);
+        (xs, ws, hs, pp)
+    }
+
+    /// Copies row i of A (row ii of the chunk) and its weighted copy into the scratch.
+    fn gram_row(&mut self, st: &(String, String, String, String), ab: &str, c: &str, i: &str, ii: &str, wi: &str) {
+        let (xs, ws, _, pp) = st;
+        let src = self.f.imul(i, c);
+        let dst = self.f.imul(ii, pp);
+        let wi = wi.to_string();
+        for_range(self, "0", c, |cg, k| {
+            let si = cg.f.iadd(&src, k);
+            let x = cg.f.load(ab, &si);
+            let di = cg.f.iadd(&dst, k);
+            cg.f.store(&x, xs, &di);
+            let y = cg.f.fmul(&wi, &x);
+            cg.f.store(&y, ws, &di);
+        });
+    }
+
+    /// Adds the chunk's rows [0, nrows) to the upper triangle of the padded H.
+    fn gram_chunk(&mut self, st: &(String, String, String, String), nrows: &str) {
+        let (xs, ws, hs, pp) = st.clone();
+        let nj = self.f.iop("sdiv", &pp, "4");
+        for_range(self, "0", &nj, |cg, jb| {
+            let j0 = cg.f.imul(jb, "4");
+            let k_start = cg.f.iop("and", &j0, "-8");
+            let nk = cg.f.iop("sub nsw", &pp, &k_start);
+            let nk = cg.f.iop("sdiv", &nk, "8");
+            for_range(cg, "0", &nk, |cg, kb| {
+                let k0 = cg.f.imul(kb, "8");
+                let k0 = cg.f.iadd(&k0, &k_start);
+                let k1 = cg.f.iadd(&k0, "4");
+                cg.f.lanes = 4;
+                let acc: Vec<String> = (0..8).map(|_| cg.f.acc_new(&fconst(0.0))).collect();
+                for_range(cg, "0", nrows, |cg, ii| {
+                    let row = cg.f.imul(ii, &pp);
+                    let a0 = cg.f.iadd(&row, &k0);
+                    let a1 = cg.f.iadd(&row, &k1);
+                    let xa = cg.f.load(&xs, &a0);
+                    let xb = cg.f.load(&xs, &a1);
+                    for jj in 0..4 {
+                        let j = cg.f.iadd(&j0, &jj.to_string());
+                        let wi = cg.f.iadd(&row, &j);
+                        let b = cg.f.load_scalar(&ws, &wi);
+                        let b = cg.f.splat(&b);
+                        let t0 = cg.f.fmul(&b, &xa);
+                        cg.f.acc_add(&acc[2 * jj], &t0);
+                        let t1 = cg.f.fmul(&b, &xb);
+                        cg.f.acc_add(&acc[2 * jj + 1], &t1);
+                    }
+                });
+                for jj in 0..4 {
+                    let j = cg.f.iadd(&j0, &jj.to_string());
+                    let hrow = cg.f.imul(&j, &pp);
+                    for (h, k) in [(0, &k0), (1, &k1)] {
+                        let v = cg.f.acc_get(&acc[2 * jj + h]);
+                        let at = cg.f.iadd(&hrow, k);
+                        cg.f.add_to(&hs, &at, &v);
+                    }
+                }
+                cg.f.lanes = 1;
+            });
+        });
+    }
+
+    /// dest (c x c) = the upper triangle of the padded H, mirrored.
+    fn gram_finish(&mut self, st: &(String, String, String, String), c: &str, dest: &str) {
+        let (_, _, hs, pp) = st.clone();
+        let dest = dest.to_string();
+        for_range(self, "0", c, |cg, j| {
+            for_range(cg, j, c, |cg, k| {
+                let hj = cg.f.imul(j, &pp);
+                let hj = cg.f.iadd(&hj, k);
+                let x = cg.f.load(&hs, &hj);
+                let a = cg.f.imul(j, c);
+                let a = cg.f.iadd(&a, k);
+                cg.f.store(&x, &dest, &a);
+                let b = cg.f.imul(k, c);
+                let b = cg.f.iadd(&b, j);
+                cg.f.store(&x, &dest, &b);
             });
         });
     }

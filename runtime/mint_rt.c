@@ -21,9 +21,12 @@ void mint_panic(const char *msg) {
   exit(1);
 }
 
+// Fresh, 64-byte aligned (one cache line) memory; released with free().
 void *mint_alloc(int64_t n_doubles) {
   if (n_doubles < 0) mint_panic("negative allocation size");
-  void *p = malloc((size_t)(n_doubles > 0 ? n_doubles : 1) * sizeof(double));
+  size_t bytes = (size_t)(n_doubles > 0 ? n_doubles : 1) * sizeof(double);
+  bytes = (bytes + 63) & ~(size_t)63;
+  void *p = aligned_alloc(64, bytes);
   if (!p) mint_panic("out of memory");
   return p;
 }
@@ -843,8 +846,26 @@ static void gradcheck(mint_logp_fn f, int64_t D, const double *theta) {
 }
 
 // Deterministic test point shared by every implementation.
+// A compiled model may store some parameters in a different order from the
+// user's (see scan layouts in compiler/src/model.rs). These convert an
+// unconstrained vector between the two; null means the orders agree.
+typedef void (*mint_permute_fn)(const double *src, double *dst);
+static mint_permute_fn layout_to_internal, layout_to_user;
+void mint_set_layout(mint_permute_fn to_internal, mint_permute_fn to_user) {
+  layout_to_internal = to_internal;
+  layout_to_user = to_user;
+}
+
+// The benchmark point is defined in the user's order, so every implementation
+// evaluates the same point whatever its internal layout.
 static void bench_point(double *theta, int64_t D) {
   for (int64_t i = 0; i < D; i++) theta[i] = 0.05 * (double)((i * 37) % 11 - 5) / 5.0;
+  if (layout_to_internal) {
+    double *t = mint_alloc(D);
+    layout_to_internal(theta, t);
+    memcpy(theta, t, (size_t)D * sizeof(double));
+    free(t);
+  }
 }
 
 // Times repeated gradient evaluations at a fixed point and exits. Used to
@@ -861,6 +882,12 @@ static void bench_grad(mint_logp_fn f, int64_t D, int64_t reps) {
     sink += g[r % D];
   }
   double t1 = mint_clock();
+  if (layout_to_user) {
+    double *t = mint_alloc(D);
+    layout_to_user(g, t);
+    memcpy(g, t, (size_t)D * sizeof(double));
+    free(t);
+  }
   double gn = 0;
   for (int64_t i = 0; i < D; i++) gn += g[i] * g[i];
   printf("grad-bench: reps=%lld ns_per_eval=%.1f logp=%.12e grad_norm=%.12e sink=%g\n",

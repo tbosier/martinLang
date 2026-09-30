@@ -22,44 +22,47 @@ Mint, and the compiler derives the gradient.
 
 | 3,171 parameters, 4 chains × 1000 draws | wall time | converged? | effective draws per second |
 |---|---|---|---|
-| Mint | 8.3 s | yes (R-hat 1.002) | 276 |
+| Mint | 6.6 s | yes (R-hat 1.003) | 387 |
 | Stan (stanc `--O1`) | 48.5 s | yes (R-hat 1.002) | 38.3 |
 | rustmc (elliptical slice) | 7.0 s | **no** (R-hat 1.95) | not usable |
-| hand-written SIMD Rust, same sampler as Mint | 6.6 s | yes | 299 |
+| hand-written SIMD Rust, same sampler as Mint | 6.6 s | yes | 300 |
 
-- Mint's and Stan's posterior means agree within 1.5 Monte Carlo standard
-  errors. That is means only, not variances or tails.
+- Mint and Stan both converged; their posterior means agree (details in the
+  report). That is means only, not variances or tails.
+- The effective-draws figure moves with the seed: across three seeds Mint's
+  lowest ESS ranged from 1,600 to 2,600. The steadier comparison is the cost
+  per gradient including the sampler: 13 µs for Mint against 97 µs for Stan.
 - rustmc's chains did not converge in these runs (1000 warmup + 1000 sweeps),
   and its means are off by up to 0.9 posterior standard deviations.
-- At 37,901 parameters, Mint's whole run costs 0.30 ms of wall time per
-  gradient per chain, including the sampler. Stan's costs 11.2 ms. That is not
-  a like-for-like cost: Stan used stanc's default `--O0`, a shorter run and
-  one CPU chiplet, and ran one thread per chain, while Mint's sampler split
-  each chain across 3 threads. Mint's run (278 s) is right at the mixing bar
-  and Stan's does not reach it; see the report.
+- At 37,901 parameters Mint's run took 226 to 238 s (two runs) and was right
+  at the mixing bar; Stan's shorter run did not reach it. See the report for
+  why the per-gradient figures there are not a like-for-like comparison.
 
-**Against Rust, on three smaller problems** ([details](docs/benchmark.md)):
+**Against hand-written Rust** ([details](docs/benchmark.md),
+[this round](docs/compiler-round.md)):
 
 | problem | Mint | straightforward Rust | tuned Rust | max-effort Rust |
 |---|---|---|---|---|
-| logistic gradient (n=5000, p=20) | 35 µs | 178 µs | 139 µs | 37 µs (a tie) |
-| logistic, full NUTS run | 0.51 s | 2.56 s | 1.93 s | 0.55 s |
-| Newton's method (n=200000, p=50) | 0.32 s | 2.41 s | 0.41 s | **0.21 s** |
-| lines of code | 15 to 18 | 59 to 78 | 66 to 97 | 92 to 105 + SIMD helpers |
+| logistic gradient (n=5000, p=20) | **33 µs** | 178 µs | 139 µs | 37 µs |
+| logistic, full NUTS run | **0.49 s** | 2.57 s | 1.92 s | 0.56 s |
+| Newton's method (n=200000, p=50) | **0.16 s** | 2.33 s | 0.40 s | 0.21 s |
+| time-series gradient, 3,171 / 37,901 parameters | 4.22 / 53.4 µs | | | **4.07 / 52.2 µs** |
+| lines of code | 15 to 18 | 59 to 78 | 66 to 97 | 92 to 105 plus SIMD helpers; 591 for the time series |
 
 The original question for this prototype was whether Mint can be clearer than
-Rust and within 2x of straightforward Rust. The answer is yes. Mint is about
-5 to 7x faster than straightforward Rust on the logistic and Newton problems,
-and 2.7x on linear regression before its algebraic rewrite. The boundary is
-expert Rust written with SIMD intrinsics and vector math. That code ties Mint
-on the logistic gradient, and is 1.55x faster on Newton and 1.1 to 1.3x faster
-on the time-series model. It takes roughly 10 to 30 times as much code
-(counting its shared SIMD helpers), including hand-derived gradients.
+Rust and within 2x of straightforward Rust. The answer is yes: Mint is 5 to
+14x faster than straightforward Rust on these problems. Against expert Rust
+written with SIMD intrinsics and glibc's vector math, Mint is now 1.15x faster
+on the logistic gradient and 1.3x faster on Newton, and 2 to 4% slower on the
+time-series gradient (it was 1.8x slower). The Rust takes roughly 10 to
+33 times as much code (counting its shared SIMD helpers), including
+hand-derived gradients.
 
-So the case for Mint is not "faster than Rust". It is expert-level speed from a
-few lines of mathematics, with gradients derived by the compiler, and with
-shape, positivity and SPD errors caught before anything runs. It competes with
-Stan and PyMC rather than with Rust.
+That is not a claim that Rust cannot be as fast: every technique Mint's
+compiler uses could be written by hand in Rust (see the caveats in
+[compiler-round.md](docs/compiler-round.md)). The case for Mint is that its
+compiler produces this from a few lines of mathematics, with gradients derived
+for you and with shape, positivity and SPD errors caught before anything runs.
 
 ## Two examples
 
@@ -158,6 +161,11 @@ Useful environment variables for compiled programs:
   passes use. The default is 1 below 8,192 parameters.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+
+Compiler switches, each turning one optimisation off (for measuring it):
+`--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
+`--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
+and `--strict-fp` (strict IEEE evaluation order, no vector math).
 
 ## The language in one page
 

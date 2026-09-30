@@ -1,0 +1,297 @@
+{
+  "reps": 11,
+  "loadavg_at_start": [
+    "2.04",
+    "0.96",
+    "2.39"
+  ],
+  "loadavg_at_end": [
+    "1.58",
+    "1.00",
+    "2.33"
+  ],
+  "core": "2",
+  "order": "shuffled per repetition (seed 1)",
+  "binaries_sha256": {
+    "build/cmp/old_dynamic_poisson": "03522195216efd53",
+    "build/cmp/new_dynamic_poisson": "52a47d07c7dd71f1",
+    "build/rs_dynpois_max": "e473a1708b471b9b",
+    "build/cmp/old_dpl": "2b2301712b3a2666",
+    "build/cmp/new_dpl": "fbbc1015d90f6ee6",
+    "build/cmp/old_logistic_bayes": "b6de0e540e234cbf",
+    "build/cmp/new_logistic_bayes": "894e41fb3b5b3693",
+    "build/rs_logistic_bayes_max": "61d63d9fff6011ca",
+    "build/cmp/old_linear_bayes": "ab16938ca52f1410",
+    "build/cmp/new_linear_bayes": "94470ec0f508a262",
+    "build/rs_linear_bayes_suffstats": "2e157f5c71816a12",
+    "build/cmp/old_logistic_newton": "eb9105e27729791c",
+    "build/cmp/new_logistic_newton": "5d9819c78cbdf388",
+    "build/rs_logistic_newton_max": "a269a6dff8c90969"
+  },
+  "commands": {
+    "dynamic Poisson gradient, 3,171 parameters": {
+      "Mint before": [
+        "build/cmp/old_dynamic_poisson"
+      ],
+      "Mint after": [
+        "build/cmp/new_dynamic_poisson"
+      ],
+      "max-effort Rust": [
+        "build/rs_dynpois_max",
+        "bench/dynpois/data_small/y.f64"
+      ]
+    },
+    "dynamic Poisson gradient, 37,901 parameters": {
+      "Mint before": [
+        "build/cmp/old_dpl"
+      ],
+      "Mint after": [
+        "build/cmp/new_dpl"
+      ],
+      "max-effort Rust": [
+        "build/rs_dynpois_max",
+        "bench/dynpois/data_large/y.f64"
+      ]
+    },
+    "logistic gradient (n=5000, p=20)": {
+      "Mint before": [
+        "build/cmp/old_logistic_bayes"
+      ],
+      "Mint after": [
+        "build/cmp/new_logistic_bayes"
+      ],
+      "max-effort Rust": [
+        "build/rs_logistic_bayes_max"
+      ]
+    },
+    "linear regression gradient (sufficient statistics)": {
+      "Mint before": [
+        "build/cmp/old_linear_bayes"
+      ],
+      "Mint after": [
+        "build/cmp/new_linear_bayes"
+      ],
+      "tuned Rust, same rewrite": [
+        "build/rs_linear_bayes_suffstats"
+      ]
+    },
+    "Newton's method (n=200000, p=50), 10 iterations": {
+      "Mint before": [
+        "build/cmp/old_logistic_newton"
+      ],
+      "Mint after": [
+        "build/cmp/new_logistic_newton"
+      ],
+      "max-effort Rust": [
+        "build/rs_logistic_newton_max"
+      ]
+    }
+  },
+  "results": {
+    "dynamic Poisson gradient, 3,171 parameters": {
+      "Mint before": [
+        7236.0,
+        7098.7,
+        7112.0,
+        7136.2,
+        7393.6,
+        7263.7,
+        7089.4,
+        7525.4,
+        7167.2,
+        7091.8,
+        12437.6
+      ],
+      "Mint after": [
+        4230.6,
+        4219.1,
+        4209.9,
+        4176.8,
+        4225.3,
+        4196.8,
+        4229.1,
+        4252.0,
+        4306.2,
+        4218.9,
+        4196.6
+      ],
+      "max-effort Rust": [
+        4103.8,
+        4132.0,
+        4067.9,
+        4036.1,
+        4130.6,
+        4146.6,
+        4071.3,
+        4065.9,
+        4065.8,
+        4075.4,
+        4021.3
+      ]
+    },
+    "dynamic Poisson gradient, 37,901 parameters": {
+      "Mint before": [
+        96225.2,
+        94657.3,
+        95582.0,
+        95239.9,
+        97518.8,
+        94626.8,
+        95388.4,
+        95517.4,
+        98748.1,
+        96455.7,
+        98484.1
+      ],
+      "Mint after": [
+        52799.1,
+        53411.0,
+        53340.9,
+        53053.1,
+        53109.3,
+        53535.0,
+        53587.1,
+        54011.4,
+        53834.0,
+        53439.9,
+        53356.1
+      ],
+      "max-effort Rust": [
+        52639.5,
+        51975.6,
+        52771.5,
+        52161.0,
+        52378.6,
+        53380.8,
+        52745.9,
+        51643.6,
+        52072.6,
+        51893.9,
+        51726.4
+      ]
+    },
+    "logistic gradient (n=5000, p=20)": {
+      "Mint before": [
+        34527.2,
+        34605.3,
+        36137.4,
+        34924.1,
+        34452.8,
+        50174.8,
+        34535.5,
+        35229.6,
+        34773.8,
+        33992.1,
+        35211.6
+      ],
+      "Mint after": [
+        32472.9,
+        32965.9,
+        33245.9,
+        32718.7,
+        32368.0,
+        32168.7,
+        41823.9,
+        32627.7,
+        33302.7,
+        33064.9,
+        32802.4
+      ],
+      "max-effort Rust": [
+        37322.3,
+        37873.2,
+        39364.3,
+        37298.8,
+        37377.6,
+        38743.9,
+        38015.3,
+        37500.7,
+        37965.8,
+        38519.9,
+        37645.7
+      ]
+    },
+    "linear regression gradient (sufficient statistics)": {
+      "Mint before": [
+        105.4,
+        101.9,
+        101.7,
+        102.8,
+        103.4,
+        100.9,
+        100.8,
+        100.1,
+        115.9,
+        104.7,
+        103.3
+      ],
+      "Mint after": [
+        97.9,
+        98.6,
+        98.1,
+        100.8,
+        102.2,
+        98.0,
+        99.4,
+        110.6,
+        99.0,
+        99.0,
+        111.0
+      ],
+      "tuned Rust, same rewrite": [
+        258.3,
+        258.5,
+        258.7,
+        259.4,
+        258.7,
+        258.1,
+        258.1,
+        258.5,
+        258.6,
+        258.2,
+        258.6
+      ]
+    },
+    "Newton's method (n=200000, p=50), 10 iterations": {
+      "Mint before": [
+        0.310219926,
+        0.311120654,
+        0.319300293,
+        0.319558857,
+        0.312520722,
+        0.318347326,
+        0.312201157,
+        0.308977006,
+        0.311053318,
+        0.312600261,
+        0.325731753
+      ],
+      "Mint after": [
+        0.162203316,
+        0.163222783,
+        0.159804825,
+        0.159154894,
+        0.16188818,
+        0.161303945,
+        0.162177133,
+        0.160478248,
+        0.160892258,
+        0.161178881,
+        0.159651287
+      ],
+      "max-effort Rust": [
+        0.220375165,
+        0.208298327,
+        0.226959402,
+        0.207808155,
+        0.207112856,
+        0.208665029,
+        0.206670995,
+        0.209972669,
+        0.208659891,
+        0.214929627,
+        0.209198424
+      ]
+    }
+  }
+}

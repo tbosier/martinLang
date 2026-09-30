@@ -119,6 +119,17 @@ fn cumsum_index(ix: &Ix, ax: Ax, _shape: &SShape) -> String {
     ix.at(ax).to_string()
 }
 
+/// Whether any leaf is indexed by row or column (rather than by element).
+fn uses_axes(e: &M) -> bool {
+    match e {
+        M::DataV(_, ax) | M::ParamV(_, ax) | M::Cumsum { ax, .. } => *ax != Ax::Flat,
+        M::MatVec { .. } => true,
+        M::Bin(_, a, b) => uses_axes(a) || uses_axes(b),
+        M::Neg(a) | M::Func(_, a) => uses_axes(a),
+        _ => false,
+    }
+}
+
 /// Active vector parameters indexed along `ax` (Row or Col).
 fn axis_params(e: &M, ax: Ax, out: &mut Vec<String>) {
     match e {
@@ -156,14 +167,64 @@ fn for_shape(g: &mut Mg, sh: &SShape, body: impl FnOnce(&mut Mg, &Ix)) {
             for_range(g, "0", &n, |g, i| body(g, &Ix::vec(i)));
         }
         SShape::Mat(r, c) => {
+            let cm = g.is_cm(r, c);
             let (r, c) = (g.dim(r), g.dim(c));
-            for_range(g, "0", &r, |g, row| {
-                let base = g.f.imul(row, &c);
+            if cm {
+                // column-major storage: element (row, col) is at col * rows + row
                 for_range(g, "0", &c, |g, col| {
-                    let flat = g.f.iadd(&base, col);
-                    body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
+                    let base = g.f.imul(col, &r);
+                    for_range(g, "0", &r, |g, row| {
+                        let flat = g.f.iadd(&base, row);
+                        body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
+                    });
                 });
-            });
+            } else {
+                for_range(g, "0", &r, |g, row| {
+                    let base = g.f.imul(row, &c);
+                    for_range(g, "0", &c, |g, col| {
+                        let flat = g.f.iadd(&base, col);
+                        body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
+                    });
+                });
+            }
+        }
+    }
+}
+
+/// Matrix shapes (rows, cols) that some cumsum runs along. The compiler stores
+/// every model quantity of such a shape column-major (parameters inside the
+/// sampler's vector, data copied once at initialisation, scratch buffers), so
+/// the running sum along a row becomes an elementwise add of whole columns,
+/// and every loop over the shape walks contiguous memory. Users see the
+/// original layout: draws and printed gradients are converted back.
+fn scan_shapes(e: &M, out: &mut Vec<(Dim, Dim)>) {
+    match e {
+        M::Cumsum { inner, shape, .. } => {
+            if let SShape::Mat(r, c) = shape {
+                let k = (r.clone(), c.clone());
+                if !out.contains(&k) {
+                    out.push(k)
+                }
+            }
+            scan_shapes(inner, out);
+        }
+        M::MatVec { vec, .. } => scan_shapes(vec, out),
+        M::Bin(_, a, b) => {
+            scan_shapes(a, out);
+            scan_shapes(b, out);
+        }
+        M::Neg(a) | M::Func(_, a) => scan_shapes(a, out),
+        _ => {}
+    }
+}
+
+/// Shapes of the data matrices in matrix-vector products; those stay row-major.
+fn matvec_shapes(e: &M, out: &mut Vec<(Dim, Dim)>) {
+    let mut mv = Vec::new();
+    matvecs(e, &mut mv);
+    for m in mv {
+        if let M::MatVec { rows, cols, .. } = m {
+            out.push((rows.clone(), cols.clone()));
         }
     }
 }
@@ -425,6 +486,30 @@ struct Mg<'a> {
     /// row-indexed vector parameters, flushed once per row, so the column
     /// loop is a clean reduction that LLVM can vectorise.
     inv_acc: HashMap<(String, Ax), String>,
+    /// Matrix shapes stored column-major (see `scan_shapes`).
+    cm: Vec<(Dim, Dim)>,
+    /// In a fused scan statement: the adjoint of each scan node for the
+    /// current element, summed in a register and stored once.
+    node_acc: HashMap<usize, String>,
+    /// In a fused scan statement: per-lane partial-sum buffers (cols x 4)
+    /// for the gradients of column-indexed vector parameters.
+    col_part: HashMap<String, String>,
+    /// The buffers behind `col_part`, for the whole function; `col_part`
+    /// holds only the current kernel's, so other statements' uses of the same
+    /// parameter are unaffected.
+    part_bufs: HashMap<String, String>,
+    /// In a vectorised kernel: vector accumulators for scalar parameters.
+    vpadj: HashMap<String, String>,
+    /// In a fused scan kernel: where the current element's running-sum
+    /// adjoints live in the group scratch.
+    ad_at: Option<String>,
+    /// In a fused scan kernel: per-element register accumulators for the
+    /// gradients of matrix parameters the kernel owns (stored, not added).
+    elem_acc: HashMap<String, String>,
+    /// Fused scan kernels: per-group scratch (keyed by the first running sum).
+    kscratch: HashMap<usize, String>,
+    /// A precomputed exp(eta) for the next PoissonLog density.
+    exp_override: Option<String>,
 }
 
 impl HasFb for Mg<'_> {
@@ -447,6 +532,15 @@ impl<'a> Mg<'a> {
             gptr: HashMap::new(),
             split: HashMap::new(),
             inv_acc: HashMap::new(),
+            cm: Vec::new(),
+            node_acc: HashMap::new(),
+            col_part: HashMap::new(),
+            part_bufs: HashMap::new(),
+            vpadj: HashMap::new(),
+            ad_at: None,
+            elem_acc: HashMap::new(),
+            kscratch: HashMap::new(),
+            exp_override: None,
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -480,6 +574,27 @@ impl<'a> Mg<'a> {
         }
     }
 
+    fn is_cm(&self, r: &Dim, c: &Dim) -> bool {
+        self.cm.iter().any(|(a, b)| a == r && b == c)
+    }
+
+    /// Emits `store(p[col], acc)` style flushes of column accumulators.
+    fn col_accs_begin(&mut self, params: &[String]) {
+        for p in params {
+            let acc = self.f.acc_new(&fconst(0.0));
+            self.inv_acc.insert((p.clone(), Ax::Col), acc);
+        }
+    }
+
+    fn col_accs_flush(&mut self, params: &[String], col: &str) {
+        for p in params {
+            let acc = self.inv_acc.remove(&(p.clone(), Ax::Col)).unwrap();
+            let v = self.f.acc_get(&acc);
+            let gp = self.gptr[p].clone();
+            self.f.add_to(&gp, col, &v);
+        }
+    }
+
     fn dim(&self, d: &Dim) -> String {
         match d {
             Dim::Const(c) => c.to_string(),
@@ -508,13 +623,26 @@ impl<'a> Mg<'a> {
 
     fn fwd(&mut self, e: &M, ix: &Ix, vals: &mut HashMap<usize, String>) -> String {
         let key = e as *const M as usize;
+        if let Some(v) = vals.get(&key) {
+            return v.clone();
+        }
         let v = match e {
             M::Const(c) => fconst(*c),
             M::DimV(s) => {
                 let d = self.dims[s].clone();
-                self.f.sitofp(&d)
+                let v = self.f.sitofp(&d);
+                self.f.splat(&v)
             }
-            M::DataS(n) => self.data_s[n].clone(),
+            M::DataS(n) => {
+                let v = self.data_s[n].clone();
+                self.f.splat(&v)
+            }
+            M::DataV(n, Ax::Col) if self.f.lanes > 1 => {
+                // lanes run along rows: one value per column, broadcast
+                let p = self.data_p[n].clone();
+                let v = self.f.load_scalar(&p, &ix.col);
+                self.f.splat(&v)
+            }
             M::DataV(n, ax) => {
                 let p = self.data_p[n].clone();
                 self.f.load(&p, ix.at(*ax))
@@ -523,7 +651,15 @@ impl<'a> Mg<'a> {
                 let p = self.data_p[n].clone();
                 self.f.load(&p, &ix.flat)
             }
-            M::ParamS(n) => self.pval[n].clone(),
+            M::ParamS(n) => {
+                let v = self.pval[n].clone();
+                self.f.splat(&v)
+            }
+            M::ParamV(n, Ax::Col) if self.f.lanes > 1 => {
+                let p = self.pptr[n].clone();
+                let v = self.f.load_scalar(&p, &ix.col);
+                self.f.splat(&v)
+            }
             M::ParamV(n, ax) => {
                 let p = self.pptr[n].clone();
                 self.f.load(&p, ix.at(*ax))
@@ -599,10 +735,15 @@ impl<'a> Mg<'a> {
             return;
         }
         let key = e as *const M as usize;
+        if let Some(acc) = self.node_acc.get(&key).cloned() {
+            self.f.acc_add(&acc, adj);
+            return;
+        }
         if let Some((_, Some(ad))) = self.split.get(&key) {
             let ad = ad.clone();
-            let at = match e {
-                M::Cumsum { ax, shape, .. } => cumsum_index(ix, *ax, shape),
+            let at = match (e, &self.ad_at) {
+                (M::Cumsum { .. }, Some(at)) => at.clone(),
+                (M::Cumsum { ax, shape, .. }, None) => cumsum_index(ix, *ax, shape),
                 _ => ix.flat.clone(),
             };
             self.f.add_to(&ad, &at, adj);
@@ -611,8 +752,14 @@ impl<'a> Mg<'a> {
         let i = ix;
         match e {
             M::ParamS(n) => {
-                let acc = self.padj[n].clone();
+                let acc = self.vpadj.get(n).unwrap_or(&self.padj[n]).clone();
                 self.f.acc_add(&acc, adj);
+            }
+            M::ParamV(n, Ax::Col) if self.col_part.contains_key(n) && !self.inv_acc.contains_key(&(n.clone(), Ax::Col)) => {
+                // per-lane partial sums at [col * 4 + lane], reduced later
+                let buf = self.col_part[n].clone();
+                let at = self.f.imul(&ix.col, "4");
+                self.f.add_to(&buf, &at, adj);
             }
             M::ParamV(n, ax) => {
                 if let Some(acc) = self.inv_acc.get(&(n.clone(), *ax)).cloned() {
@@ -624,6 +771,10 @@ impl<'a> Mg<'a> {
                 self.f.add_to(&g, ix.at(*ax), adj);
             }
             M::ParamM(n) => {
+                if let Some(acc) = self.elem_acc.get(n).cloned() {
+                    self.f.acc_add(&acc, adj);
+                    return;
+                }
                 let g = self.gptr[n].clone();
                 self.f.add_to(&g, &ix.flat, adj);
             }
@@ -793,7 +944,10 @@ impl<'a> Mg<'a> {
             Dist::PoissonLog => {
                 // log p(y | eta) = y*eta - exp(eta) - log(y!)  (the last term is data only)
                 let eta = &a[0];
-                let e = self.f.intrinsic1(self.m, "llvm.exp.f64", eta);
+                let e = match self.exp_override.take() {
+                    Some(e) => e,
+                    None => self.f.intrinsic1(self.m, "llvm.exp.f64", eta),
+                };
                 let ye = self.f.fmul(x, eta);
                 let lp = self.f.fsub(&ye, &e);
                 let deta = self.f.fsub(x, &e);
@@ -870,10 +1024,23 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
         }
     }
 
-    gen_init(m, tm, &stmts, opts);
-    gen_logp(m, tm, &stmts, opts);
-    gen_constrain(m, tm, opts);
-    gen_sample_fn(m, tm, opts);
+    let mut cm = Vec::new();
+    if opts.scan_layout {
+        let mut mv = Vec::new();
+        for Stmt::Tilde { lhs, args, .. } in &stmts {
+            for e in std::iter::once(lhs).chain(args) {
+                scan_shapes(e, &mut cm);
+                matvec_shapes(e, &mut mv);
+            }
+        }
+        cm.retain(|s| !mv.contains(s));
+    }
+
+    gen_init(m, tm, &stmts, opts, &cm);
+    gen_logp(m, tm, &stmts, opts, &cm);
+    gen_constrain(m, tm, opts, &cm);
+    let permute = gen_permute(m, tm, opts, &cm);
+    gen_sample_fn(m, tm, opts, permute);
 }
 
 fn panic_model(tm: &TModel, msg: &str) -> ! {
@@ -893,8 +1060,30 @@ fn ss_q(g: &mut Mg, plan: &SsPlan) -> String {
     q
 }
 
-fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
+fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.cm = cm.to_vec();
+    // Column-major data matrices: a transposed copy, made once per sample().
+    for (n, t) in &tm.data {
+        let Ty::Matrix(r, c, _) = t else { continue };
+        if !g.is_cm(r, c) {
+            continue;
+        }
+        let (rd, cd) = (g.dim(r), g.dim(c));
+        let src = g.data_p[n].clone();
+        let size = g.f.imul(&rd, &cd);
+        // the previous sample()'s copy is released (free(NULL) is a no-op)
+        let keep = format!("@mint_model_{}_cm_{n}", tm.name);
+        g.m.globals.push(format!("{keep} = internal global ptr null"));
+        let old = g.f.load_ptr(&keep);
+        g.f.emit(format!("call void @mint_free(ptr {old})"));
+        let dst = g.f.reg();
+        g.f.emit(format!("{dst} = call ptr @mint_alloc(i64 {size})"));
+        g.f.emit(format!("store ptr {dst}, ptr {keep}"));
+        transpose(&mut g, &src, &dst, &rd, &cd);
+        g.f.emit(format!("store ptr {dst}, ptr {}", data_global(&tm.name, n)));
+        g.data_p.insert(n.clone(), dst);
+    }
     // BernoulliLogit and PoissonLog outcomes are data; check their support once.
     for s in stmts {
         let Stmt::Tilde { dist: d @ (Dist::BernoulliLogit | Dist::PoissonLog), lhs, shape, .. } = s else { continue };
@@ -902,7 +1091,16 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
         let checker = if *d == Dist::BernoulliLogit { "mint_check_binary" } else { "mint_check_count" };
         for_shape(&mut g, shape, |g, ix| {
             let v = g.fwd(lhs, ix, &mut HashMap::new());
-            g.f.emit(format!("call void @{checker}(double {v}, i64 {}, ptr {msg})", ix.flat));
+            // report the row-major index whatever the storage order
+            let at = match shape {
+                SShape::Mat(_, c) => {
+                    let c = g.dim(c);
+                    let a = g.f.imul(&ix.row, &c);
+                    g.f.iadd(&a, &ix.col)
+                }
+                _ => ix.flat.clone(),
+            };
+            g.f.emit(format!("call void @{checker}(double {v}, i64 {at}, ptr {msg})"));
         });
     }
     for (k, s) in stmts.iter().enumerate() {
@@ -994,10 +1192,108 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
     g.finish(&header, &["ret void".into()]);
 }
 
-fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
+/// dst[col * rows + row] = src[row * cols + col]
+fn transpose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
+    for_range(g, "0", rows, |g, row| {
+        let base = g.f.imul(row, cols);
+        for_range(g, "0", cols, |g, col| {
+            let i = g.f.iadd(&base, col);
+            let x = g.f.load(src, &i);
+            let j = g.f.imul(col, rows);
+            let j = g.f.iadd(&j, row);
+            g.f.store(&x, dst, &j);
+        });
+    });
+}
+
+/// dst[row * cols + col] = src[col * rows + row]
+fn untranspose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
+    for_range(g, "0", rows, |g, row| {
+        let base = g.f.imul(row, cols);
+        for_range(g, "0", cols, |g, col| {
+            let j = g.f.imul(col, rows);
+            let j = g.f.iadd(&j, row);
+            let x = g.f.load(src, &j);
+            let i = g.f.iadd(&base, col);
+            g.f.store(&x, dst, &i);
+        });
+    });
+}
+
+/// min(1, n): the column range of a peeled first iteration.
+fn first_of(g: &mut Mg, n: &str) -> String {
+    let c = g.f.reg();
+    g.f.emit(format!("{c} = icmp sgt i64 {n}, 0"));
+    let r = g.f.reg();
+    g.f.emit(format!("{r} = select i1 {c}, i64 1, i64 0"));
+    r
+}
+
+fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
-    let (layout, total) = g.layout(tm);
-    g.f.memzero(g.m, "%grad", &total);
+    g.cm = cm.to_vec();
+    let (layout, _total) = g.layout(tm);
+
+    // Statement fusion. An element-wise statement over the same column-major
+    // shape as a fused scan (a prior on the scanned matrix, say) is absorbed
+    // into the scan's reverse loop instead of making its own pass. A matrix
+    // parameter all of whose gradient contributions happen in that loop, one
+    // visit per element, is owned by it: its gradient is summed in a register
+    // and stored once, and needs no zeroing.
+    let mut absorbed: Vec<Option<usize>> = vec![None; stmts.len()];
+    let mut owned: HashMap<usize, Vec<String>> = HashMap::new();
+    if opts.scan_fusion {
+        for (h, s) in stmts.iter().enumerate() {
+            let Stmt::Tilde { dist, lhs, args, shape, ss: None, fission } = s else { continue };
+            if absorbed[h].is_some() || fused_scan_rows(&g, lhs, args, shape, *fission).is_none() {
+                continue;
+            }
+            let vec_host = kernel_lanes(*dist, lhs, args, *fission) > 1;
+            for (t, s2) in stmts.iter().enumerate() {
+                let Stmt::Tilde { dist: d2, lhs: l2, args: a2, shape: sh2, ss: None, fission: f2 } = s2 else { continue };
+                if t == h || absorbed[t].is_some() || sh2 != shape || !stmt_globals(l2, a2, *f2).is_empty() {
+                    continue;
+                }
+                if uses_axes(l2) || a2.iter().any(uses_axes) {
+                    continue;
+                }
+                if vec_host && kernel_lanes(*d2, l2, a2, *f2) == 1 {
+                    continue;
+                }
+                absorbed[t] = Some(h);
+            }
+            for (n, ty) in &tm.params {
+                let Ty::Matrix(r, c, _) = ty else { continue };
+                if &SShape::Mat(r.clone(), c.clone()) != shape {
+                    continue;
+                }
+                let only_here = stmts.iter().enumerate().all(|(t, s2)| {
+                    let Stmt::Tilde { lhs: l2, args: a2, .. } = s2;
+                    let m = mentions(l2, n) || a2.iter().any(|a| mentions(a, n));
+                    !m || t == h || absorbed[t] == Some(h)
+                });
+                let in_scans_only = !mentions_outside_scans(lhs, n) && !args.iter().any(|a| mentions_outside_scans(a, n));
+                if only_here && in_scans_only {
+                    owned.entry(h).or_default().push(n.clone());
+                }
+            }
+        }
+    }
+    // Zero the gradient of every parameter whose gradient is accumulated
+    // (scalars and Positive vectors are stored at the end; owned matrices
+    // are stored by their kernel).
+    let owned_all: Vec<String> = owned.values().flatten().cloned().collect();
+    for ((n, t), (_, off, size)) in tm.params.iter().zip(&layout) {
+        let zero = match t {
+            Ty::Vector(_, d) => *d != Dom::Positive,
+            Ty::Matrix(..) => !owned_all.contains(n),
+            _ => false,
+        };
+        if zero {
+            let p = g.f.gep("%grad", off);
+            g.f.memzero(g.m, &p, size.as_ref().unwrap());
+        }
+    }
     let lp = g.f.acc_new(&fconst(0.0));
 
     // Scratch buffers: constrained values and adjoints of Positive vector
@@ -1010,8 +1306,24 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
         }
     }
     let mut ws_slots: Vec<(usize, String, bool)> = Vec::new(); // (node, len, active)
+    let mut part_slots: Vec<(String, String)> = Vec::new(); // (param, 4 * cols)
+    let mut kscr_slots: Vec<(usize, String)> = Vec::new(); // (first node, doubles)
     for s in stmts {
-        let Stmt::Tilde { lhs, args, fission, ss: None, .. } = s else { continue };
+        let Stmt::Tilde { lhs, args, fission, ss: None, shape, .. } = s else { continue };
+        if opts.scan_fusion && fused_scan_rows(&g, lhs, args, shape, *fission).is_some() {
+            let SShape::Mat(_, c) = shape else { unreachable!() };
+            let nodes = stmt_globals(lhs, args, *fission);
+            let per = g.dim(c);
+            let per = g.f.imul(&per, &(KERNEL_WIDTH * (1 + nodes.len() as u32)).to_string());
+            kscr_slots.push((nodes[0] as *const M as usize, per));
+            let n4 = g.dim(c);
+            let n4 = g.f.imul(&n4, "4");
+            for p in fused_col_params(lhs, args, *fission) {
+                if !part_slots.iter().any(|(q, _)| q == &p) {
+                    part_slots.push((p, n4.clone()));
+                }
+            }
+        }
         for node in stmt_globals(lhs, args, *fission) {
             let n = match node {
                 M::MatVec { rows, .. } => g.dim(rows),
@@ -1041,6 +1353,14 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
             let v = buf(&mut g, &len);
             let a = buf(&mut g, &len);
             pos_bufs.insert(name, (v, a, len));
+        }
+        for (p, n4) in part_slots {
+            let b = buf(&mut g, &n4);
+            g.part_bufs.insert(p, b);
+        }
+        for (k, n) in kscr_slots {
+            let b = buf(&mut g, &n);
+            g.kscratch.insert(k, b);
         }
     }
 
@@ -1085,6 +1405,9 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
 
     for (k, s) in stmts.iter().enumerate() {
         let Stmt::Tilde { dist, lhs, args, shape, ss, fission } = s;
+        if absorbed[k].is_some() {
+            continue; // emitted inside its host's kernel
+        }
         if let Some(plan) = ss {
             let n = match shape {
                 SShape::Vec(n) => n,
@@ -1094,6 +1417,12 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
             continue;
         }
         let nodes = stmt_globals(lhs, args, *fission);
+        if fused_scan_rows(&g, lhs, args, shape, *fission).is_some() && opts.scan_fusion {
+            let guests: Vec<&Stmt> = stmts.iter().enumerate().filter(|(t, _)| absorbed[*t] == Some(k)).map(|(_, s)| s).collect();
+            let own = owned.get(&k).cloned().unwrap_or_default();
+            gen_fused_scan(&mut g, *dist, lhs, args, shape, &nodes, &guests, &own, &lp);
+            continue;
+        }
         // before the loop: materialise each node (children first)
         for node in &nodes {
             let key = *node as *const M as usize;
@@ -1104,6 +1433,33 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
                     let n = g.dim(rows);
                     let fw2 = fw.clone();
                     rows_dot_blocked(&mut g, &mp, &vp, &c, &n, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
+                }
+                M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
+                    // Column-major: column c of the running sum is column c-1
+                    // plus column c of the operand, a contiguous vector loop.
+                    let (rows, cols) = (g.dim(rd), g.dim(cd));
+                    let fw2 = fw.clone();
+                    let pass = |g: &mut Mg, lo: &str, hi: &str, first: bool| {
+                        for_range(g, lo, hi, |g, col| {
+                            let base = g.f.imul(col, &rows);
+                            for_range(g, "0", &rows, |g, row| {
+                                let flat = g.f.iadd(&base, row);
+                                let ix = Ix { flat: flat.clone(), row: row.to_string(), col: col.to_string() };
+                                let v = g.fwd(inner, &ix, &mut HashMap::new());
+                                let s = if first {
+                                    v
+                                } else {
+                                    let p = g.f.iop("sub nsw", &flat, &rows);
+                                    let prev = g.f.load(&fw2, &p);
+                                    g.f.fadd(&prev, &v)
+                                };
+                                g.f.store(&s, &fw2, &flat);
+                            });
+                        });
+                    };
+                    let one = first_of(&mut g, &cols);
+                    pass(&mut g, "0", &one, true);
+                    pass(&mut g, &one, &cols, false);
                 }
                 M::Cumsum { inner, shape: own, .. } => {
                     let (rows, cols) = match own {
@@ -1169,6 +1525,32 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
             }
         };
         match shape {
+            SShape::Mat(r, c) if nodes.is_empty() && !uses_axes(lhs) && !args.iter().any(uses_axes) => {
+                // every leaf is indexed by the element itself: one flat loop,
+                // whatever the storage order
+                let (r, c) = (g.dim(r), g.dim(c));
+                let n = g.f.imul(&r, &c);
+                for_range(&mut g, "0", &n, |g, i| body(g, &Ix::vec(i)));
+            }
+            SShape::Mat(r, c) if g.is_cm(r, c) => {
+                // Column-major: column outer, row inner (contiguous). Gradients of
+                // column-indexed parameters are summed in registers per column.
+                let mut cp = Vec::new();
+                axis_params(lhs, Ax::Col, &mut cp);
+                for a in args.iter() {
+                    axis_params(a, Ax::Col, &mut cp);
+                }
+                let (r, c) = (g.dim(r), g.dim(c));
+                for_range(&mut g, "0", &c, |g, col| {
+                    g.col_accs_begin(&cp);
+                    let base = g.f.imul(col, &r);
+                    for_range(g, "0", &r, |g, row| {
+                        let flat = g.f.iadd(&base, row);
+                        body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
+                    });
+                    g.col_accs_flush(&cp, col);
+                });
+            }
             SShape::Mat(r, c) => {
                 // Outer loop over one dimension, inner over the other. Gradient
                 // contributions to parameters indexed by the outer dimension are
@@ -1215,6 +1597,43 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
                     };
                     let ad2 = ad.clone();
                     rows_axpy_blocked(&mut g, &mp, &c, &n, &move |g: &mut Mg, i: &str| g.f.load(&ad2, i), &gp);
+                }
+                M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
+                    // Reverse running sum, column by column from the last, in
+                    // place in the adjoint buffer.
+                    let (rows, cols) = (g.dim(rd), g.dim(cd));
+                    let mut cp = Vec::new();
+                    axis_params(inner, Ax::Col, &mut cp);
+                    let last = g.f.iop("sub nsw", &cols, "1");
+                    let ad2 = ad.clone();
+                    let pass = |g: &mut Mg, lo: &str, hi: &str, first: bool| {
+                        for_range(g, lo, hi, |g, k| {
+                            let col = g.f.iop("sub nsw", &last, k);
+                            g.col_accs_begin(&cp);
+                            let base = g.f.imul(&col, &rows);
+                            for_range(g, "0", &rows, |g, row| {
+                                let flat = g.f.iadd(&base, row);
+                                let a = g.f.load(&ad2, &flat);
+                                let sum = if first {
+                                    a
+                                } else {
+                                    let nx = g.f.iadd(&flat, &rows);
+                                    let b = g.f.load(&ad2, &nx);
+                                    let s = g.f.fadd(&a, &b);
+                                    g.f.store(&s, &ad2, &flat);
+                                    s
+                                };
+                                let ix = Ix { flat: flat.clone(), row: row.to_string(), col: col.clone() };
+                                let mut vals = HashMap::new();
+                                g.fwd(inner, &ix, &mut vals);
+                                g.bwd(inner, &sum, &ix, &vals);
+                            });
+                            g.col_accs_flush(&cp, &col);
+                        });
+                    };
+                    let one = first_of(&mut g, &cols);
+                    pass(&mut g, "0", &one, true);
+                    pass(&mut g, &one, &cols, false);
                 }
                 M::Cumsum { inner, shape: own, .. } => {
                     // adjoint of a running sum: a reverse running sum
@@ -1294,6 +1713,461 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
     let r = g.f.acc_get(&lp);
     let header = format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name);
     g.finish(&header, &[format!("ret double {r}")]);
+}
+
+/// A matrix-shaped statement whose only materialised nodes are running sums
+/// over its own (column-major) shape can run as one fused, blocked loop
+/// nest. Returns its row dimension when that applies.
+fn fused_scan_rows(g: &Mg, lhs: &M, args: &[M], shape: &SShape, fission: bool) -> Option<Dim> {
+    let SShape::Mat(r, c) = shape else { return None };
+    if !g.is_cm(r, c) {
+        return None;
+    }
+    let nodes = stmt_globals(lhs, args, fission);
+    if nodes.is_empty() {
+        return None;
+    }
+    for n in &nodes {
+        match n {
+            M::Cumsum { shape: own, ax: Ax::Flat, .. } if own == shape && n.active() => {}
+            _ => return None,
+        }
+    }
+    Some(r.clone())
+}
+
+/// Whether `e` refers to the name `n` anywhere (inside running sums too).
+fn mentions(e: &M, n: &str) -> bool {
+    match e {
+        M::DataV(x, _) | M::ParamV(x, _) | M::DataM(x) | M::ParamM(x) | M::ParamS(x) | M::DataS(x) => x == n,
+        M::MatVec { mat, vec, .. } => mat == n || mentions(vec, n),
+        M::Cumsum { inner, .. } => mentions(inner, n),
+        M::Bin(_, a, b) => mentions(a, n) || mentions(b, n),
+        M::Neg(a) | M::Func(_, a) => mentions(a, n),
+        _ => false,
+    }
+}
+
+/// Whether `e` refers to `n` outside every running sum.
+fn mentions_outside_scans(e: &M, n: &str) -> bool {
+    match e {
+        M::Cumsum { .. } => false,
+        M::MatVec { vec, .. } => mentions_outside_scans(vec, n),
+        M::Bin(_, a, b) => mentions_outside_scans(a, n) || mentions_outside_scans(b, n),
+        M::Neg(a) | M::Func(_, a) => mentions_outside_scans(a, n),
+        _ => mentions(e, n),
+    }
+}
+
+/// Vector width of the fused kernel of a scan statement: 4, or 1 when some
+/// operation has no vector form yet.
+fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
+    let inner_ok = stmt_globals(lhs, args, fission).iter().all(|n| vec_ok(n));
+    if dist != Dist::BernoulliLogit && vec_ok(lhs) && args.iter().all(vec_ok) && inner_ok {
+        4
+    } else {
+        1
+    }
+}
+
+/// Rows per group in a fused scan kernel: UNROLL vectors of 4 lanes.
+const KERNEL_UNROLL: u32 = 2;
+const KERNEL_WIDTH: u32 = 4 * KERNEL_UNROLL;
+
+/// Column-indexed vector parameters of a fused scan statement.
+fn fused_col_params(lhs: &M, args: &[M], fission: bool) -> Vec<String> {
+    let mut cp = Vec::new();
+    axis_params(lhs, Ax::Col, &mut cp);
+    for a in args {
+        axis_params(a, Ax::Col, &mut cp);
+    }
+    for n in stmt_globals(lhs, args, fission) {
+        if let M::Cumsum { inner, .. } = n {
+            axis_params(inner, Ax::Col, &mut cp);
+        }
+    }
+    cp
+}
+
+/// Whether the vectorised kernel can emit this expression (everything but
+/// the few operations still written as scalar instructions).
+fn vec_ok(e: &M) -> bool {
+    match e {
+        M::Func(Func::Abs | Func::Log1p, _) => false,
+        M::Func(_, a) | M::Neg(a) => vec_ok(a),
+        M::Bin(_, a, b) => vec_ok(a) && vec_ok(b),
+        M::Cumsum { inner, .. } => vec_ok(inner),
+        M::MatVec { .. } => false,
+        _ => true,
+    }
+}
+
+/// Fused, vectorised form of a statement over a column-major R x C shape
+/// whose running sums run along C (the time axis of a panel of series).
+///
+/// The rows are taken four at a time, one row per vector lane; because the
+/// storage is column-major, four adjacent rows at one column are one
+/// contiguous vector load. For each group of rows:
+///
+///   forward, column by column: each running sum is a vector register (its
+///   carry) plus the operand; the likelihood term and its derivatives follow
+///   immediately, and each running sum's adjoint is stored once;
+///   reverse, from the last column: a second register carries each adjoint's
+///   reverse running sum, which is pushed through the operand.
+///
+/// Gradients of row-indexed parameters stay in registers for the whole
+/// group; those of column-indexed parameters go to per-lane partial sums
+/// (C x 4, reduced once at the end); scalar parameters and the log density
+/// use vector accumulators. The rows left over (R mod 4) run through the
+/// same generator with one lane. Nothing but the adjoints (C x 4 doubles per
+/// group, in L1) is written besides the gradient.
+#[allow(clippy::too_many_arguments)]
+fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, nodes: &[&M], guests: &[&Stmt], owned: &[String], lp: &str) {
+    let SShape::Mat(rd, cd) = shape else { unreachable!() };
+    let (rows, cols) = (g.dim(rd), g.dim(cd));
+    let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
+    let ad: Vec<String> = keys.iter().map(|k| g.split[k].1.clone().expect("a running sum over parameters")).collect();
+    let inner: Vec<&M> = nodes
+        .iter()
+        .map(|n| match n {
+            M::Cumsum { inner, .. } => &**inner,
+            _ => unreachable!(),
+        })
+        .collect();
+    let mut rp = Vec::new();
+    axis_params(lhs, Ax::Row, &mut rp);
+    for a in args {
+        axis_params(a, Ax::Row, &mut rp);
+    }
+    for e in &inner {
+        axis_params(e, Ax::Row, &mut rp);
+    }
+    let cp: Vec<String> = fused_col_params(lhs, args, false);
+    g.col_part = cp.iter().map(|p| (p.clone(), g.part_bufs[p].clone())).collect();
+    let lanes = kernel_lanes(dist, lhs, args, false);
+    let last = g.f.iop("sub nsw", &cols, "1");
+    let n4 = g.f.imul(&cols, "4");
+    for p in &cp {
+        let b = g.col_part[p].clone();
+        g.f.memzero(g.m, &b, &n4);
+    }
+
+    // One group of `u` vectors of `l` rows starting at r0 (u * l rows in all),
+    // accumulating the log density in `lpa`. The u copies are independent
+    // (their own carries and accumulators), which gives the CPU u chains and
+    // uses whole cache lines.
+    let group = |g: &mut Mg, l: u32, u: u32, r0: &str, lpa: &[String], vps: &[HashMap<String, String>]| {
+        g.f.lanes = l;
+        let use_copy_accs = |g: &mut Mg, k: usize| {
+            if !vps.is_empty() {
+                g.vpadj = vps[k].clone();
+            }
+        };
+        // one register per column-indexed parameter per column, shared by the
+        // copies, then one update of the per-lane partial sums
+        let col_begin = |g: &mut Mg| {
+            for p in &cp {
+                let acc = g.f.acc_new(&fconst(0.0));
+                g.inv_acc.insert((p.clone(), Ax::Col), acc);
+            }
+        };
+        let col_flush = |g: &mut Mg, col: &str| {
+            for p in &cp {
+                let acc = g.inv_acc.remove(&(p.clone(), Ax::Col)).unwrap();
+                let v = g.f.acc_get(&acc);
+                let b = g.col_part[p].clone();
+                let at = g.f.imul(col, "4");
+                g.f.add_to(&b, &at, &v);
+            }
+        };
+        let r0s: Vec<String> = (0..u).map(|k| g.f.iadd(r0, &(k * l).to_string())).collect();
+        // The adjoints of this group's running sums live in a small contiguous
+        // scratch, [col * (u * l) + k * l + lane], reused by every group: it
+        // stays in L1, where the full-matrix index would scatter it.
+        let width = (u * l).to_string();
+        let ad_at = |g: &mut Mg, col: &str, k: usize| {
+            let a = g.f.imul(col, &width);
+            g.f.iadd(&a, &(k as u32 * l).to_string())
+        };
+        let row_accs: Vec<Vec<String>> = (0..u).map(|_| rp.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
+        let carry: Vec<Vec<String>> = (0..u).map(|_| keys.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
+        let use_row_accs = |g: &mut Mg, k: usize| {
+            for (p, acc) in rp.iter().zip(&row_accs[k]) {
+                g.inv_acc.insert((p.clone(), Ax::Row), acc.clone());
+            }
+        };
+        // The density's own exp runs in a pass of its own when there is one
+        // (PoissonLog): A computes the running sums and eta into an L1
+        // scratch, B takes exp over the scratch with nothing else live (so
+        // its constants stay in registers), C finishes the density and its
+        // derivatives. Otherwise the three are one loop.
+        //
+        // One scratch slot holds eta, then exp(eta) (B works in place), then
+        // the first running sum's adjoint (C overwrites each exp value after
+        // reading it); the running sums have one slot each. With 8 rows and
+        // 150 columns that is 19 KB, which stays in L1.
+        let split = dist == Dist::PoissonLog;
+        let scr = g.kscratch[&keys[0]].clone();
+        let cw = g.f.imul(&cols, &width);
+        let eta_p = scr.clone();
+        let ex_p = scr.clone();
+        let s_p: Vec<String> = (0..keys.len())
+            .map(|j| {
+                let o = g.f.imul(&cw, &(1 + j).to_string());
+                g.f.gep(&scr, &o)
+            })
+            .collect();
+        // adjoints: the first running sum's in the shared slot when split
+        // (only with a single running sum: a nested one's parent adds into
+        // its child's adjoint through the general buffer)
+        let alias = split && keys.len() == 1;
+        let ad: Vec<String> = ad.iter().enumerate().map(|(j, a)| if alias && j == 0 { scr.clone() } else { a.clone() }).collect();
+        if split {
+            for_range(g, "0", &cols, |g, col| {
+                let base = g.f.imul(col, &rows);
+                for k in 0..u as usize {
+                    let flat = g.f.iadd(&base, &r0s[k]);
+                    let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+                    let at = ad_at(g, col, k);
+                    let mut vals = HashMap::new();
+                    for (j, e) in inner.iter().enumerate() {
+                        let v = g.fwd(e, &ix, &mut vals);
+                        let prev = g.f.acc_get(&carry[k][j]);
+                        let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
+                        let t = g.f.ty();
+                        g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
+                        g.f.store(&s, &s_p[j], &at);
+                        vals.insert(keys[j], s);
+                    }
+                    let eta = g.fwd(&args[0], &ix, &mut vals);
+                    g.f.store(&eta, &eta_p, &at);
+                }
+            });
+            let n = g.f.imul(&cols, &u.to_string());
+            for_range(g, "0", &n, |g, i| {
+                let at = g.f.imul(i, &l.to_string());
+                let eta = g.f.load(&eta_p, &at);
+                let e = g.f.intrinsic1(g.m, "llvm.exp.f64", &eta);
+                g.f.store(&e, &ex_p, &at);
+            });
+        }
+        // C: the density and its derivatives at column col (each running
+        // sum's adjoint stored); R: the reverse running sums at column col
+        let c_col = |g: &mut Mg, col: &str| {
+            let base = g.f.imul(col, &rows);
+        for k in 0..u as usize {
+            use_row_accs(g, k);
+            use_copy_accs(g, k);
+            let flat = g.f.iadd(&base, &r0s[k]);
+            let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+            let at = ad_at(g, col, k);
+            let mut vals = HashMap::new();
+            for (j, e) in inner.iter().enumerate() {
+                let s = if split {
+                    g.f.load(&s_p[j], &at)
+                } else {
+                    let v = g.fwd(e, &ix, &mut vals);
+                    let prev = g.f.acc_get(&carry[k][j]);
+                    let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
+                    let t = g.f.ty();
+                    g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
+                    // kept for the reverse pass, where a nested running
+                    // sum's operand may need its child's value
+                    g.f.store(&s, &s_p[j], &at);
+                    s
+                };
+                vals.insert(keys[j], s);
+            }
+            for key in &keys {
+                let acc = g.f.acc_new(&fconst(0.0));
+                g.node_acc.insert(*key, acc);
+            }
+            let x = g.fwd(lhs, &ix, &mut vals);
+            let a: Vec<String> = args.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
+            if split {
+                let e = g.f.load(&ex_p, &at);
+                g.exp_override = Some(e);
+            }
+            let (term, partials) = g.lpdf(dist, &x, &a);
+            g.f.acc_add(&lpa[k % lpa.len()], &term);
+            g.bwd(lhs, &partials[0], &ix, &vals);
+            for (e, d) in args.iter().zip(&partials[1..]) {
+                g.bwd(e, d, &ix, &vals);
+            }
+            for (j, key) in keys.iter().enumerate() {
+                let acc = g.node_acc.remove(key).unwrap();
+                let v = g.f.acc_get(&acc);
+                g.f.store(&v, &ad[j], &at);
+            }
+        }
+        };
+        let r_col = |g: &mut Mg, col: &str| {
+            let base = g.f.imul(col, &rows);
+        for k in 0..u as usize {
+            use_row_accs(g, k);
+            use_copy_accs(g, k);
+            let flat = g.f.iadd(&base, &r0s[k]);
+            let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+            let at = ad_at(g, col, k);
+            g.ad_at = Some(at.clone());
+            for n in owned {
+                let acc = g.f.acc_new(&fconst(0.0));
+                g.elem_acc.insert(n.clone(), acc);
+            }
+            for j in (0..keys.len()).rev() {
+                let a = g.f.load(&ad[j], &at);
+                let prev = g.f.acc_get(&carry[k][j]);
+                let sum = g.f.fadd(&prev, &a);
+                let t = g.f.ty();
+                g.f.emit(format!("store {t} {sum}, ptr {}", carry[k][j]));
+                // the values of the running sums nested inside this one
+                let mut vals = HashMap::new();
+                for i in 0..j {
+                    let v = g.f.load(&s_p[i], &at);
+                    vals.insert(keys[i], v);
+                }
+                g.fwd(inner[j], &ix, &mut vals);
+                g.bwd(inner[j], &sum, &ix, &vals);
+            }
+            g.ad_at = None;
+            // absorbed element-wise statements over the same elements
+            for Stmt::Tilde { dist: d2, lhs: l2, args: a2, .. } in guests {
+                let mut vals = HashMap::new();
+                let x = g.fwd(l2, &ix, &mut vals);
+                let av: Vec<String> = a2.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
+                let (term, partials) = g.lpdf(*d2, &x, &av);
+                g.f.acc_add(&lpa[k % lpa.len()], &term);
+                g.bwd(l2, &partials[0], &ix, &vals);
+                for (e, d) in a2.iter().zip(&partials[1..]) {
+                    g.bwd(e, d, &ix, &vals);
+                }
+            }
+            for n in owned {
+                let acc = g.elem_acc.remove(n).unwrap();
+                let v = g.f.acc_get(&acc);
+                let gp = g.gptr[n].clone();
+                g.f.store(&v, &gp, &flat);
+            }
+        }
+        };
+        let t = g.f.ty();
+        let zero = g.f.opnd(&fconst(0.0));
+        if split {
+            // With the running sums already in the scratch, C does not depend
+            // on the column order, so it runs backwards together with R: each
+            // adjoint goes straight into the reverse running sum.
+            for c in carry.iter().flatten() {
+                g.f.emit(format!("store {t} {zero}, ptr {c}"));
+            }
+            for_range(g, "0", &cols, |g, kk| {
+                let col = g.f.iop("sub nsw", &last, kk);
+                col_begin(g);
+                c_col(g, &col);
+                r_col(g, &col);
+                col_flush(g, &col);
+            });
+        } else {
+            for_range(g, "0", &cols, |g, col| {
+                col_begin(g);
+                c_col(g, col);
+                col_flush(g, col);
+            });
+            // reverse: parents before children, so a parent's contribution to
+            // a child's adjoint at this element is in place before the child
+            // reads it
+            for c in carry.iter().flatten() {
+                g.f.emit(format!("store {t} {zero}, ptr {c}"));
+            }
+            for_range(g, "0", &cols, |g, kk| {
+                let col = g.f.iop("sub nsw", &last, kk);
+                col_begin(g);
+                r_col(g, &col);
+                col_flush(g, &col);
+            });
+        }
+        g.vpadj.clear();
+        for k in 0..u as usize {
+            for (p, acc) in rp.iter().zip(&row_accs[k]) {
+                g.inv_acc.remove(&(p.clone(), Ax::Row));
+                let v = g.f.acc_get(acc);
+                let gp = g.gptr[p].clone();
+                g.f.add_to(&gp, &r0s[k], &v);
+            }
+        }
+        g.f.lanes = 1;
+    };
+
+    // groups of UNROLL vectors, then single vectors, then single rows (all of
+    // them when the statement is not vectorised)
+    const UNROLL: u32 = KERNEL_UNROLL;
+    let wide = (lanes * UNROLL).to_string();
+    let groups = g.f.iop("sdiv", &rows, &wide);
+    let done_wide = g.f.imul(&groups, &wide);
+    let rest = g.f.iop("sub nsw", &rows, &done_wide);
+    let singles = g.f.iop("sdiv", &rest, &lanes.to_string());
+    let s_end = g.f.imul(&singles, &lanes.to_string());
+    let done = if lanes > 1 { g.f.iadd(&done_wide, &s_end) } else { "0".to_string() };
+    if lanes > 1 {
+        // vector accumulators for the log density and the scalar parameters
+        // one vector accumulator per copy for the log density and each scalar
+        // parameter, so the copies do not wait on each other
+        g.f.lanes = lanes;
+        let lpv: Vec<String> = (0..UNROLL).map(|_| g.f.acc_new(&fconst(0.0))).collect();
+        let scalars: Vec<String> = g.padj.keys().cloned().collect();
+        let vps: Vec<HashMap<String, String>> =
+            (0..UNROLL).map(|_| scalars.iter().map(|n| (n.clone(), g.f.acc_new(&fconst(0.0)))).collect()).collect();
+        g.f.lanes = 1;
+        for_range(g, "0", &groups, |g, b| {
+            let r0 = g.f.imul(b, &wide);
+            group(g, lanes, UNROLL, &r0, &lpv, &vps);
+        });
+        let d2 = done_wide.clone();
+        for_range(g, "0", &singles, |g, b| {
+            let off = g.f.imul(b, &lanes.to_string());
+            let r0 = g.f.iadd(&d2, &off);
+            group(g, lanes, 1, &r0, &lpv, &vps);
+        });
+        g.f.lanes = lanes;
+        let mut tot = g.f.acc_get(&lpv[0]);
+        for a in &lpv[1..] {
+            let v = g.f.acc_get(a);
+            tot = g.f.fadd(&tot, &v);
+        }
+        let s = g.f.hsum(g.m, &tot);
+        let mut sums = Vec::new();
+        for n in &scalars {
+            let mut tot = g.f.acc_get(&vps[0][n]);
+            for m in &vps[1..] {
+                let v = g.f.acc_get(&m[n]);
+                tot = g.f.fadd(&tot, &v);
+            }
+            sums.push((n.clone(), g.f.hsum(g.m, &tot)));
+        }
+        g.f.lanes = 1;
+        g.f.acc_add(lp, &s);
+        for (n, v) in sums {
+            let acc = g.padj[&n].clone();
+            g.f.acc_add(&acc, &v);
+        }
+    }
+    let lp1 = [lp.to_string()];
+    for_range(g, &done, &rows, |g, r| group(g, 1, 1, r, &lp1, &[]));
+    // column-indexed gradients: reduce the four per-lane partial sums
+    for p in &cp {
+        let b = g.col_part[p].clone();
+        let gp = g.gptr[p].clone();
+        for_range(g, "0", &cols, |g, c| {
+            let at = g.f.imul(c, "4");
+            let mut tot = g.f.load(&b, &at);
+            for l in 1..4 {
+                let i = g.f.iadd(&at, &l.to_string());
+                let x = g.f.load(&b, &i);
+                tot = g.f.fadd(&tot, &x);
+            }
+            g.f.add_to(&gp, c, &tot);
+        });
+    }
+    g.col_part.clear();
 }
 
 fn gen_ss_logp(g: &mut Mg, tm: &TModel, k: usize, plan: &SsPlan, sigma: &M, len: &Dim, lp: &str) {
@@ -1407,12 +2281,20 @@ fn gen_ss_logp(g: &mut Mg, tm: &TModel, k: usize, plan: &SsPlan, sigma: &M, len:
     }
 }
 
-fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts) {
+fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.cm = cm.to_vec();
     let (layout, total) = g.layout(tm);
     g.f.memcpy(g.m, "%out", "%unc", &total);
     for ((_, t), (_, off, _)) in tm.params.iter().zip(&layout) {
         match t {
+            Ty::Matrix(r, c, _) if g.is_cm(r, c) => {
+                // back to row-major for the draws
+                let (rd, cd) = (g.dim(r), g.dim(c));
+                let src = g.f.gep("%unc", off);
+                let dst = g.f.gep("%out", off);
+                untranspose(&mut g, &src, &dst, &rd, &cd);
+            }
             Ty::Scalar(Dom::Positive) => {
                 let u = g.f.load("%unc", off);
                 let v = g.f.intrinsic1(g.m, "llvm.exp.f64", &u);
@@ -1435,8 +2317,49 @@ fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts) {
     g.finish(&header, &["ret void".into()]);
 }
 
-fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts) {
+/// Converts an unconstrained vector between the user's row-major layout and
+/// the internal one (`_to_internal`, `_to_user`), for the runtime's gradient
+/// benchmark and printout. Returns false when the layouts are the same.
+fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> bool {
+    let any = tm.params.iter().any(|(_, t)| matches!(t, Ty::Matrix(r, c, _) if cm.contains(&(r.clone(), c.clone()))));
+    if !any {
+        return false;
+    }
+    for inward in [true, false] {
+        let mut g = Mg::new(m, tm, opts.strict_fp);
+        g.cm = cm.to_vec();
+        let (layout, total) = g.layout(tm);
+        g.f.memcpy(g.m, "%dst", "%src", &total);
+        for ((_, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+            let Ty::Matrix(r, c, _) = t else { continue };
+            if !g.is_cm(r, c) {
+                continue;
+            }
+            let (rd, cd) = (g.dim(r), g.dim(c));
+            let src = g.f.gep("%src", off);
+            let dst = g.f.gep("%dst", off);
+            if inward {
+                transpose(&mut g, &src, &dst, &rd, &cd);
+            } else {
+                untranspose(&mut g, &src, &dst, &rd, &cd);
+            }
+        }
+        let which = if inward { "to_internal" } else { "to_user" };
+        let header = format!("define void @mint_model_{}_{which}(ptr %src, ptr %dst)", tm.name);
+        g.finish(&header, &["ret void".into()]);
+    }
+    true
+}
+
+fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.m.declare("declare void @mint_set_layout(ptr, ptr)");
+    if permute {
+        let n = &tm.name;
+        g.f.emit(format!("call void @mint_set_layout(ptr @mint_model_{n}_to_internal, ptr @mint_model_{n}_to_user)"));
+    } else {
+        g.f.emit("call void @mint_set_layout(ptr null, ptr null)");
+    }
     let (layout, total) = g.layout(tm);
     let k = tm.params.len();
     let names = g.f.alloca(&format!("[{k} x ptr]"));

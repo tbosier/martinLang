@@ -75,8 +75,8 @@ bulk and tail ESS ≥ 400.
 
 | implementation | wall time | converged | max R-hat | min bulk ESS | min bulk ESS per second | gradients |
 |---|---|---|---|---|---|---|
-| Mint | 8.3 s | yes | 1.002 | 2301 | 276 | 2.00 M |
-| hand-written Rust | 6.6 s | yes | 1.003 | 1983 | 299 | 2.02 M |
+| Mint | 6.6 s | yes | 1.003 | 2559 | 387 | 2.01 M |
+| hand-written Rust | 6.6 s | yes | 1.003 | 1983 | 300 | 2.02 M |
 | Stan, stanc `--O1` | 48.5 s | yes | 1.002 | 1860 | 38.3 | 2.01 M |
 | Stan, stanc default (`--O0`) | 67.7 s | yes | 1.002 | 1860 | 27.5 | 2.01 M |
 | rustmc | 7.0 s | **no** | 1.953 | 6 | not usable | n/a |
@@ -85,18 +85,21 @@ bulk and tail ESS ≥ 400.
 
 | implementation | draws | wall time | max R-hat | min bulk ESS | gradients | wall time per gradient, per chain, including the sampler |
 |---|---|---|---|---|---|---|
-| Mint | 1000 + 1000 | 278 s | 1.009 | 463 | 3.66 M | 0.30 ms |
-| hand-written Rust | 1000 + 1000 | 220 s | 1.009 | 449 | 3.67 M | 0.24 ms |
+| Mint | 1000 + 1000 | 226 s | 1.007 | 503 | 3.71 M | 0.24 ms |
+| hand-written Rust | 1000 + 1000 | 196 s | 1.009 | 449 | 3.67 M | 0.21 ms |
 | Stan (stanc default `--O0`) | 300 + 300 | 3322 s | 1.023 | 125 | 1.19 M | 11.2 ms |
 | rustmc | 1000 + 125 × 8 | 109 s | 2.565 | 5 | n/a | n/a |
 
-Wall times vary between runs of the same binary, even with identical draws.
-Repeats gave 278, 281 and 325 s for Mint and 220, 220 and 245 s for Rust; the
-table shows the run whose draws were analysed. Both used 3 sampler threads per
-chain, and every OpenMP team ran at full size (recorded in the result files).
+Wall times vary between runs of the same binary by 20% or more, even with
+identical draws. With the current compiler Mint took 226 and 238 s (seed 11,
+two runs); the same Rust binary has taken 196, 220, 220, 245 and 281 s. So
+at this size which one is faster is not a finding: the time is mostly the
+sampler, which they share. The table shows the runs whose draws were
+analysed. Both used 3 sampler threads per chain, and every OpenMP team ran at
+full size (recorded in the result files).
 
 Mint and Rust share a sampler and sit right at the mixing bar together: these
-runs clear it (pop has ESS 449 to 463), but an earlier pair with the same
+runs clear it (pop has ESS 449 to 503), but an earlier pair with the same
 settings fell just short (ESS 363 to 370). Splitting the sampler's sums across
 threads changes rounding and therefore the chains' paths, so treat the large
 model as borderline. A longer run, or better mass-matrix adaptation, is the
@@ -110,23 +113,29 @@ agree.
 
 | size | pair | max difference |
 |---|---|---|
-| small | Mint vs Stan | 0.028 sd (1.45 MCSE) |
-| small | Mint vs Rust | 0.048 sd (2.27 MCSE) |
+| small | Mint vs Stan | 0.051 sd (2.75 MCSE) |
+| small | Mint vs Rust | 0.048 sd (2.16 MCSE) |
 | large | Mint vs Stan | 0.11 sd |
-| large | Mint vs Rust | 0.054 sd (2.50 MCSE) |
+| large | Mint vs Rust | 0.049 sd (2.27 MCSE) |
+
+These are maxima over 41 (small) and 501 (large) quantities; no quantity
+differs by more than 3 MCSE in any pair where both runs mixed.
 | small / large | rustmc vs Stan | 0.86 / 0.93 sd |
 
 ## Reading the numbers
 
-- **Mint against Stan: 7.2x the effective samples per second on the small
-  model.** Both run NUTS and need the same number of gradients (2.0 million),
-  so the difference is the cost of each gradient plus the sampler around it:
-  - Mint: 17 µs per gradient per chain;
+- **Mint against Stan: about 7x cheaper per gradient on the small model.** Both
+  run NUTS and need the same number of gradients (2.0 million), so the
+  difference is the cost of each gradient plus the sampler around it:
+  - Mint: 13 µs per gradient per chain;
   - Stan with `--O1`: 97 µs;
   - Stan with the default `--O0`: 135 µs.
 
   These are whole-run figures (wall time × chains / gradients), not isolated
-  gradient timings. On the large model the ratio is 0.30 ms against 11.2 ms,
+  gradient timings. The effective samples per second in the table (387
+  against 38.3) also move with the seed: across three seeds Mint's lowest ESS
+  (the runtime's estimate) ranged from 1,600 to 2,600. On the large model the
+  ratio is 0.24 ms against 11.2 ms,
   but that Stan run used the default `--O0`, a shorter run and one CPU chiplet.
   Mint's sampler also splits its passes across 3 threads per chain there, which
   Stan does not. `--O1` made Stan 1.4x faster on the small model; it was not
@@ -137,11 +146,13 @@ agree.
   review (R-hat 2.1 to 2.3 at this size). Mint's posterior means agree with
   Stan's; rustmc's do not. How long rustmc would need to converge was not
   measured.
-- **Mint against the best hand-written Rust: Rust is faster.** For the
-  gradient alone on the small model, it is 1.8x faster (19k against 33k CPU
-  cycles, measured one gradient at a time). End to end, with the same sampler,
-  it is 1.1 to 1.3x faster on both sizes, depending on the run. It gets there
-  with 591 lines of intrinsics against Mint's 18 lines of model.
+- **Mint against the best hand-written Rust: the Rust is slightly faster.**
+  The gradient alone takes 4.22 µs against 4.07 µs on the small model and
+  53.4 against 52.2 µs on the large one, and the Rust was faster in nearly
+  every run ([compiler-round.md](compiler-round.md); before this round it was
+  1.8x faster). Whole small runs take 6.6 to
+  6.7 s for both over three seeds. The Rust uses 591 lines of intrinsics
+  against Mint's 18 lines of model.
 
 ## What changed in Mint to get here
 
@@ -162,6 +173,11 @@ agree.
     passes across threads (by default, about physical cores ÷ chains).
   - Below that size the sampler runs serially and its draws are bit-identical
     to the original implementation. The small model runs 1.8x faster.
+- **The compiler round** ([compiler-round.md](compiler-round.md)): a
+  column-major layout for the scanned matrix, a fused kernel vectorised
+  across series, Mint's own `exp`, and statement absorption made the gradient
+  1.7 to 1.8x faster, within 2 to 4% of the hand-written Rust. Whole small runs went
+  from 8.4 to 6.7 s.
 - **Tried and not adopted: gradient-informed metric adaptation.** nutpie's
   `sqrt(var(draws) / var(gradients))` diagonal metric (`MINT_METRIC=grad`)
   halved the trajectory length on the small model (127 leapfrog steps per

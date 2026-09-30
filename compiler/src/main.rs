@@ -9,6 +9,10 @@
 //!        --no-fission     keep each likelihood in one fused loop
 //!        --no-vecmath     do not use glibc's vector math library
 //!        --no-gram-blocking  one row of A per pass in the Gram kernel
+//!        --no-scan-layout    keep scanned matrices row-major
+//!        --no-inline-exp     call the vector math library's exp
+//!        --no-scan-fusion    materialise running sums in separate passes
+//!        --no-row-fusion     run statements that stream one matrix separately
 
 mod ast;
 mod check;
@@ -76,7 +80,7 @@ fn runtime_object() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking]");
+    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion]");
     exit(2);
 }
 
@@ -88,7 +92,7 @@ fn main() {
     let cmd = args[0].as_str();
     let path = &args[1];
     let mut out: Option<String> = None;
-    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4 };
+    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true };
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -101,6 +105,10 @@ fn main() {
             "--no-fission" => opts.fission = false,
             "--no-vecmath" => opts.vecmath = false,
             "--no-gram-blocking" => opts.gram_block = 1,
+            "--no-scan-layout" => opts.scan_layout = false,
+            "--no-inline-exp" => opts.inline_exp = false,
+            "--no-scan-fusion" => opts.scan_fusion = false,
+            "--no-row-fusion" => opts.row_fusion = false,
             _ => usage(),
         }
         k += 1;

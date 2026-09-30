@@ -123,9 +123,21 @@ them.
   subterms (products, solves, calls) are materialised. The weights of
   `X' * diag(mu .* (1 - mu)) * X` and the vector of `X' * (mu - y)` are
   computed inside the kernel's row loop and never stored.
-- The Gram kernel computes the upper triangle only, mirrors it at the end, and
-  processes four rows of `A` per pass over a destination row, so each
-  load/store feeds four FMAs.
+- The Gram kernel computes the upper triangle only and mirrors it at the end.
+  It works on chunks of 32 rows copied (with their weighted copy) into L1
+  scratch padded to a multiple of 8 columns, and updates H one 4 x 8 tile at a
+  time held in eight vector registers: six loads per eight vector FMAs.
+  `--no-gram-blocking` restores the older row-by-row kernel.
+- **Row fusion** (`--no-row-fusion`; off under `--strict-fp`). Consecutive
+  `let`s in a `repeat` body that stream the rows of one matrix run as one
+  loop over chunks of rows: a producer (an elementwise function of `X * w`,
+  one value per row) and consumers of it (`X' * f + ...` and
+  `X' * diag(w) * X + ...`, which may use earlier producers elementwise). Each
+  chunk of X is read from memory once. Newton's three passes over X become
+  one.
+- The runtime allocator is declared `noalias` (fresh memory, like `malloc`)
+  and returns 64-byte aligned buffers, so LLVM knows a new buffer overlaps
+  nothing and needs no run-time overlap checks.
 
 ## Model code generation (`model.rs`)
 
@@ -161,10 +173,12 @@ this made the dynamic Poisson gradient 2.4x faster.
 Some nodes cannot be computed one element at a time, so they are materialised
 into scratch buffers around the statement's loop:
 
-- **Running sums** (`cumsum`). The forward pass computes the running sum before
-  the loop, four series interleaved so the CPU has four independent chains.
-  After the loop, the adjoint is a reverse running sum of the adjoint buffer,
-  back-propagated into the scan's own expression.
+- **Running sums** (`cumsum`). With the scan layout and scan fusion off, the
+  forward pass computes the running sum before the loop, four series
+  interleaved so the CPU has four independent chains, and after the loop the
+  adjoint is a reverse running sum of the adjoint buffer, back-propagated into
+  the scan's own expression. With them on (the default), see the next
+  section.
 - **Matrix-vector products**, when loop fission applies (see below). Before the
   loop, row dot products run four rows at a time, sharing loads of the vector.
   After the loop, gradient row updates also run four rows at a time.
@@ -203,6 +217,61 @@ loses relative precision when the residuals are tiny compared with y (the
 cancellation grows with ‖y‖² / RSS). In the benchmark data the log density
 agrees with the direct computation to 12 significant digits.
 
+### Scan layout and the fused scan kernel
+
+When a model takes `cumsum` of a `Matrix[G, T]` along T, every model
+quantity of that shape is stored column-major (`--no-scan-layout` turns this
+off): the parameter inside the sampler's vector, the data (copied once per
+`sample`), and scratch buffers. Draws are still written in the user's order,
+and the runtime converts its benchmark point and printed gradients through
+two generated functions (`mint_set_layout`). Four adjacent series at one time
+are then one contiguous vector load.
+
+A matrix statement whose only materialised nodes are running sums over its
+own shape then runs as one kernel (`--no-scan-fusion` turns it off) over
+groups of 8 series, two vectors of four:
+
+- A, forward in time: the running sums (vector registers) and the density's
+  argument, into an L1 scratch;
+- B: `exp` over the scratch in a loop of its own, with nothing else live, so
+  its constants stay in registers (only when the density needs exp of its
+  argument, as PoissonLog does);
+- C and R, backward in time: the density and its derivatives, and the reverse
+  running sums of the adjoints pushed through the scan's expression.
+
+Mint emits this as `<4 x double>` IR itself (`Fb::lanes`); LLVM's loop
+vectoriser does not produce vector lanes across rows with the loop over time.
+Series left over run through the same generator with one lane, and so do
+statements with an operation that has no vector form yet (BernoulliLogit's
+stable softplus, `abs`, `log1p`).
+
+Around the kernel:
+
+- **Absorption.** An element-wise statement over the same shape (a prior on
+  the scanned matrix) runs inside the kernel's reverse loop instead of making
+  its own pass.
+- **Gradient ownership.** When every gradient contribution to a matrix
+  parameter happens in that loop, its gradient is summed in a register and
+  stored once and is not zeroed first. In general only accumulated gradients
+  are zeroed now.
+- Gradients of column-indexed parameters go to per-lane partial sums
+  (T x 4), reduced once; those of row-indexed and scalar parameters stay in
+  vector registers.
+
+`tests/run.sh` builds seven models three ways (default, layout without
+fusion, and neither) and requires the same log density and gradient to 1e-12
+at 7, 13 and 20 series, plus a finite-difference check at the benchmark
+point. The models cover linear and nonlinear nested running sums, the
+one-lane BernoulliLogit path, row, column and scalar parameters inside and
+outside the sum, a column parameter also used by statements of another
+shape, a running sum of data only, and two scan statements sharing a matrix
+parameter. A further test checks that sampled draws come back in the user's
+order. Not covered: a model with running sums over two different shapes,
+and gradients away from the benchmark point (at the runtime's random point
+these models' log densities are near -1e16 and finite differences fail for
+every build). The measurements are in
+[compiler-round.md](compiler-round.md).
+
 ### What was tried and removed
 
 Three restructurings of scan statements were implemented and measured, and all
@@ -218,10 +287,11 @@ matched the exact formula to about 1e-14.
   reverse scan in a small buffer. It was 4% faster at 250 series and 35% slower
   at 20.
 
-The hand-written Rust baseline is still 1.8x faster per gradient. It
-vectorises across 8 series with 4×4 in-register transposes, which avoids
-strided memory access entirely. Emitting explicit transposes is the obvious
-next step, and it is listed in the next milestone.
+What worked in the end was changing the storage order itself rather than
+copying (the scan layout above), which needs no transposes and no extra
+passes, and emitting the vector code directly. The gradient is now within 2
+to 4% of the hand-written Rust (which is still faster), which vectorises
+across 8 series with 4 x 4 in-register transposes.
 
 ## Floating-point semantics
 
@@ -232,9 +302,15 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   use several vector accumulators. This is the main reason Mint's dot products
   are faster than a plain Rust `iter().sum()`, which must add strictly left to
   right.
-- With `-fveclib=libmvec`, `exp` and `log` in vectorised loops call glibc's
-  4-lane versions, which glibc documents as accurate to within 4 ulp. The
-  scalar versions are under 1 ulp.
+- With `-fveclib=libmvec`, `exp` and `log` in loops LLVM vectorises call
+  glibc's 4-lane versions, which glibc documents as accurate to within 4 ulp.
+  The scalar versions are under 1 ulp.
+- In vector code Mint emits itself (the scan kernel) and in the fused row
+  loop, `exp` is Mint's own (`ir.rs`, `mint_exp_fast`): at most 2 ulp over
+  3e7 test inputs, with NaN, infinities, overflow and subnormal results as in
+  libm. `--no-inline-exp` uses `llvm.exp` everywhere.
+- The tiled Gram kernel and row fusion change the order of summation (per
+  tile and per chunk); both are off under `--strict-fp`.
 - In `BernoulliLogit`, `log1p(e)` is computed as `log(1 + e)` with
   e = exp(-|eta|) in (0, 1], because `log` has a vector version. That costs an
   absolute error of up to about 1e-16 per observation.

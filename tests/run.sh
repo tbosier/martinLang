@@ -199,6 +199,102 @@ sys.exit(0 if len(a) == len(b) == 50 and max(abs(x - y) for x, y in zip(a, b)) <
 PY
 done
 
+# ---- fused scan kernels: every path (nested running sums, the one-lane
+# BernoulliLogit path, row/column/scalar parameters, row counts that are not
+# multiples of the vector width) must give the same log density and gradient
+# as the same model built without the scan layout, scan fusion and inline exp,
+# and must pass the finite-difference check.
+
+python3 tests/scan/make_data.py build
+for m in nested bernoulli mixed nested_sq colreuse datascan twohosts; do
+  for G in 7 13 20; do
+    sed "s/NG/$G/" tests/scan/$m.mint > build/scan_$m.$G.mint
+    build build/scan_$m.$G.mint scan_${m}_${G}_opt || continue
+    build build/scan_$m.$G.mint scan_${m}_${G}_ref --no-scan-layout --no-scan-fusion --no-inline-exp || continue
+    # the column-major layout without the fused kernel (the path a scan
+    # statement takes when it cannot be fused)
+    build build/scan_$m.$G.mint scan_${m}_${G}_lay --no-scan-fusion || continue
+    for v in opt ref lay; do MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/scan_${m}_${G}_$v > build/scan_${m}_${G}_$v.out; done
+    python3 - build/scan_${m}_${G}_lay.out build/scan_${m}_${G}_ref.out <<'PY' && pass "scan layout $m G=$G matches the row-major build" || bad "scan layout $m G=$G differs from the row-major build"
+import sys
+def rd(p):
+    o = open(p).read()
+    return float(o.split("logp=")[1].split()[0]), [float(x) for x in o.split("grad:")[1].split()]
+(la, ga), (lb, gb) = rd(sys.argv[1]), rd(sys.argv[2])
+import math
+if not all(map(math.isfinite, ga + gb + [la, lb])):
+    sys.exit(1)
+err = max(abs(a - b) for a, b in zip(ga, gb)) / max(abs(x) for x in gb)
+sys.exit(0 if len(ga) == len(gb) and abs(la - lb) <= 1e-12 * abs(lb) and err < 1e-12 else 1)
+PY
+    python3 - build/scan_${m}_${G}_opt.out build/scan_${m}_${G}_ref.out <<'PY' && pass "scan kernel $m G=$G matches the unfused build" || bad "scan kernel $m G=$G differs from the unfused build"
+import sys
+def rd(p):
+    o = open(p).read()
+    return float(o.split("logp=")[1].split()[0]), [float(x) for x in o.split("grad:")[1].split()]
+(la, ga), (lb, gb) = rd(sys.argv[1]), rd(sys.argv[2])
+import math
+if not all(map(math.isfinite, ga + gb + [la, lb])):
+    print("      non-finite log density or gradient")
+    sys.exit(1)
+err = max(abs(a - b) for a, b in zip(ga, gb)) / max(abs(x) for x in gb)
+print(f"      logp {la:.15g} vs {lb:.15g}; max grad diff / max |grad| {err:.1e}")
+sys.exit(0 if len(ga) == len(gb) and abs(la - lb) <= 1e-12 * abs(lb) and err < 1e-12 else 1)
+PY
+    # the benchmark point only: at the runtime's random point (uniform on
+    # [-2, 2]) these running sums give log densities near -1e16 and finite
+    # differences break down for every build
+    worst=$(MINT_GRADCHECK=1 MINT_BENCH_GRAD=1 ./build/scan_${m}_${G}_opt 2>&1 | grep gradcheck | head -1 | sed 's/.*error=//')
+    python3 -c "import sys; sys.exit(0 if float('${worst:-inf}') < 1e-5 else 1)" && pass "gradcheck scan kernel $m G=$G ($worst)" || bad "gradcheck scan kernel $m G=$G ($worst)"
+  done
+done
+
+# ---- the scan layout reaches the draws: a matrix parameter pinned to the
+# data by a tight prior must come back with each posterior mean on its own
+# (row-major) entry.
+
+sed "s/NG/13/" tests/scan/layout_draws.mint > build/scan_layout.mint
+if build build/scan_layout.mint scan_layout; then
+  MINT_DRAWS=build/scan_layout.draws ./build/scan_layout > /dev/null 2>&1
+  python3 - <<'PY' && pass "scan layout: draws come back in the user's order" || bad "scan layout: draws are out of order"
+import struct
+h = open("build/scan_layout.draws", "rb").read()
+C, N, D = struct.unpack("<QQQ", h[:24])
+d = struct.unpack(f"<{C * N * D}d", h[24:24 + 8 * C * N * D])
+y = open("build/scan_normal_13.f64", "rb").read()
+G, T = struct.unpack("<QQ", y[:16])
+yv = struct.unpack(f"<{G * T}d", y[16:])
+means = [sum(d[(c * N + i) * D + j] for c in range(C) for i in range(N)) / (C * N) for j in range(D)]
+err = max(abs(a - b) for a, b in zip(means, yv))
+print(f"      max |posterior mean - y| = {err:.4f}")
+raise SystemExit(0 if D == G * T and err < 0.02 else 1)
+PY
+fi
+
+# ---- row fusion: a product plus a term of another shape (broadcast, or a
+# scalar) must not be fused; Newton on a row count that is not a multiple of
+# the chunk must match the unfused, untiled build.
+
+python3 tests/rowfuse/make_data.py
+if build tests/rowfuse/broadcast.mint rf_b_opt && build tests/rowfuse/broadcast.mint rf_b_ref --no-row-fusion; then
+  [ -n "$(./build/rf_b_opt)" ] && [ "$(./build/rf_b_opt)" = "$(./build/rf_b_ref)" ] && pass "row fusion leaves broadcasting sums alone" || bad "row fusion changed a broadcasting sum"
+fi
+if build tests/rowfuse/newton_odd.mint rf_n_opt && build tests/rowfuse/newton_odd.mint rf_n_ref --no-row-fusion --no-gram-blocking; then
+  a=$(./build/rf_n_opt | sed -n 's/^w \[\(.*\)\]/\1/p'); b=$(./build/rf_n_ref | sed -n 's/^w \[\(.*\)\]/\1/p')
+  python3 -c "
+import sys
+a = [float(x) for x in '$a'.split(',')]; b = [float(x) for x in '$b'.split(',')]
+sys.exit(0 if len(a) == len(b) == 13 and max(abs(x - y) for x, y in zip(a, b)) < 1e-8 else 1)" \
+    && pass "row fusion + tiled Gram match the unfused build (1003 rows)" || bad "row fusion + tiled Gram differ from the unfused build"
+fi
+
+# ---- Mint's own vector exp, as emitted: within 2 ulp of long double expl
+# over 3e6 inputs across the range, and NaN, infinities, -0, the overflow and
+# underflow thresholds and subnormal results.
+
+$M emit examples/dynamic_poisson.mint -o build/exp_check.ll 2>/dev/null \
+  && python3 tests/exp/check_exp.py build/exp_check.ll && pass "vector exp accuracy and special values" || bad "vector exp accuracy"
+
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.
 

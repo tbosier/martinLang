@@ -703,5 +703,7 @@ fn main() {
     }
     let dim = d.dim();
     DATA.set(d).ok();
-    common::sample_and_print(logp, constrain, dim, &["pop", "beta", "shared", "innov"], &[-1, g as i64, t as i64, (g * t) as i64], 1000, 1000, 4, 7);
+    // optional second argument: the seed (default 7)
+    let seed = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(7);
+    common::sample_and_print(logp, constrain, dim, &["pop", "beta", "shared", "innov"], &[-1, g as i64, t as i64, (g * t) as i64], 1000, 1000, 4, seed);
 }

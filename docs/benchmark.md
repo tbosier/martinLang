@@ -5,15 +5,16 @@
 The original gate asked two things. Can Mint express a realistic small
 numerical problem materially more clearly than equivalent Rust? Does it run
 within about 2x of a straightforward Rust implementation? It does both, with
-room to spare. The honest boundary is expert, hand-vectorised Rust, which ties
-Mint on the logistic gradient and beats it on Newton's method.
+room to spare. Against expert, hand-vectorised Rust, Mint is now faster on
+the logistic gradient and on Newton's method, and 2 to 4% slower on the
+time-series gradient ([compiler-round.md](compiler-round.md)).
 
 | problem | Mint | straightforward Rust | tuned Rust | max-effort Rust |
 |---|---|---|---|---|
-| logistic gradient (n=5000, p=20) | 35 µs | 178 µs | 139 µs | 37 µs (tie: ranges overlap) |
-| logistic, full NUTS run | 0.51 s | 2.56 s | 1.93 s | 0.55 s |
-| Newton, n=200000, p=50 | 0.32 s | 2.41 s | 0.41 s | **0.21 s** |
-| linear gradient (sufficient statistics) | 102 ns | 896 µs | 258 ns (same rewrite by hand) | not written |
+| logistic gradient (n=5000, p=20) | **32.8 µs** | 178 µs | 139 µs | 37.7 µs |
+| logistic, full NUTS run | **0.48 s** | 2.57 s | 1.92 s | 0.56 s |
+| Newton, n=200000, p=50 | **0.160 s** | 2.33 s | 0.40 s | 0.206 s |
+| linear gradient (sufficient statistics) | 98 ns | 889 µs | 257 ns (same rewrite by hand) | not written |
 | lines of code | 15 to 18 | 59 to 78 | 66 to 97 | 92 to 105, plus 100 of shared SIMD helpers |
 
 The Rust baselines come in three levels of effort:
@@ -71,68 +72,68 @@ file.
 ## Results
 
 Machine: AMD Ryzen 9 5900X 12-Core Processor, Linux 6.18.53-1-lts. rustc 1.89.0 (29483883e 2025-08-04) (LLVM 20); clang version 22.1.8.
-Each cell is 7 runs, interleaved, pinned to core 5; load average at end 1.27, 2.97, 4.56 (at start about 4.5, from the run log).
+Each cell is 7 runs, interleaved, pinned to core 5; load average at start 1.54, 1.00, 2.32.
 
 #### Logistic regression gradient, n=5000, p=20 (time per gradient; lower is better)
 
 | implementation | median | range (min to max) | relative to mint |
 |---|---|---|---|
-| mint | 35.3 µs | 33.2 µs to 44.3 µs | 1.00x |
-| mint --strict-fp | 89.6 µs | 88.7 µs to 90.3 µs | 2.53x |
-| mint --no-fission | 101.7 µs | 101.2 µs to 102.6 µs | 2.88x |
-| mint --no-vecmath | 56.1 µs | 54.4 µs to 57.1 µs | 1.59x |
-| mint --no-fission --strict-fp | 123.2 µs | 122.8 µs to 125.4 µs | 3.49x |
-| rust straightforward | 178.4 µs | 176.0 µs to 194.1 µs | 5.05x |
-| rust tuned | 139.3 µs | 138.3 µs to 141.0 µs | 3.94x |
-| rust max effort | 37.3 µs | 35.8 µs to 40.1 µs | 1.06x (ranges overlap: ordering not established) |
+| mint | 32.8 µs | 32.0 µs to 35.5 µs | 1.00x |
+| mint --strict-fp | 89.8 µs | 89.1 µs to 90.3 µs | 2.73x |
+| mint --no-fission | 97.2 µs | 96.7 µs to 98.1 µs | 2.96x |
+| mint --no-vecmath | 53.8 µs | 52.9 µs to 59.4 µs | 1.64x |
+| mint --no-fission --strict-fp | 123.7 µs | 122.8 µs to 124.2 µs | 3.77x |
+| rust straightforward | 178.1 µs | 176.3 µs to 190.0 µs | 5.42x |
+| rust tuned | 138.8 µs | 138.2 µs to 139.2 µs | 4.23x |
+| rust max effort | 37.7 µs | 36.1 µs to 38.7 µs | 1.15x |
 
 #### Linear regression gradient, n=50000, p=20
 
 | implementation | median | range (min to max) | relative to mint |
 |---|---|---|---|
-| mint | 102 ns | 100 ns to 105 ns | 1.00x |
-| mint --no-suffstats | 330.2 µs | 328.3 µs to 337.7 µs | 3233.85x |
-| mint --no-suffstats --strict-fp | 473.5 µs | 472.7 µs to 499.9 µs | 4637.45x |
-| rust straightforward | 896.0 µs | 890.1 µs to 913.7 µs | 8776.01x |
-| rust sufficient statistics | 258 ns | 258 ns to 265 ns | 2.53x |
+| mint | 98 ns | 98 ns to 103 ns | 1.00x |
+| mint --no-suffstats | 323.7 µs | 323.1 µs to 325.4 µs | 3296.62x |
+| mint --no-suffstats --strict-fp | 463.9 µs | 463.3 µs to 465.8 µs | 4723.77x |
+| rust straightforward | 889.1 µs | 888.3 µs to 891.2 µs | 9053.77x |
+| rust sufficient statistics | 257 ns | 256 ns to 257 ns | 2.62x |
 
 #### Newton's method, n=200000, p=50, 10 iterations (fit time, excluding file reading)
 
 | implementation | median | range (min to max) | relative to mint |
 |---|---|---|---|
-| mint | 0.322 s | 0.311 s to 0.391 s | 1.00x |
-| mint --strict-fp | 0.346 s | 0.336 s to 0.392 s | 1.07x (ranges overlap: ordering not established) |
-| mint --no-gram-blocking | 0.431 s | 0.425 s to 0.478 s | 1.34x |
-| rust straightforward | 2.405 s | 2.336 s to 2.453 s | 7.46x |
-| rust tuned | 0.405 s | 0.399 s to 0.428 s | 1.26x |
-| rust max effort | 0.208 s | 0.206 s to 0.237 s | 0.65x |
+| mint | 0.160 s | 0.159 s to 0.162 s | 1.00x |
+| mint --strict-fp | 0.283 s | 0.277 s to 0.293 s | 1.77x |
+| mint --no-gram-blocking | 0.338 s | 0.336 s to 0.359 s | 2.12x |
+| rust straightforward | 2.332 s | 2.325 s to 2.430 s | 14.61x |
+| rust tuned | 0.400 s | 0.399 s to 0.469 s | 2.51x |
+| rust max effort | 0.206 s | 0.206 s to 0.229 s | 1.29x |
 
 #### Logistic regression, NUTS, 1 chain, 1000 warmup + 1000 draws (sampler wall time plus model preparation)
 
 | implementation | median | range (min to max) | relative to mint |
 |---|---|---|---|
-| mint | 0.507 s | 0.498 s to 0.546 s; 14,323 gradients | 1.00x |
-| rust straightforward | 2.557 s | 2.532 s to 2.591 s; 14,438 gradients | 5.05x |
-| rust tuned | 1.926 s | 1.912 s to 1.934 s; 14,288 gradients | 3.80x |
-| rust max effort | 0.554 s | 0.552 s to 0.558 s; 14,408 gradients | 1.09x |
+| mint | 0.482 s | 0.477 s to 0.491 s; 14,323 gradients | 1.00x |
+| rust straightforward | 2.570 s | 2.547 s to 2.586 s; 14,438 gradients | 5.33x |
+| rust tuned | 1.917 s | 1.906 s to 1.929 s; 14,288 gradients | 3.98x |
+| rust max effort | 0.564 s | 0.553 s to 0.574 s; 14,408 gradients | 1.17x |
 
 #### Linear regression, NUTS, 1 chain, 1000 warmup + 1000 draws (sampler wall time plus model preparation)
 
 | implementation | median | range (min to max) | relative to mint |
 |---|---|---|---|
-| mint | 7.79 ms | 7.72 ms to 7.87 ms; 18,917 gradients | 1.00x |
-| mint --no-suffstats | 6.264 s | 6.226 s to 6.419 s; 18,994 gradients | 803.83x |
-| rust straightforward | 16.5 s | 16.2 s to 18.4 s; 18,159 gradients | 2118.12x |
-| rust sufficient statistics | 13.94 ms | 13.84 ms to 14.15 ms; 18,946 gradients | 1.79x |
+| mint | 9.66 ms | 9.62 ms to 9.74 ms; 18,917 gradients | 1.00x |
+| mint --no-suffstats | 6.534 s | 6.518 s to 6.555 s; 18,994 gradients | 676.57x |
+| rust straightforward | 16.2 s | 16.1 s to 16.2 s; 18,159 gradients | 1673.05x |
+| rust sufficient statistics | 16.29 ms | 16.20 ms to 16.55 ms; 18,946 gradients | 1.69x |
 
 #### Logistic gradient across problem shapes (median time per gradient)
 
 | n | p | mint | rust straightforward | rust tuned | rust max effort | max effort / mint |
 |---|---|---|---|---|---|---|
-| 20000 | 5 | 96.4 µs | 490.4 µs | 415.9 µs | 113.3 µs | 1.18x |
-| 5000 | 20 | 35.2 µs | 177.8 µs | 139.4 µs | 37.4 µs | 1.06x |
-| 2000 | 100 | 48.3 µs | 227.1 µs | 106.3 µs | 51.6 µs | 1.07x |
-| 100000 | 20 | 675.5 µs | 3615.5 µs | 2784.5 µs | 742.9 µs | 1.10x |
+| 20000 | 5 | 89.7 µs | 489.5 µs | 415.2 µs | 113.5 µs | 1.27x |
+| 5000 | 20 | 33.5 µs | 176.9 µs | 139.1 µs | 37.3 µs | 1.11x |
+| 2000 | 100 | 41.3 µs | 226.7 µs | 106.5 µs | 51.5 µs | 1.25x |
+| 100000 | 20 | 626.5 µs | 3593.8 µs | 2785.0 µs | 739.4 µs | 1.18x |
 
 #### Lines of code (non-blank, non-comment; whole file)
 
@@ -146,35 +147,35 @@ Each cell is 7 runs, interleaved, pinned to core 5; load average at end 1.27, 2.
 
 | program | seconds |
 |---|---|
-| mint_logistic_newton | 0.16 |
-| mint_logistic_bayes | 0.08 |
+| mint_logistic_newton | 0.13 |
+| mint_logistic_bayes | 0.10 |
 | mint_linear_bayes | 0.10 |
 | mint_linear_bayes_nss | 0.07 |
-| mint_logistic_newton_strict | 0.16 |
-| mint_logistic_newton_noblock | 0.13 |
+| mint_logistic_newton_strict | 0.12 |
+| mint_logistic_newton_noblock | 0.10 |
 | mint_logistic_bayes_strict | 0.09 |
 | mint_linear_bayes_nss_strict | 0.06 |
-| mint_logistic_bayes_nofission | 0.06 |
+| mint_logistic_bayes_nofission | 0.07 |
 | mint_logistic_bayes_novecmath | 0.09 |
-| mint_logistic_bayes_nofission_strict | 0.06 |
-| rust_logistic_newton | 0.23 |
-| rust_logistic_newton_tuned | 0.25 |
-| rust_logistic_bayes | 0.23 |
+| mint_logistic_bayes_nofission_strict | 0.07 |
+| rust_logistic_newton | 0.22 |
+| rust_logistic_newton_tuned | 0.26 |
+| rust_logistic_bayes | 0.21 |
 | rust_logistic_bayes_tuned | 0.19 |
 | rust_linear_bayes | 0.20 |
-| rust_linear_bayes_suffstats | 0.19 |
+| rust_linear_bayes_suffstats | 0.20 |
 | rust_logistic_newton_max | 0.27 |
-| rust_logistic_bayes_max | 0.19 |
+| rust_logistic_bayes_max | 0.18 |
 
 ## Where the speed comes from
 
 Most of Mint's own choices have a switch, so they can be measured. For the
-logistic gradient (n=5000, p=20; Mint 35 µs, tuned Rust 139 µs):
+logistic gradient (n=5000, p=20; Mint 33 µs, tuned Rust 139 µs):
 
-- **Loop fission.** `--no-fission` gives 102 µs. The row dot products, the
+- **Loop fission.** `--no-fission` gives 97 µs. The row dot products, the
   elementwise density pass and the row gradient updates run as separate loops,
   so the middle loop vectorises.
-- **Vector math.** `--no-vecmath` gives 56 µs. In the vectorised loop, `exp`
+- **Vector math.** `--no-vecmath` gives 54 µs. In the vectorised loop, `exp`
   and `log` go through glibc's 4-lane versions (within 4 ulp).
 - **Strict floating point.** `--strict-fp` gives 90 µs. It removes
   reassociation, FMA contraction, vector math and the `log(1 + e)`
@@ -185,12 +186,12 @@ logistic gradient (n=5000, p=20; Mint 35 µs, tuned Rust 139 µs):
 
 Other choices:
 
-- **Newton.** Against tuned Rust (0.32 s against 0.41 s), Mint's gain comes
-  from register blocking in the Gram kernel; `--no-gram-blocking` gives 0.43 s.
-  The max-effort Rust is 1.55x faster than Mint. It makes one pass over X per
-  iteration, where Mint makes three, and it vectorises the sigmoid. Fusing
-  kernels that stream the same matrix is listed in
-  [next-milestone.md](next-milestone.md).
+- **Newton.** Mint takes 0.160 s against the max-effort Rust's 0.206 s. Row
+  fusion runs the three statements that stream X as one loop over chunks of
+  rows, so X is read once per iteration, and the Gram kernel updates 4 x 8
+  tiles of H held in registers. `--no-gram-blocking` (the older row-by-row
+  kernel, and no Gram product in the fused loop) gives 0.338 s; see
+  [compiler-round.md](compiler-round.md).
 - **Linear regression.** The sufficient-statistics rewrite changes the
   algorithm, not the code quality: each gradient is O(p²) instead of O(np).
   Without it, Mint is still 2.7x faster than straightforward Rust (330 µs
@@ -204,10 +205,8 @@ Other choices:
   whole run 1.9x faster on the 3,171-dimension model and 2.1x faster on the
   37,901-dimension model; the later changes in
   [hierarchical.md](hierarchical.md) (recomputed momenta, threads within a
-  chain) take the large model to 4.5 to 5.2x. The logistic full-run numbers above
-  were measured with the first rewrite, for Mint and for every Rust baseline
-  alike, and were not rerun after the later changes. Those changes keep the
-  draws identical at this size (21 parameters, serial path).
+  chain) take the large model to 4.5 to 5.2x. The logistic full-run numbers
+  above use the current runtime, for Mint and every Rust baseline alike.
 
 ## Clarity
 

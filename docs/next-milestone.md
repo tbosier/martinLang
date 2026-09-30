@@ -38,8 +38,10 @@ switched off independently.
    - `Sparse[n, p]` data (CSR): the kernel choice follows from the type. The
      test is whether the source can stay identical to the dense version.
 3. **Per-optimisation switches.** Most existing choices already have a flag:
-   `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking` and
-   `--strict-fp`. The one-triangle Gram computation does not. Every new pass
+   `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
+   `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`,
+   `--no-row-fusion` and `--strict-fp`. The one-triangle Gram computation and
+   the allocator's `noalias` declaration do not. Every new pass
    gets one. The report states how often each pass fires across the 10
    models, not only how fast it is when it does.
 4. **An external baseline.** Compare with Stan through
@@ -48,22 +50,21 @@ switched off independently.
    correctness. That replaces my own Rust baselines, which are the weakest part
    of the current evidence.
 
-## Known performance gaps to close first
+## Known performance gaps
 
 Maximum-effort Rust (nightly, AVX2 intrinsics, the same glibc vector math)
-exposed three places where hand-written code is faster than Mint today. None of
-them needs new language features; each is a compiler or runtime change.
+exposed places where hand-written code was faster than Mint. None needed new
+language features.
 
-1. **Scans across many series.** On the dynamic Poisson gradient, hand-written
-   Rust is 1.8x faster. It vectorises across 8 series using 4×4 in-register
-   transposes. Mint's three attempts (time-major loops, time-major shadows,
-   tiling) are described in [architecture.md](architecture.md). The next step
-   is emitting explicit vector transposes for scans in matrix-shaped
-   statements.
-2. **Several kernels streaming the same large matrix.** Newton's method makes
-   three passes over X per iteration (X * w, X' r, the Gram product), where the
-   hand-written Rust makes one; Rust is about 1.6x faster. The fix is fusing
-   consecutive statements whose kernels stream the rows of the same matrix.
+1. **Scans across many series: mostly closed.** The dynamic Poisson gradient
+   was 1.8x slower than the Rust; it is now 2 to 4% slower (consistently, over
+   11 runs), through a column-major layout the compiler chooses and a
+   vectorised, fused scan kernel. See
+   [compiler-round.md](compiler-round.md).
+2. **Several kernels streaming the same large matrix: closed.** Newton's
+   method was 1.55x slower than the Rust; with row fusion and a tiled Gram
+   kernel it is now 1.30x faster. Its Gram kernel still misses L1 about four
+   times as often as the Rust's.
 3. **The sampler at tens of thousands of dimensions.** Sharing states by
    reference, recomputing scaled momenta and splitting each chain's passes
    across threads took the large model from 1448 s to under 330 s. The sampler and

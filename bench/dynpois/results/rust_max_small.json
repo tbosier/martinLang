@@ -6,7 +6,7 @@
   "warmup": 1000,
   "draws": 1000,
   "thin": 1,
-  "wall_seconds": 6.627367,
+  "wall_seconds": 6.618873,
   "gradients": 2023407,
   "extra": {
     "seed": 7,
@@ -16,5 +16,5 @@
     "metric": "stan",
     "env": {}
   },
-  "notes": "hand-written AVX2 Rust log density (baselines/dynpois_max.rs), NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; process wall 6.80 s incl. data load and summary; compile 0.00 s; flags ''"
+  "notes": "hand-written AVX2 Rust log density (baselines/dynpois_max.rs), NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; process wall 6.79 s incl. data load and summary; compile 0.00 s; flags ''"
 }
