@@ -40,7 +40,7 @@ def build():
     os.makedirs(BUILD, exist_ok=True)
     sh(["cargo", "build", "--release", "-q"], cwd=os.path.join(ROOT, "compiler"))
     compile_s = {}
-    sh(["clang", "-O3", "-march=native", "-c", "runtime/mint_rt.c", "-o", "build/mint_rt.o"])
+    sh(["clang", "-O3", "-march=native", "-fopenmp", "-c", "runtime/mint_rt.c", "-o", "build/mint_rt.o"])
     mint = {
         "logistic_newton": [],
         "logistic_bayes": [],
@@ -61,12 +61,12 @@ def build():
               "linear_bayes", "linear_bayes_suffstats"]:
         compile_s["rust_" + b] = timed(["rustc", "--edition", "2021", "-C", "opt-level=3", "-C", "target-cpu=native",
                                         f"baselines/{b}.rs", "-o", f"build/rs_{b}",
-                                        "-C", f"link-arg={BUILD}/mint_rt.o", "-l", "m"])
+                                        "-C", f"link-arg={BUILD}/mint_rt.o", "-C", "link-arg=-lomp", "-l", "m"])
     # max-effort baselines: nightly Rust (LLVM 21), AVX2 intrinsics, glibc vector exp/log
     for b in ["logistic_newton_max", "logistic_bayes_max"]:
         compile_s["rust_" + b] = timed(["rustc", "+nightly", "--edition", "2021", "-C", "opt-level=3", "-C",
                                         "target-cpu=native", f"baselines/{b}.rs", "-o", f"build/rs_{b}",
-                                        "-C", f"link-arg={BUILD}/mint_rt.o", "-l", "m", "-l", "mvec"])
+                                        "-C", f"link-arg={BUILD}/mint_rt.o", "-C", "link-arg=-lomp", "-l", "m", "-l", "mvec"])
     return compile_s
 
 

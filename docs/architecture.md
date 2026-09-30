@@ -256,23 +256,33 @@ is checked against the exact formula at both sizes.
   checks across subtrees, a diagonal metric, and Stan's windowed warmup (dual
   averaging of the step size, variance windows 75/25…/50).
 - **Immutable, reference-counted states.** A leapfrog step writes a new state
-  (position, momentum, gradient, inverse metric times momentum) instead of
-  updating one in place. The tree then keeps references to its end points and
+  (position, momentum, gradient) instead of updating one in place. The tree then keeps references to its end points and
   proposals rather than copying D-length vectors. States are recycled from a
   per-chain free list.
-- **Fused passes.** The leapfrog's second half-step, kinetic energy, scaled
-  momentum and subtree momentum sum are one pass. Each merge's summed momentum
-  and three no-U-turn checks are another.
-- **Same draws, faster.** The arithmetic and the order of random draws are
-  unchanged, so this sampler produces bit-identical draws to the original
-  copying version. `tests/run.sh` does not re-check this; it was checked once,
-  on eight schools and the dynamic Poisson model.
-- **Speedups.** A whole 4-chain, 1000 + 1000 run was 1.9x faster at 3,171
-  dimensions (15.3 s to 8.2 s) and 2.1x faster at 37,901 dimensions (1448 s to
-  693 s).
-- **What still limits it.** At 37,901 dimensions with four chains, sampling is
-  still limited by memory bandwidth: each leapfrog step streams several MB of
-  state and model buffers per chain.
+- **Fused passes.** The leapfrog's second half-step, kinetic energy and
+  subtree momentum sum are one pass. Each merge's summed momentum and three
+  no-U-turn checks are another. The scaled momentum (inverse metric times
+  momentum) is recomputed inside those passes rather than stored, which saves
+  one D-length vector of memory traffic per state.
+- **Threads within a chain.** When the model has at least 8,192 parameters,
+  those passes are split across OpenMP threads, by default
+  (online CPUs ÷ 2) ÷ chains per chain; `MINT_THREADS_PER_CHAIN` overrides it.
+  The model gradient itself still runs on one thread per chain.
+- **Same draws where serial.** On the serial path the arithmetic and the order
+  of random draws are unchanged, so it produces bit-identical draws to the
+  original copying sampler. This was checked on eight schools and the dynamic
+  Poisson model; `tests/run.sh` does not re-check it. The threaded path sums
+  in a different order, so its draws differ by rounding and then diverge.
+- **Speedups.** A whole 4-chain, 1000 + 1000 run went from 15.3 s to 8.3 s at
+  3,171 dimensions (1.8x) and from 1448 s to 278 to 325 s at 37,901 dimensions
+  (4.5 to 5.2x, depending on the run; 2.1x from the reference-counted states
+  alone).
+- **Metric adaptation.** The default is Stan's: the regularised variance of
+  the warmup draws. `MINT_METRIC=grad` instead uses
+  `sqrt(var(draws) / var(gradients))`, as nutpie does. It is not the default:
+  over several seeds it made no measurable difference on eight schools or
+  logistic regression, and gave about 3.5x fewer effective draws per gradient
+  on the dynamic Poisson model (`bench/metric_experiment.py`).
 - Chains run on separate threads. The generated `logp` functions only read the
   data, so they are safe to call concurrently.
 - The summary reports the mean, sd, quantiles, split R-hat and an
@@ -307,6 +317,7 @@ Other known limits:
   blocking can be turned off with `--no-gram-blocking`.
 - Errors found while lowering a model body (the constructs listed above) are
   reported without a source position.
-- Kernels are single-threaded, and the only parallelism is across chains.
+- Model kernels are single-threaded. The parallelism is across chains, plus
+  the sampler's own passes within a chain for large models.
 - The Gram kernel is register-blocked but not cache-blocked. A tuned BLAS
   `dsyrk` would beat it on large p.

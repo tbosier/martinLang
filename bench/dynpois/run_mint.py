@@ -56,6 +56,9 @@ out = r.stdout + r.stderr
 print(r.stdout)
 sampling = float(re.search(r"sampling took (\S+) s", out).group(1))
 grads = int(re.search(r"gradients=(\d+)", out).group(1))
+m = re.search(r"sampler: threads per chain=(\d+) \(smallest team that ran=(\d+)\) metric=(\w+)", out)
+sampler_cfg = {"threads_per_chain": int(m.group(1)), "smallest_team": int(m.group(2)), "metric": m.group(3),
+               "env": {k: v for k, v in os.environ.items() if k.startswith(("MINT_", "OMP_", "KMP_"))}}
 
 hdr = np.fromfile(draws_path, dtype="<u8", count=3)
 C, N, D = (int(x) for x in hdr)
@@ -75,7 +78,7 @@ np.savez(base + "_draws.npz", pop=pop, beta=beta, terminal=terminal)
 json.dump({
     "implementation": args.variant, "G": G, "T": T, "chains": C, "warmup": args.warmup, "draws": N, "thin": 1,
     "wall_seconds": sampling, "gradients": grads,
-    "extra": {"seed": 7 if args.rust else args.seed, "sampler": "mint runtime NUTS"},
+    "extra": {"seed": 7 if args.rust else args.seed, "sampler": "mint runtime NUTS", **sampler_cfg},
     "notes": ("hand-written AVX2 Rust log density (baselines/dynpois_max.rs), " if args.rust else "Mint-compiled log density, ")
              + f"NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; "
              f"process wall {wall:.2f} s incl. data load and summary; compile {compile_s:.2f} s; flags '{args.flags}'",

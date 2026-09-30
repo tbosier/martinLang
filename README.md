@@ -22,19 +22,21 @@ Mint, and the compiler derives the gradient.
 
 | 3,171 parameters, 4 chains × 1000 draws | wall time | converged? | effective draws per second |
 |---|---|---|---|
-| Mint | 8.2 s | yes (R-hat 1.002) | 281 |
+| Mint | 8.3 s | yes (R-hat 1.002) | 276 |
 | Stan (stanc `--O1`) | 48.5 s | yes (R-hat 1.002) | 38.3 |
 | rustmc (elliptical slice) | 7.0 s | **no** (R-hat 1.95) | not usable |
-| hand-written SIMD Rust, same sampler as Mint | 6.7 s | yes | 297 |
+| hand-written SIMD Rust, same sampler as Mint | 6.6 s | yes | 299 |
 
 - Mint's and Stan's posterior means agree within 1.5 Monte Carlo standard
   errors. That is means only, not variances or tails.
 - rustmc's chains did not converge in these runs (1000 warmup + 1000 sweeps),
   and its means are off by up to 0.9 posterior standard deviations.
-- At 37,901 parameters, Mint's whole run costs 0.76 ms per gradient including
-  the sampler. Stan's costs 11.2 ms, measured with stanc's default `--O0`, a
-  shorter run and one CPU chiplet. Neither fully converges at the run lengths
-  used; see the report.
+- At 37,901 parameters, Mint's whole run costs 0.30 ms of wall time per
+  gradient per chain, including the sampler. Stan's costs 11.2 ms. That is not
+  a like-for-like cost: Stan used stanc's default `--O0`, a shorter run and
+  one CPU chiplet, and ran one thread per chain, while Mint's sampler split
+  each chain across 3 threads. Mint's run (278 s) is right at the mixing bar
+  and Stan's does not reach it; see the report.
 
 **Against Rust, on three smaller problems** ([details](docs/benchmark.md)):
 
@@ -50,7 +52,7 @@ Rust and within 2x of straightforward Rust. The answer is yes. Mint is about
 5 to 7x faster than straightforward Rust on the logistic and Newton problems,
 and 2.7x on linear regression before its algebraic rewrite. The boundary is
 expert Rust written with SIMD intrinsics and vector math. That code ties Mint
-on the logistic gradient, and is 1.55x faster on Newton and 1.2 to 1.3x faster
+on the logistic gradient, and is 1.55x faster on Newton and 1.1 to 1.3x faster
 on the time-series model. It takes roughly 10 to 30 times as much code
 (counting its shared SIMD helpers), including hand-derived gradients.
 
@@ -127,8 +129,8 @@ are in `examples/errors/`.
 
 ## Quick start
 
-Requirements: Rust (cargo), clang, and glibc's vector math library
-(`libmvec`). It has been tested only on Linux x86-64 with rustc 1.89,
+Requirements: Rust (cargo), clang with its OpenMP runtime (`libomp`), and
+glibc's vector math library (`libmvec`). It has been tested only on Linux x86-64 with rustc 1.89,
 clang 22.1 and glibc 2.44; other versions are untested.
 
 ```sh
@@ -152,6 +154,10 @@ Useful environment variables for compiled programs:
 
 - `MINT_GRADCHECK=1` compares the compiled gradient with finite differences.
 - `MINT_BENCH_GRAD=K` times K gradient evaluations and exits.
+- `MINT_THREADS_PER_CHAIN=N` sets how many threads each chain's sampler
+  passes use. The default is 1 below 8,192 parameters.
+- `MINT_METRIC=grad` switches to the experimental gradient-based metric
+  adaptation.
 
 ## The language in one page
 

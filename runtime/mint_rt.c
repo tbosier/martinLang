@@ -5,12 +5,14 @@
 // sampler is identical on both sides of the benchmark.
 
 #include <math.h>
+#include <omp.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 // ---------------------------------------------------------------- basics
 
@@ -241,7 +243,7 @@ typedef void (*mint_constrain_fn)(const double *unc, double *out);
 // per-chain free list. The arithmetic and the order of random draws are
 // exactly those of Stan's base_nuts structure.
 typedef struct St {
-  double *q, *p, *g, *ps;  // position, momentum, gradient, inverse-metric * momentum
+  double *q, *p, *g;  // position, momentum, gradient
   double lp, h;            // log density, Hamiltonian
   int rc;
   struct St *next_free;
@@ -269,7 +271,11 @@ typedef struct {
   double sum_metro;
   int divergent;
   int depth;
+  int nt;        // threads splitting this chain's D-length passes (1 = serial)
+  int team_min;  // smallest OpenMP team that actually ran one of those passes
 } Nuts;
+
+#define MAX_NT 64
 
 static St *st_acquire(Nuts *s) {
   St *x = s->free_list;
@@ -281,7 +287,6 @@ static St *st_acquire(Nuts *s) {
     x->q = mint_alloc(s->D);
     x->p = mint_alloc(s->D);
     x->g = mint_alloc(s->D);
-    x->ps = mint_alloc(s->D);
     s->all[s->n_all++] = x;
   }
   x->rc = 1;
@@ -339,6 +344,40 @@ static void leapfrog_into(Nuts *s, const St *z, St *n, double eps) {
 static double leaf_into(Nuts *s, const St *z, St *n, double eps, double *rho) {
   int64_t D = s->D;
   const double *restrict im = s->inv_m;
+  if (s->nt > 1) {
+    // Split across s->nt threads. Partial sums are combined in thread order,
+    // so the result is deterministic for a given thread count.
+    int nt = s->nt;
+#pragma omp parallel for num_threads(nt) schedule(static)
+    for (int64_t i = 0; i < D; i++) {
+      double ph = z->p[i] + 0.5 * eps * z->g[i];
+      n->p[i] = ph;
+      n->q[i] = z->q[i] + eps * im[i] * ph;
+    }
+    eval(s, n);
+    // OpenMP may give a smaller team than asked for (thread limits, nesting),
+    // so the split follows the team actually running, not nt.
+    double part[MAX_NT];
+    int used = 1;
+#pragma omp parallel num_threads(nt)
+    {
+      int t = omp_get_thread_num(), T = omp_get_num_threads();
+      if (t == 0) used = T;
+      int64_t lo = D * t / T, hi = D * (t + 1) / T;
+      double k = 0;
+      for (int64_t i = lo; i < hi; i++) {
+        double p = n->p[i] + 0.5 * eps * n->g[i];
+        n->p[i] = p;
+        k += p * p * im[i];
+        rho[i] = p;
+      }
+      part[t] = k;
+    }
+    if (used < s->team_min) s->team_min = used;
+    double k = 0;
+    for (int t = 0; t < used; t++) k += part[t];
+    return -n->lp + 0.5 * k;
+  }
   for (int64_t i = 0; i < D; i++) {
     double ph = z->p[i] + 0.5 * eps * z->g[i];
     n->p[i] = ph;
@@ -350,19 +389,58 @@ static double leaf_into(Nuts *s, const St *z, St *n, double eps, double *rho) {
     double p = n->p[i] + 0.5 * eps * n->g[i];
     n->p[i] = p;
     k += p * p * im[i];
-    n->ps[i] = im[i] * p;
     rho[i] = p;
   }
   return -n->lp + 0.5 * k;
+}
+
+// rho = ra + rb, and the three no-U-turn checks:
+//   (a1, b1) = (end_ps . rho, beg_ps . rho)
+//   (a2, b2) = (mid2_ps . (ra + mid2_p), beg_ps . (ra + mid2_p))
+//   (a3, b3) = (end_ps . (rb + mid1_p), mid1_ps . (rb + mid1_p))
+// Returns 1 when all three pass.
+// Scaled momenta (inverse metric * p) are recomputed here instead of being
+// stored with every state: (im * p) rounds exactly as a stored value would,
+// and the sampler moves less memory.
+static int merge_checks(Nuts *s, double *rho, const double *ra, const double *rb, const double *beg_p,
+                        const double *end_p, const double *mid2_p, const double *mid1_p) {
+  int64_t D = s->D;
+  int nt = s->nt;
+  const double *restrict im = s->inv_m;
+  double part[MAX_NT][6];
+  int used = 1;
+#pragma omp parallel num_threads(nt) if (nt > 1)
+  {
+    int t = omp_get_thread_num(), T = omp_get_num_threads();
+    if (t == 0) used = T;
+    int64_t lo = D * t / T, hi = D * (t + 1) / T;
+    double a1 = 0, b1 = 0, a2 = 0, b2 = 0, a3 = 0, b3 = 0;
+    for (int64_t i = lo; i < hi; i++) {
+      double beg_ps = im[i] * beg_p[i], end_ps = im[i] * end_p[i];
+      double r = ra[i] + rb[i];
+      rho[i] = r;
+      a1 += end_ps * r;
+      b1 += beg_ps * r;
+      double r2 = ra[i] + mid2_p[i];
+      a2 += (im[i] * mid2_p[i]) * r2;
+      b2 += beg_ps * r2;
+      double r3 = rb[i] + mid1_p[i];
+      a3 += end_ps * r3;
+      b3 += (im[i] * mid1_p[i]) * r3;
+    }
+    part[t][0] = a1, part[t][1] = b1, part[t][2] = a2, part[t][3] = b2, part[t][4] = a3, part[t][5] = b3;
+  }
+  if (used < s->team_min) s->team_min = used;
+  double v[6] = {0, 0, 0, 0, 0, 0};
+  for (int t = 0; t < used; t++)
+    for (int k = 0; k < 6; k++) v[k] += part[t][k];
+  return (v[0] > 0 && v[1] > 0) & (v[2] > 0 && v[3] > 0) & (v[4] > 0 && v[5] > 0);
 }
 
 static void sample_momentum(Nuts *s, St *z) {
   for (int64_t i = 0; i < s->D; i++) z->p[i] = rng_normal(&s->rng) / sqrt(s->inv_m[i]);
 }
 
-static void p_sharp(Nuts *s, St *z) {
-  for (int64_t i = 0; i < s->D; i++) z->ps[i] = s->inv_m[i] * z->p[i];
-}
 
 // a fresh state with z's position, gradient and log density
 static St *st_clone_position(Nuts *s, const St *z) {
@@ -381,7 +459,6 @@ static void vcopy(double *d, const double *s, int64_t D) { memcpy(d, s, D * size
 // multinomial proposal, and rho has the subtree's summed momenta added.
 static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double *rho, double H0,
                       double sign, double *log_sum_weight) {
-  int64_t D = s->D;
   if (depth == 0) {
     St *n = st_acquire(s);
     double h = leaf_into(s, s->edge, n, sign * s->eps, rho);
@@ -417,26 +494,8 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
   }
 
   // rho = rho_init + rho_final and the three no-U-turn checks, in one pass
-  {
-    const double *ri = L->rho_init, *rf = L->rho_final;
-    const double *bps = (*beg)->ps, *eps_ = (*end)->ps;
-    const double *fbp = L->final_beg->p, *fbps = L->final_beg->ps;
-    const double *iep = L->init_end->p, *ieps = L->init_end->ps;
-    double a1 = 0, b1 = 0, a2 = 0, b2 = 0, a3 = 0, b3 = 0;
-    for (int64_t i = 0; i < D; i++) {
-      double r = ri[i] + rf[i];
-      rho[i] = r;
-      a1 += eps_[i] * r;
-      b1 += bps[i] * r;
-      double r2 = ri[i] + fbp[i];
-      a2 += fbps[i] * r2;
-      b2 += bps[i] * r2;
-      double r3 = rf[i] + iep[i];
-      a3 += eps_[i] * r3;
-      b3 += ieps[i] * r3;
-    }
-    persist = (a1 > 0 && b1 > 0) & (a2 > 0 && b2 > 0) & (a3 > 0 && b3 > 0);
-  }
+  persist = merge_checks(s, rho, L->rho_init, L->rho_final, (*beg)->p, (*end)->p, L->final_beg->p,
+                         L->init_end->p);
 out:
   st_set(s, &L->init_end, NULL);
   st_set(s, &L->final_beg, NULL);
@@ -452,9 +511,9 @@ typedef struct {
 // Returns the acceptance statistic.
 static double transition(Nuts *s, Traj *t) {
   int64_t D = s->D;
+  (void)D;
   St *z0 = st_clone_position(s, s->cur);
   sample_momentum(s, z0);
-  p_sharp(s, z0);
   St *fwd_fwd = NULL, *fwd_bck = NULL, *bck_fwd = NULL, *bck_bck = NULL;
   St *edge_fwd = NULL, *edge_bck = NULL, *sample = NULL, *propose = NULL;
   St **refs[] = {&fwd_fwd, &fwd_bck, &bck_fwd, &bck_bck, &edge_fwd, &edge_bck, &sample, &propose};
@@ -493,26 +552,8 @@ static double transition(Nuts *s, Traj *t) {
     }
     log_sum_weight = log_sum_exp(log_sum_weight, lsw_sub);
 
-    int persist;
-    {
-      const double *rb = t->rho_bck, *rf = t->rho_fwd;
-      const double *bbps = bck_bck->ps, *ffps = fwd_fwd->ps, *fbps = fwd_bck->ps, *bfps = bck_fwd->ps;
-      const double *fbp = fwd_bck->p, *bfp = bck_fwd->p;
-      double a1 = 0, b1 = 0, a2 = 0, b2 = 0, a3 = 0, b3 = 0;
-      for (int64_t i = 0; i < D; i++) {
-        double r = rb[i] + rf[i];
-        t->rho[i] = r;
-        a1 += ffps[i] * r;
-        b1 += bbps[i] * r;
-        double r2 = rb[i] + fbp[i];
-        a2 += fbps[i] * r2;
-        b2 += bbps[i] * r2;
-        double r3 = rf[i] + bfp[i];
-        a3 += ffps[i] * r3;
-        b3 += bfps[i] * r3;
-      }
-      persist = (a1 > 0 && b1 > 0) & (a2 > 0 && b2 > 0) & (a3 > 0 && b3 > 0);
-    }
+    int persist = merge_checks(s, t->rho, t->rho_bck, t->rho_fwd, bck_bck->p, fwd_fwd->p, fwd_bck->p,
+                               bck_fwd->p);
     if (!persist) break;
   }
   st_set(s, &s->cur, sample);
@@ -614,7 +655,9 @@ typedef struct {
   int64_t D, draws, warmup;
   uint64_t seed;
   int chain;
+  int threads_per_chain;
   // outputs
+  int team_min;
   double *out;  // draws x D, constrained
   double step_size;
   int64_t n_grad, divergent;
@@ -627,6 +670,8 @@ static void *run_chain(void *arg) {
   Nuts *sp = calloc(1, sizeof(Nuts));
   Nuts *s = sp;
   s->D = D;
+  s->nt = job->threads_per_chain;
+  s->team_min = s->nt;
   s->f = job->f;
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
@@ -652,6 +697,20 @@ static void *run_chain(void *arg) {
     if (++tries == 100) mint_panic("could not find a finite initial point in 100 tries");
   }
 
+  // Metric adaptation: "stan" uses the variance of the draws in each window;
+  // "grad" (nutpie's idea) uses sqrt(var(draws) / var(gradients)), which is
+  // exact for a Gaussian with diagonal covariance, and starts from the
+  // gradient at the initial point instead of the identity.
+  const char *metric_env = getenv("MINT_METRIC");
+  int grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
+  const char *init_env = getenv("MINT_METRIC_INIT");
+  if (grad_metric && !(init_env && strcmp(init_env, "0") == 0)) {
+    for (int64_t i = 0; i < D; i++) {
+      double a = fabs(s->cur->g[i]);
+      double v = a > 0 ? 1.0 / a : 1.0;
+      s->inv_m[i] = v < 1e-6 ? 1e-6 : v > 1e6 ? 1e6 : v;
+    }
+  }
   s->eps = 1.0;
   init_stepsize(s);
   DualAvg da;
@@ -660,15 +719,18 @@ static void *run_chain(void *arg) {
   Windows w;
   windows_init(&w, job->warmup);
   double *wmean = mint_alloc(D), *wm2 = mint_alloc(D);
+  double *gmean = mint_alloc(D), *gm2 = mint_alloc(D);
   vzero(wmean, D);
   vzero(wm2, D);
+  vzero(gmean, D);
+  vzero(gm2, D);
   int64_t wn = 0;
 
   job->divergent = 0;
   int64_t total_leapfrog = 0;
   for (int64_t it = 0; it < job->warmup + job->draws; it++) {
     double accept = transition(s, &t);
-    const double *q = s->cur->q;
+    const double *q = s->cur->q, *gq = s->cur->g;
     if (it < job->warmup) {
       da_learn(&da, &s->eps, accept);
       if (w.enabled) {
@@ -679,16 +741,26 @@ static void *run_chain(void *arg) {
             wmean[i] += d / (double)wn;
             wm2[i] += d * (q[i] - wmean[i]);
           }
+          if (grad_metric) {
+            for (int64_t i = 0; i < D; i++) {
+              double d = gq[i] - gmean[i];
+              gmean[i] += d / (double)wn;
+              gm2[i] += d * (gq[i] - gmean[i]);
+            }
+          }
         }
         if (end_window(&w)) {
           next_window(&w);
           double n = (double)wn;
           for (int64_t i = 0; i < D; i++) {
             double var = wn > 1 ? wm2[i] / (n - 1.0) : 1.0;
+            if (grad_metric && wn > 1 && gm2[i] > 0) var = sqrt(var / (gm2[i] / (n - 1.0)));
             s->inv_m[i] = (n / (n + 5.0)) * var + 1e-3 * (5.0 / (n + 5.0));
           }
           vzero(wmean, D);
           vzero(wm2, D);
+          vzero(gmean, D);
+          vzero(gm2, D);
           wn = 0;
           w.counter++;
           init_stepsize(s);
@@ -707,10 +779,13 @@ static void *run_chain(void *arg) {
   }
   job->step_size = s->eps;
   job->n_grad = s->n_grad;
+  job->team_min = s->team_min;
   job->mean_leapfrog = job->draws ? (double)total_leapfrog / (double)job->draws : 0;
 
   free(wmean);
   free(wm2);
+  free(gmean);
+  free(gm2);
   for (size_t k = 0; k < sizeof tv / sizeof tv[0]; k++) free(*tv[k]);
   for (int d = 0; d <= MAX_DEPTH; d++) {
     free(s->lv[d].rho_init);
@@ -718,7 +793,7 @@ static void *run_chain(void *arg) {
   }
   for (int k = 0; k < s->n_all; k++) {
     St *x = s->all[k];
-    free(x->q), free(x->p), free(x->g), free(x->ps), free(x);
+    free(x->q), free(x->p), free(x->g), free(x);
   }
   free(s->inv_m);
   free(sp);
@@ -808,6 +883,7 @@ typedef struct {
   double seconds;
   int64_t n_grad, divergent;
   double *step_size, *mean_leapfrog;
+  int threads_per_chain, team_min, grad_metric;
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -953,6 +1029,19 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   }
   if (k != D) mint_panic("sample: parameter sizes do not add up to the model dimension");
 
+  // Threads per chain for the sampler's D-length passes. Splitting only pays
+  // off when D is large; the default gives each chain about (physical cores /
+  // chains) threads, assuming two hardware threads per core.
+  int tpc = 1;
+  const char *tenv = getenv("MINT_THREADS_PER_CHAIN");
+  if (tenv) {
+    tpc = atoi(tenv);
+  } else if (D >= 8192) {
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    tpc = (int)((online / 2) / chains);
+  }
+  if (tpc < 1) tpc = 1;
+  if (tpc > MAX_NT) tpc = MAX_NT;
   ChainJob *jobs = calloc((size_t)chains, sizeof *jobs);
   pthread_t *th = calloc((size_t)chains, sizeof *th);
   double t0 = mint_clock();
@@ -964,6 +1053,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .warmup = warmup,
                          .seed = (uint64_t)seed,
                          .chain = (int)c,
+                         .threads_per_chain = tpc,
                          .out = post->draw + c * draws * D};
     if (chains == 1) {
       run_chain(&jobs[c]);
@@ -976,7 +1066,12 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   post->seconds = mint_clock() - t0;
   post->step_size = mint_alloc(chains);
   post->mean_leapfrog = mint_alloc(chains);
+  post->threads_per_chain = tpc;
+  post->team_min = tpc;
+  const char *metric_env = getenv("MINT_METRIC");
+  post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
   for (int64_t c = 0; c < chains; c++) {
+    if (jobs[c].team_min < post->team_min) post->team_min = jobs[c].team_min;
     post->n_grad += jobs[c].n_grad;
     post->divergent += jobs[c].divergent;
     post->step_size[c] = jobs[c].step_size;
@@ -1078,6 +1173,8 @@ void mint_print_posterior(MintPosterior *p) {
   printf("\n");
   fprintf(stderr, "sampling took %.6f s (%.0f ns per gradient incl. sampler); preparation took %.6f s\n",
           p->seconds, 1e9 * p->seconds / (double)(p->n_grad ? p->n_grad : 1), prep_seconds);
+  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s\n", p->threads_per_chain,
+          p->team_min, p->grad_metric ? "grad" : "stan");
 }
 
 // Posterior mean of flat component j (0-based), used by generated code.

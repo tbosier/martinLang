@@ -45,8 +45,11 @@ fn runtime_object() -> PathBuf {
         eprintln!("error: cannot read runtime {}: {e}", src_path.display());
         exit(1);
     });
+    // The cache key covers the compile flags as well as the source.
+    const RT_FLAGS: [&str; 4] = ["-O3", "-march=native", "-fopenmp", "-c"];
     let mut h = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut h);
+    RT_FLAGS.hash(&mut h);
     let dir = match std::env::var("MINT_CACHE") {
         Ok(d) => PathBuf::from(d),
         Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime-cache"),
@@ -58,7 +61,7 @@ fn runtime_object() -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create runtime cache directory");
     let tmp = dir.join(format!("mint_rt-{}.o.tmp", std::process::id()));
     let status = Command::new("clang")
-        .args(["-O3", "-march=native", "-c"])
+        .args(RT_FLAGS)
         .arg(&src_path)
         .arg("-o")
         .arg(&tmp)
@@ -138,7 +141,7 @@ fn main() {
                 // glibc's vector math library (exp, log, ... on 4 lanes, <= 4 ulp)
                 cmd.arg("-fveclib=libmvec");
             }
-            cmd.arg(&ll_path).arg(&rt).args(["-o", &o, "-lm", "-lpthread"]);
+            cmd.arg(&ll_path).arg(&rt).args(["-o", &o, "-fopenmp", "-lm", "-lpthread"]);
             if opts.vecmath && !opts.strict_fp {
                 cmd.arg("-lmvec");
             }

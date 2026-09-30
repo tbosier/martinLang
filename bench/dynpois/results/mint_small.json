@@ -6,11 +6,15 @@
   "warmup": 1000,
   "draws": 1000,
   "thin": 1,
-  "wall_seconds": 8.194813,
+  "wall_seconds": 8.344725,
   "gradients": 1997671,
-  "notes": "Mint-compiled log density, NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; process wall 8.37 s incl. data load and summary; compile 0.13 s; flags ''",
   "extra": {
     "seed": 11,
-    "sampler": "mint runtime NUTS"
-  }
+    "sampler": "mint runtime NUTS",
+    "threads_per_chain": 1,
+    "smallest_team": 1,
+    "metric": "stan",
+    "env": {}
+  },
+  "notes": "Mint-compiled log density, NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; process wall 8.49 s incl. data load and summary; compile 0.13 s; flags ''"
 }

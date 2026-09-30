@@ -200,10 +200,14 @@ Other choices:
   (7.8 ms against 13.9 ms), because the sampler dominates at this size.
 - **The sampler.** The runtime's NUTS was rewritten to share immutable states
   by reference instead of copying them, and to fuse its passes over the
-  parameter vector. Its draws are bit-identical to before, and it is faster:
-  1.9x on the 3,171-dimension model, 2.1x on the 37,901-dimension model. The
-  logistic full-run numbers above use it for Mint and for every Rust baseline
-  alike.
+  parameter vector. Its draws are bit-identical to before. That rewrite made a
+  whole run 1.9x faster on the 3,171-dimension model and 2.1x faster on the
+  37,901-dimension model; the later changes in
+  [hierarchical.md](hierarchical.md) (recomputed momenta, threads within a
+  chain) take the large model to 4.5 to 5.2x. The logistic full-run numbers above
+  were measured with the first rewrite, for Mint and for every Rust baseline
+  alike, and were not rerun after the later changes. Those changes keep the
+  draws identical at this size (21 parameters, serial path).
 
 ## Clarity
 

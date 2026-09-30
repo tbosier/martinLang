@@ -64,11 +64,19 @@ them needs new language features; each is a compiler or runtime change.
    three passes over X per iteration (X * w, X' r, the Gram product), where the
    hand-written Rust makes one; Rust is about 1.6x faster. The fix is fusing
    consecutive statements whose kernels stream the rows of the same matrix.
-3. **Sampler memory traffic at tens of thousands of dimensions.** With four
-   chains at D = 37,901, each leapfrog step streams several MB per chain, so
-   the sampler (not the model) is the bottleneck. Options: fewer state vectors
-   per step, and a single chain split across cores instead of four chains
-   sharing a cache.
+3. **The sampler at tens of thousands of dimensions.** Sharing states by
+   reference, recomputing scaled momenta and splitting each chain's passes
+   across threads took the large model from 1448 s to under 330 s. The sampler and
+   model still run as separate passes over each state, though. The next step
+   is having the compiler emit the leapfrog step fused with the model, so that
+   position, momentum and gradient are updated in the same loop that computes
+   the gradient. The model gradient itself is still one thread per chain.
+4. **Adaptation that needs fewer gradients.** A gradient-informed diagonal
+   metric halved trajectory lengths on the time-series model but gave about
+   3.5x fewer effective draws per gradient, and made no measurable difference
+   on the two small models. The remaining candidates are metrics that capture
+   correlation (low-rank or structured) and reparameterisations the compiler
+   can derive from the model.
 
 ## Success and stop criteria
 

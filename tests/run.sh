@@ -12,7 +12,7 @@ bad()  { echo "FAIL  $1"; fail=1; }
 
 (cd compiler && cargo build --release -q) || { echo "FAIL  compiler build"; exit 1; }
 mkdir -p build
-clang -O3 -march=native -c runtime/mint_rt.c -o build/mint_rt.o || { echo "FAIL  runtime build"; exit 1; }
+clang -O3 -march=native -fopenmp -c runtime/mint_rt.c -o build/mint_rt.o || { echo "FAIL  runtime build"; exit 1; }
 
 # build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary
 build() {
@@ -23,14 +23,14 @@ build() {
 build_rust() {
   rm -f "build/rs_$1"
   rustc --edition 2021 -C opt-level=3 -C target-cpu=native "baselines/$1.rs" -o "build/rs_$1" \
-    -C link-arg="$PWD/build/mint_rt.o" -l m || bad "build baselines/$1.rs"
+    -C link-arg="$PWD/build/mint_rt.o" -C link-arg=-lomp -l m || bad "build baselines/$1.rs"
 }
 for b in logistic_newton logistic_bayes logistic_bayes_tuned linear_bayes linear_bayes_suffstats; do build_rust $b; done
 # max-effort baselines need nightly Rust (AVX2 intrinsics, glibc vector math)
 for b in logistic_bayes_max logistic_newton_max; do
   rm -f "build/rs_$b"
   rustc +nightly --edition 2021 -C opt-level=3 -C target-cpu=native "baselines/$b.rs" -o "build/rs_$b" \
-    -C link-arg="$PWD/build/mint_rt.o" -l m -l mvec || bad "build baselines/$b.rs (nightly)"
+    -C link-arg="$PWD/build/mint_rt.o" -C link-arg=-lomp -l m -l mvec || bad "build baselines/$b.rs (nightly)"
 done
 
 # ---- compile-time errors
@@ -202,8 +202,12 @@ done
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.
 
-out=$(./build/eight_schools 2>/dev/null)
-python3 - "$out" <<'PY' && pass "eight schools posterior" || bad "eight schools posterior"
+# The same check on the threaded sampler path and the gradient-based metric.
+check_eight() {
+  local label=$1; shift
+  local out
+  out=$(env "$@" ./build/eight_schools 2>/dev/null)
+  python3 - "$out" <<'PY' && pass "eight schools posterior ($label)" || bad "eight schools posterior ($label)"
 import sys
 rows = {l.split()[0]: l.split() for l in sys.argv[1].splitlines() if l and l.split()[0] in ("mu", "tau")}
 ok = len(rows) == 2
@@ -216,5 +220,16 @@ for name, exact in (("mu", 4.4414), ("tau", 3.2904)):
     ok &= abs(mean - exact) < 4 * mcse
 sys.exit(0 if ok else 1)
 PY
+}
+check_eight serial MINT_THREADS_PER_CHAIN=1
+check_eight "3 threads per chain" MINT_THREADS_PER_CHAIN=3
+check_eight "gradient metric" MINT_METRIC=grad
+
+# When OpenMP runs a smaller team than requested, the sampler must follow the
+# team it got: with a limit of one thread the draws equal the serial ones.
+serial=$(MINT_THREADS_PER_CHAIN=1 ./build/eight_schools 2>/dev/null)
+limited=$(MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/eight_schools 2>/dev/null)
+[ -n "$serial" ] && [ "$serial" = "$limited" ] && pass "sampler follows a reduced OpenMP team" \
+  || bad "reduced OpenMP team changed the draws"
 
 exit $fail
