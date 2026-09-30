@@ -7,49 +7,57 @@ uses those facts to reject wrong programs and to choose faster code.
 
 It has its own compiler (`mintc`: parser, type checker, IR, compile-time
 automatic differentiation, loop fusion and fission, a sufficient-statistics
-rewrite, and an LLVM IR emitter). LLVM turns that IR into machine code. A
-small C runtime supplies I/O, a Cholesky solve and a NUTS sampler.
+rewrite, and an LLVM IR emitter). LLVM turns that IR into machine code. Like
+most languages, Mint also has a small runtime library, written in C and
+compiled once. It supplies file I/O, printing, a Cholesky solve and the NUTS
+sampler that repeatedly calls your compiled model. Building a program takes
+60 to 160 ms.
 
-## The gate, answered
+## What the prototype shows
 
-The question set for this prototype had two parts. Can this syntax express a
-realistic small numerical problem more clearly than equivalent Rust? And does
-it run within about 2x of a straightforward Rust implementation?
+**Against Stan and rustmc, on a hierarchical time-series model with up to
+37,901 parameters** ([details](docs/hierarchical.md)). A panel of Poisson count
+series has a random walk per series and pooled intercepts. It is 18 lines of
+Mint, and the compiler derives the gradient.
 
-**Yes on both counts, for the three examples tested.** Measured on one machine
-against Rust baselines I wrote myself (see [the benchmark report](docs/benchmark.md)
-for the method, the full tables and the caveats):
-
-| problem | Mint | straightforward Rust | hand-tuned Rust |
+| 3,171 parameters, 4 chains × 1000 draws | wall time | converged? | effective draws per second |
 |---|---|---|---|
-| logistic regression, time per gradient (n=5000, p=20) | 46 µs | 178 µs | 139 µs |
-| logistic regression, full NUTS run, same sampler | 0.68 s | 2.56 s | 1.91 s |
-| Newton's method, logistic regression (n=200000, p=50) | 0.35 s | 2.35 s | 0.40 s |
-| linear regression, time per gradient (n=50000, p=20) | 100 ns | 897 µs | 258 ns (with the same rewrite by hand) |
-| linear regression, full NUTS run including preparation | 8.9 ms | 16.7 s | 14.9 ms (same rewrite) |
-| lines of code, three examples | 15 to 18 | 59 to 78 | |
+| Mint | 8.2 s | yes (R-hat 1.002) | 281 |
+| Stan (stanc `--O1`) | 48.5 s | yes (R-hat 1.002) | 38.3 |
+| rustmc (elliptical slice) | 7.0 s | **no** (R-hat 1.95) | not usable |
+| hand-written SIMD Rust, same sampler as Mint | 6.7 s | yes | 297 |
 
-These are medians of 7 interleaved runs, and no min-max range overlaps its
-neighbour in this table. Across four logistic problem shapes, Mint's gradient
-is 2.2x to 3.1x faster than the tuned Rust.
+- Mint's and Stan's posterior means agree within 1.5 Monte Carlo standard
+  errors. That is means only, not variances or tails.
+- rustmc's chains did not converge in these runs (1000 warmup + 1000 sweeps),
+  and its means are off by up to 0.9 posterior standard deviations.
+- At 37,901 parameters, Mint's whole run costs 0.76 ms per gradient including
+  the sampler. Stan's costs 11.2 ms, measured with stanc's default `--O0`, a
+  shorter run and one CPU chiplet. Neither fully converges at the run lengths
+  used; see the report.
 
-Where that comes from:
+**Against Rust, on three smaller problems** ([details](docs/benchmark.md)):
 
-- **Logistic regression.** Loop fission lets the density and gradient pass
-  vectorise, including `exp` and `log`. Dot products are allowed to
-  reassociate.
-- **Newton.** A Gram kernel chosen because the compiler knows it is computing
-  `X' diag(w) X`.
-- **Linear regression.** An algebraic rewrite to sufficient statistics that the
-  compiler applies because it knows which quantities are data.
+| problem | Mint | straightforward Rust | tuned Rust | max-effort Rust |
+|---|---|---|---|---|
+| logistic gradient (n=5000, p=20) | 35 µs | 178 µs | 139 µs | 37 µs (a tie) |
+| logistic, full NUTS run | 0.51 s | 2.56 s | 1.93 s | 0.55 s |
+| Newton's method (n=200000, p=50) | 0.32 s | 2.41 s | 0.41 s | **0.21 s** |
+| lines of code | 15 to 18 | 59 to 78 | 66 to 97 | 92 to 105 + SIMD helpers |
 
-The honest reading: nothing here is beyond what a determined Rust programmer
-could write by hand. My tuned baselines stay in plain scalar Rust and are still
-1.1x to 3x slower. Rust using SIMD intrinsics, a vector math crate and the same
-loop structure could close that gap. The difference is that Mint gets there
-from source that reads like the mathematics, with no hand-derived gradients,
-and that its type checker rejects several classes of mistake before anything
-runs.
+The original question for this prototype was whether Mint can be clearer than
+Rust and within 2x of straightforward Rust. The answer is yes. Mint is about
+5 to 7x faster than straightforward Rust on the logistic and Newton problems,
+and 2.7x on linear regression before its algebraic rewrite. The boundary is
+expert Rust written with SIMD intrinsics and vector math. That code ties Mint
+on the logistic gradient, and is 1.55x faster on Newton and 1.2 to 1.3x faster
+on the time-series model. It takes roughly 10 to 30 times as much code
+(counting its shared SIMD helpers), including hand-derived gradients.
+
+So the case for Mint is not "faster than Rust". It is expert-level speed from a
+few lines of mathematics, with gradients derived by the compiler, and with
+shape, positivity and SPD errors caught before anything runs. It competes with
+Stan and PyMC rather than with Rust.
 
 ## Two examples
 
@@ -114,7 +122,7 @@ help: declare the parameter as `param sigma: Positive`; Mint then samples log(si
 ```
 
 All examples are in `examples/`: `logistic_newton.mint`, `logistic_bayes.mint`,
-`linear_bayes.mint` and `eight_schools.mint`. Programs that must fail to compile
+`linear_bayes.mint`, `eight_schools.mint` and `dynamic_poisson.mint`. Programs that must fail to compile
 are in `examples/errors/`.
 
 ## Quick start
@@ -131,8 +139,8 @@ clang 22.1 and glibc 2.44; other versions are untested.
 
 `mintc check FILE` type-checks only; `mintc emit FILE` writes the LLVM IR.
 
-The full benchmark (it builds everything, generates data and runs about 12
-minutes) and the test suite:
+The full benchmark (it builds everything, generates data and runs about 6
+minutes; the max-effort baselines need nightly Rust) and the test suite:
 
 ```sh
 python3 bench/bench.py 7    # writes bench/results.json
@@ -155,7 +163,10 @@ Useful environment variables for compiled programs:
 - Matrices: `Matrix[m, n]`, `PSD[n]`, `SPD[n]`.
 
 Dimension names such as `n` are bound by function parameters or by an annotated
-`read`, and are checked everywhere after.
+`read`, and are checked everywhere after. A vector combined with a matrix is
+matched to the dimension with the same name: a `Vector[G]` plus a
+`Matrix[G, T]` repeats across `T`. If both dimensions have the same name, that
+is a compile error, because it is ambiguous.
 
 **Expressions.**
 
@@ -166,6 +177,7 @@ Dimension names such as `n` are bound by function parameters or by an annotated
   vectors it is an error, because it is ambiguous.
 - Functions: `exp`, `log`, `log1p`, `sqrt`, `sigmoid` and `abs` apply
   elementwise; `sum`, `dot` and `norm` reduce.
+- `cumsum(v)` and `cumsum(M, T)` are running sums along the last dimension.
 - Constructors: `zeros(p)`, `ones(p)`, `I(p)`, `diag(w)` (inside a product
   only), and literals like `[1, 2, 3]`.
 - `solve(H, g)`, which needs a proved-SPD `H`.
@@ -182,10 +194,12 @@ Dimension names such as `n` are bound by function parameters or by an annotated
 
 **Models.**
 
-- `data` and `param` declarations. Parameters are `Real`, `Positive` or
-  `Vector[n]`.
+- `data` and `param` declarations. Parameters are `Real`, `Positive`,
+  `Vector[n]`, `Positive[n]` or `Matrix[m, n]`. Positive parameters are
+  sampled on the log scale, with the Jacobian added for you.
 - `let` definitions and `x ~ Distribution(...)` statements, with `Normal`,
-  `BernoulliLogit` and `Exponential`.
+  `BernoulliLogit`, `PoissonLog` and `Exponential`. The two sides of a `~` can
+  be scalars, vectors or matrices.
 - `sample(Model(data...), draws =, warmup =, chains =, seed =)` runs NUTS with
   Stan's warmup and returns a posterior; `print` summarises it (mean, sd,
   quantiles, ESS, split R-hat).
@@ -195,6 +209,7 @@ followed by row-major little-endian f64.
 
 ## Documents
 
+- [Hierarchical time series against rustmc and Stan](docs/hierarchical.md)
 - [Benchmark report](docs/benchmark.md)
 - [Compiler architecture](docs/architecture.md)
 - [Next milestone](docs/next-milestone.md): the minimum work needed to test

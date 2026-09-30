@@ -154,7 +154,13 @@ void mint_chol_solve(const double *H, int64_t p, const double *g, double *out, c
 // definiteness (a Cholesky factorisation) before the value is used.
 void mint_check_spd(const double *A, int64_t p, const char *what) {
   double scale = 0;
-  for (int64_t i = 0; i < p * p; i++) scale = fmax(scale, fabs(A[i]));
+  for (int64_t i = 0; i < p * p; i++) {
+    if (!isfinite(A[i])) {
+      fprintf(stderr, "mint runtime error: %s: matrix entry %lld is %g\n", what, (long long)(i + 1), A[i]);
+      exit(1);
+    }
+    scale = fmax(scale, fabs(A[i]));
+  }
   for (int64_t i = 0; i < p; i++)
     for (int64_t j = 0; j < i; j++)
       if (fabs(A[i * p + j] - A[j * p + i]) > 1e-12 * scale) {

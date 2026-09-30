@@ -197,6 +197,7 @@ def main():
             "rust max effort": ("rs_logistic_bayes_max", env, grad_ns, d),
         }
     print("running...", file=sys.stderr)
+    load_start = open("/proc/loadavg").read().split()[:3]
     res = bench(groups)
     meta = {
         "cpu": next((l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), "?"),
@@ -205,7 +206,8 @@ def main():
         "clang": sh(["clang", "--version"]).splitlines()[0],
         "reps": REPS,
         "pinned_core": CORE,
-        "loadavg_at_start": open("/proc/loadavg").read().split()[:3],
+        "loadavg_at_start": load_start,
+        "loadavg_at_end": open("/proc/loadavg").read().split()[:3],
     }
     out = {"meta": meta, "compile_seconds": compile_s, "lines_of_code": line_counts(), "results": res}
     with open(os.path.join(ROOT, "bench", "results.json"), "w") as f:

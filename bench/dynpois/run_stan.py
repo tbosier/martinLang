@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from stan_common import BUILD, HERE, compile_model, load_data
+from stan_common import BUILD, HERE, STAN_O1, compile_model, load_data
 
 CHAINS = 4
 DEFAULT_SEED = 20260930
@@ -123,7 +123,8 @@ def main():
         "extra": {"compile_seconds": compile_s, "chain_elapsed_warmup_sampling": elapsed,
                   "divergent": divergent, "treedepth_max_hits": max_depth_hits,
                   "stepsize": stepsize, "leapfrog_total": leapfrog_total,
-                  "transitions": transitions, "seed": SEED, "tag": tag.lstrip("_")},
+                  "transitions": transitions, "seed": SEED, "tag": tag.lstrip("_"),
+                  "stanc_optimisation": "O1" if STAN_O1 else "O0 (stanc default)"},
     }
     with open(stem + ".json", "w") as f:
         json.dump(result, f, indent=1)

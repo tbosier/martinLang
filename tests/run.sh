@@ -26,6 +26,12 @@ build_rust() {
     -C link-arg="$PWD/build/mint_rt.o" -l m || bad "build baselines/$1.rs"
 }
 for b in logistic_newton logistic_bayes logistic_bayes_tuned linear_bayes linear_bayes_suffstats; do build_rust $b; done
+# max-effort baselines need nightly Rust (AVX2 intrinsics, glibc vector math)
+for b in logistic_bayes_max logistic_newton_max; do
+  rm -f "build/rs_$b"
+  rustc +nightly --edition 2021 -C opt-level=3 -C target-cpu=native "baselines/$b.rs" -o "build/rs_$b" \
+    -C link-arg="$PWD/build/mint_rt.o" -l m -l mvec || bad "build baselines/$b.rs (nightly)"
+done
 
 # ---- compile-time errors
 
@@ -59,6 +65,13 @@ expect_runtime_error assume_spd_not_symmetric 'fn main() {
     let A: Matrix[k, k] = read("build/asym.f64")
     print(solve(assume_spd(A), ones(k)))
 }' "matrix is not symmetric"
+python3 -c "
+import struct
+open('build/nan.f64','wb').write(struct.pack('<QQ', 2, 2) + struct.pack('<4d', 1, float('nan'), 0, 1))"
+expect_runtime_error assume_spd_nan 'fn main() {
+    let A: Matrix[k, k] = read("build/nan.f64")
+    print(solve(assume_spd(A), ones(k)))
+}' "matrix entry 2 is nan"
 expect_runtime_error assume_spd_negative 'fn main() {
     print(solve(assume_spd(-1 * I(2)), [1, 1]))
 }' "not numerically positive definite"
@@ -86,10 +99,27 @@ build_and_expect assume_spd_valid 'fn main() {
     print(solve(assume_spd(2 * I(2)), [1, 1]))
 }' "[0.5, 0.5]"
 
-build_and_expect broadcast_and_cumsum 'fn main() {
+printf '%s\n' 'fn main() {
     let M = ones(2, 3) + [10, 20]
     print(cumsum(M, 3))
-}' "[[11, 22, 33],"
+}' > build/broadcast_and_cumsum.mint
+if build build/broadcast_and_cumsum.mint broadcast_and_cumsum; then
+  out=$(./build/broadcast_and_cumsum)
+  [ "$out" = "$(printf '[[11, 22, 33],\n [21, 42, 63]]')" ] && pass "broadcast_and_cumsum (exact output)" || { bad "broadcast_and_cumsum"; echo "$out"; }
+fi
+printf '%s\n' 'model C {
+    data y: Vector[n]
+    param a: Real
+    a ~ Normal(0, 1)
+    cumsum(y) ~ BernoulliLogit(a)
+}
+fn main() {
+    let y = [1, 1]
+    print(sample(C(y), chains = 1))
+}' > build/cumsum_outcome.mint
+out=$($M build build/cumsum_outcome.mint -o build/cumsum_outcome 2>&1) && bad "cumsum outcome accepted" || {
+  grep -qF "cannot contain cumsum" <<<"$out" && pass "cumsum in a BernoulliLogit outcome is rejected" || { bad "cumsum outcome message"; echo "$out"; }
+}
 printf '%s\n' 'fn main() { print(ones(2, 2) + [1, 2]) }' > build/ambiguous.mint
 expect_compile_error build/ambiguous.mint "is ambiguous: both dimensions are 2"
 
@@ -97,7 +127,11 @@ expect_compile_error build/ambiguous.mint "is ambiguous: both dimensions are 2"
 if [ -f bench/dynpois/data_small/y.npy ]; then
   build examples/dynamic_poisson.mint dynpois && \
   MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/dynpois | python3 bench/dynpois/check_grad.py bench/dynpois/data_small \
-    && pass "dynamic Poisson log density and gradient match the exact formula" || bad "dynamic Poisson gradient"
+    && pass "dynamic Poisson log density and gradient match the exact formula (small)" || bad "dynamic Poisson gradient (small)"
+  sed 's#bench/dynpois/data_small/y.f64#bench/dynpois/data_large/y.f64#' examples/dynamic_poisson.mint > build/dynpois_large_check.mint
+  build build/dynpois_large_check.mint dynpois_large_check && \
+  MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/dynpois_large_check | python3 bench/dynpois/check_grad.py bench/dynpois/data_large \
+    && pass "dynamic Poisson log density and gradient match the exact formula (large)" || bad "dynamic Poisson gradient (large)"
 else
   bad "bench/dynpois/data_small missing (run bench/dynpois/make_data.py)"
 fi
@@ -125,13 +159,18 @@ build build/pow_model.mint pow_model && gradcheck pow_model "powers ^0 ^1 ^2"
 build examples/linear_bayes.mint linear_bayes_nss --no-suffstats
 build examples/logistic_bayes.mint lb_nofis --no-fission
 build examples/logistic_bayes.mint lb_strict --strict-fp
+build examples/logistic_bayes.mint lb_novm --no-vecmath
+build examples/logistic_bayes.mint lb_nofis_strict --no-fission --strict-fp
+build examples/linear_bayes.mint linear_bayes_nss_strict --no-suffstats --strict-fp
 
 # ---- same log density and every gradient component as the hand-written Rust
 
 grads() { MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/$1 | sed -n 's/.*logp=\([^ ]*\) .*/\1/p; s/^grad://p' | tr '\n' ' '; }
 for pair in "logistic_bayes rs_logistic_bayes" "lb_nofis rs_logistic_bayes" "lb_strict rs_logistic_bayes" \
-            "logistic_bayes rs_logistic_bayes_tuned" "linear_bayes rs_linear_bayes" \
-            "linear_bayes_nss rs_linear_bayes" "linear_bayes rs_linear_bayes_suffstats"; do
+            "lb_novm rs_logistic_bayes" "lb_nofis_strict rs_logistic_bayes" \
+            "logistic_bayes rs_logistic_bayes_tuned" "logistic_bayes rs_logistic_bayes_max" \
+            "linear_bayes rs_linear_bayes" "linear_bayes_nss rs_linear_bayes" \
+            "linear_bayes_nss_strict rs_linear_bayes" "linear_bayes rs_linear_bayes_suffstats"; do
   set -- $pair
   a=$(grads $1); b=$(grads $2)
   python3 - "$a" "$b" <<'PY' && pass "logp and all gradient components: $1 == $2" || bad "logp/gradient $1 vs $2"
@@ -148,12 +187,17 @@ done
 # ---- Newton: same coefficients as the Rust baseline
 
 build examples/logistic_newton.mint logistic_newton
-a=$(./build/logistic_newton | grep '^w' | tr -d 'w[],'); b=$(./build/rs_logistic_newton | grep '^w' | tr -d 'w[],')
-python3 - "$a" "$b" <<'PY' && pass "newton matches rust" || bad "newton mismatch"
+build examples/logistic_newton.mint logistic_newton_strict --strict-fp
+build examples/logistic_newton.mint logistic_newton_noblock --no-gram-blocking
+b=$(./build/rs_logistic_newton | grep '^w' | tr -d 'w[],')
+for v in logistic_newton logistic_newton_strict logistic_newton_noblock rs_logistic_newton_max; do
+  a=$(./build/$v | grep '^w' | tr -d 'w[],')
+  python3 - "$a" "$b" <<'PY' && pass "newton coefficients: $v == rust" || bad "newton mismatch: $v"
 import sys
 a = [float(x) for x in sys.argv[1].split()]; b = [float(x) for x in sys.argv[2].split()]
 sys.exit(0 if len(a) == len(b) == 50 and max(abs(x - y) for x, y in zip(a, b)) < 1e-8 else 1)
 PY
+done
 
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.

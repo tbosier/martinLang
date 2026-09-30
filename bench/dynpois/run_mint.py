@@ -75,6 +75,7 @@ np.savez(base + "_draws.npz", pop=pop, beta=beta, terminal=terminal)
 json.dump({
     "implementation": args.variant, "G": G, "T": T, "chains": C, "warmup": args.warmup, "draws": N, "thin": 1,
     "wall_seconds": sampling, "gradients": grads,
+    "extra": {"seed": 7 if args.rust else args.seed, "sampler": "mint runtime NUTS"},
     "notes": ("hand-written AVX2 Rust log density (baselines/dynpois_max.rs), " if args.rust else "Mint-compiled log density, ")
              + f"NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; "
              f"process wall {wall:.2f} s incl. data load and summary; compile {compile_s:.2f} s; flags '{args.flags}'",

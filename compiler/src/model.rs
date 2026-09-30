@@ -846,6 +846,10 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                 if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) && l.active() {
                     panic_model(tm, "the outcome of BernoulliLogit and PoissonLog must be data");
                 }
+                if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) && l.has_cumsum() {
+                    // its support could not be checked before sampling
+                    panic_model(tm, "the outcome of BernoulliLogit and PoissonLog cannot contain cumsum");
+                }
                 let ss = if opts.suffstats { plan_suffstats(*dist, &l, &a, shape) } else { None };
                 let fission = opts.fission && ss.is_none() && matches!(shape, SShape::Vec(_)) && wants_fission(*dist, &l, &a);
                 stmts.push(Stmt::Tilde { dist: *dist, lhs: l, args: a, shape: shape.clone(), ss, fission });
@@ -894,9 +898,6 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts) {
     // BernoulliLogit and PoissonLog outcomes are data; check their support once.
     for s in stmts {
         let Stmt::Tilde { dist: d @ (Dist::BernoulliLogit | Dist::PoissonLog), lhs, shape, .. } = s else { continue };
-        if lhs.has_cumsum() {
-            continue;
-        }
         let msg = g.m.string(&format!("model {}", tm.name));
         let checker = if *d == Dist::BernoulliLogit { "mint_check_binary" } else { "mint_check_count" };
         for_shape(&mut g, shape, |g, ix| {

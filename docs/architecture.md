@@ -244,9 +244,10 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   `bench/results.json` includes those runs.
 
 Results therefore differ from a strict left-to-right evaluation in the last
-bits. `tests/run.sh` checks that, at a fixed point, the log density and every
-gradient component agree with the Rust baselines to 1e-9 relative, for each
-configuration benchmarked.
+bits. For every benchmarked logistic and linear configuration, `tests/run.sh`
+checks at a fixed point that the log density and every gradient component
+agree with the Rust baselines to 1e-9 relative. The dynamic Poisson gradient
+is checked against the exact formula at both sizes.
 
 ## Runtime (`runtime/mint_rt.c`)
 
@@ -266,8 +267,9 @@ configuration benchmarked.
   unchanged, so this sampler produces bit-identical draws to the original
   copying version. `tests/run.sh` does not re-check this; it was checked once,
   on eight schools and the dynamic Poisson model.
-- **Speedups.** Sampling was 1.75x faster at 3,171 dimensions and 2.4x faster
-  at 37,901 dimensions.
+- **Speedups.** A whole 4-chain, 1000 + 1000 run was 1.9x faster at 3,171
+  dimensions (15.3 s to 8.2 s) and 2.1x faster at 37,901 dimensions (1448 s to
+  693 s).
 - **What still limits it.** At 37,901 dimensions with four chains, sampling is
   still limited by memory bandwidth: each leapfrog step streams several MB of
   state and model buffers per chain.

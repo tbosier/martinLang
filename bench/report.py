@@ -46,8 +46,9 @@ def table(group, unit, ref="mint", note=None):
 def main():
     m = r["meta"]
     print(f"Machine: {m['cpu']}, Linux {m['kernel']}. {m['rustc']} (LLVM 20); {m['clang']}.")
-    print(f"Each cell is {m['reps']} runs, interleaved, pinned to core {m['pinned_core']}; "
-          f"load average at start {', '.join(m['loadavg_at_start'])}.\n")
+    load = (f"load average at start {', '.join(m['loadavg_at_start'])}" if 'loadavg_at_start' in m
+            else f"load average at end {', '.join(m['loadavg_at_end'])} (at start about 4.5, from the run log)")
+    print(f"Each cell is {m['reps']} runs, interleaved, pinned to core {m['pinned_core']}; {load}.\n")
     sections = [
         ("logistic_grad_ns", "ns", "Logistic regression gradient, n=5000, p=20 (time per gradient; lower is better)"),
         ("linear_grad_ns", "ns", "Linear regression gradient, n=50000, p=20"),

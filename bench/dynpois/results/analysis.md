@@ -4,13 +4,15 @@
 
 | run | size | warmup | draws x thin | wall s | mixed | max R-hat (at) | share R-hat>1.01 | min bulk ESS (at) | min tail ESS | min bulk ESS/s | gradients |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| mint_large | large | 1000 | 1000 x 1 | 1448.3 | NO | 1.016 (pop) | 0.002 | 363 (pop) | 674 | 0.25 (not mixed) | 3668578 |
-| mint_small | small | 1000 | 1000 x 1 | 15.3 | yes | 1.002 (terminal[15]) | 0.000 | 2301 (pop) | 2648 | 150 | 1997671 |
-| rust_max_large | large | 1000 | 1000 x 1 | 1291.5 | NO | 1.008 (pop) | 0.000 | 370 (pop) | 737 | 0.286 (not mixed) | 3650160 |
-| rust_max_small | small | 1000 | 1000 x 1 | 13.0 | yes | 1.003 (beta[0]) | 0.000 | 1983 (pop) | 2382 | 152 | 2023407 |
+| mint_large | large | 1000 | 1000 x 1 | 692.7 | NO | 1.016 (pop) | 0.002 | 363 (pop) | 674 | 0.524 (not mixed) | 3668578 |
+| mint_small | small | 1000 | 1000 x 1 | 8.2 | yes | 1.002 (terminal[15]) | 0.000 | 2301 (pop) | 2648 | 281 | 1997671 |
+| rust_max_large | large | 1000 | 1000 x 1 | 525.8 | NO | 1.008 (pop) | 0.000 | 370 (pop) | 737 | 0.704 (not mixed) | 3650160 |
+| rust_max_small | small | 1000 | 1000 x 1 | 6.7 | yes | 1.003 (beta[0]) | 0.000 | 1983 (pop) | 2382 | 297 | 2023407 |
 | rustmc_large | large | 1000 | 125 x 8 | 109.1 | NO | 2.565 (pop) | 0.996 | 5 (pop) | 11 | 0.0468 (not mixed) | n/a |
 | rustmc_small | small | 1000 | 1000 x 1 | 7.0 | NO | 1.953 (terminal[5]) | 1.000 | 6 (terminal[5]) | 15 | 0.793 (not mixed) | n/a |
+| stan_large | large | 300 | 300 x 1 | 3322.0 | NO | 1.023 (pop) | 0.016 | 125 (pop) | 261 | 0.0375 (not mixed) | 1189242 |
 | stan_small | small | 1000 | 1000 x 1 | 67.7 | yes | 1.002 (beta[4]) | 0.000 | 1860 (pop) | 2486 | 27.5 | 2010131 |
+| stan_small_o1 | small | 1000 | 1000 x 1 | 48.5 | yes | 1.002 (beta[4]) | 0.000 | 1860 (pop) | 2486 | 38.3 | 2010131 |
 
 ## Truth recovery (descriptive: z = (posterior mean - truth) / posterior sd, one data set)
 
@@ -22,7 +24,9 @@
 | rust_max_small | 1.451 (0.122) | -0.40 | -0.16 | 2.74 | 0.024 |
 | rustmc_large | 1.447 (0.093) | -0.57 | -0.11 | 2.89 | 0.032 |
 | rustmc_small | 1.383 (0.094) | -1.24 | -0.26 | 2.26 | 0.073 |
+| stan_large | 1.483 (0.066) | -0.26 | -0.00 | 3.15 | 0.040 |
 | stan_small | 1.446 (0.121) | -0.45 | -0.17 | 2.74 | 0.024 |
+| stan_small_o1 | 1.446 (0.121) | -0.45 | -0.17 | 2.74 | 0.024 |
 
 ## Posterior-mean agreement between runs on the same data
 
@@ -32,10 +36,17 @@ MCSE-scaled differences are shown only when both runs mixed and are independent 
 |---|---|---|---|---|---|---|---|---|
 | large | mint_large | rust_max_large | NO | yes | 0.075 (terminal[114]) | 0.015 | n/a | n/a |
 | large | mint_large | rustmc_large | NO | yes | 0.876 (beta[43]) | 0.130 | n/a | n/a |
+| large | mint_large | stan_large | NO | yes | 0.130 (pop) | 0.037 | n/a | n/a |
 | large | rust_max_large | rustmc_large | NO | yes | 0.843 (beta[43]) | 0.123 | n/a | n/a |
+| large | rust_max_large | stan_large | NO | yes | 0.177 (pop) | 0.051 | n/a | n/a |
+| large | rustmc_large | stan_large | NO | yes | 0.928 (beta[43]) | 0.145 | n/a | n/a |
 | small | mint_small | rust_max_small | yes | yes | 0.048 (beta[17]) | 0.011 | 2.27 | 0.000 |
 | small | mint_small | rustmc_small | NO | yes | 0.842 (beta[9]) | 0.212 | n/a | n/a |
 | small | mint_small | stan_small | yes | yes | 0.028 (terminal[18]) | 0.012 | 1.45 | 0.000 |
+| small | mint_small | stan_small_o1 | yes | yes | 0.028 (terminal[18]) | 0.012 | 1.45 | 0.000 |
 | small | rust_max_small | rustmc_small | NO | yes | 0.842 (beta[9]) | 0.233 | n/a | n/a |
 | small | rust_max_small | stan_small | yes | yes | 0.056 (beta[17]) | 0.019 | 2.51 | 0.000 |
+| small | rust_max_small | stan_small_o1 | yes | yes | 0.056 (beta[17]) | 0.019 | 2.51 | 0.000 |
 | small | rustmc_small | stan_small | NO | yes | 0.861 (beta[9]) | 0.203 | n/a | n/a |
+| small | rustmc_small | stan_small_o1 | NO | yes | 0.861 (beta[9]) | 0.203 | n/a | n/a |
+| small | stan_small | stan_small_o1 | yes | NO | 0.000 (pop) | 0.000 | n/a | n/a |

@@ -14,7 +14,10 @@ import numpy as np  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CMDSTAN = os.path.join(BUILD, "cmdstan", "cmdstan-2.40.0")
-STAN_DIR = os.path.join(BUILD, "stan")
+# STAN_O1=1 compiles with stanc's --O1 optimisations (stanc's default is --O0)
+# into a separate directory, so both builds can coexist.
+STAN_O1 = os.environ.get("STAN_O1") == "1"
+STAN_DIR = os.path.join(BUILD, "stan_o1" if STAN_O1 else "stan")
 cmdstanpy.set_cmdstan_path(CMDSTAN)
 
 
@@ -32,7 +35,8 @@ def compile_model(force=False):
     exe = os.path.join(STAN_DIR, "dynpois")
     need = force or changed or not os.path.exists(exe)
     t0 = time.perf_counter()
-    model = cmdstanpy.CmdStanModel(stan_file=dst, force_compile=need)
+    model = cmdstanpy.CmdStanModel(stan_file=dst, force_compile=need,
+                                   stanc_options={"O1": True} if STAN_O1 else None)
     record = os.path.join(STAN_DIR, "compile_seconds.txt")
     if need:
         seconds = time.perf_counter() - t0
