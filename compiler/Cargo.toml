@@ -1,0 +1,10 @@
+[package]
+name = "mintc"
+version = "0.1.0"
+edition = "2021"
+description = "Prototype compiler for Mint, a small language for numerical intent"
+
+[dependencies]
+
+[profile.release]
+debug = false

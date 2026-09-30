@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# End-to-end tests: compile errors, runtime shape/domain/SPD checks, gradient
+# checks, agreement with the Rust baselines, and a known posterior.
+# Run from anywhere after bench/setup.sh has written data/. Builds everything
+# it runs; any build failure is a test failure.
+set -u
+cd "$(dirname "$0")/.."
+M=./compiler/target/release/mintc
+fail=0
+pass() { echo "PASS  $1"; }
+bad()  { echo "FAIL  $1"; fail=1; }
+
+(cd compiler && cargo build --release -q) || { echo "FAIL  compiler build"; exit 1; }
+mkdir -p build
+clang -O3 -march=native -c runtime/mint_rt.c -o build/mint_rt.o || { echo "FAIL  runtime build"; exit 1; }
+
+# build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary
+build() {
+  local src=$1 out=$2; shift 2
+  rm -f "build/$out"
+  $M build "$src" -o "build/$out" "$@" 2>build/$out.log || { bad "build $src $*"; cat build/$out.log; return 1; }
+}
+build_rust() {
+  rm -f "build/rs_$1"
+  rustc --edition 2021 -C opt-level=3 -C target-cpu=native "baselines/$1.rs" -o "build/rs_$1" \
+    -C link-arg="$PWD/build/mint_rt.o" -l m || bad "build baselines/$1.rs"
+}
+for b in logistic_newton logistic_bayes logistic_bayes_tuned linear_bayes linear_bayes_suffstats; do build_rust $b; done
+
+# ---- compile-time errors
+
+expect_compile_error() { # file substring
+  out=$($M check "$1" 2>&1) && { bad "$1 compiled but should not"; return; }
+  grep -qF -- "$2" <<<"$out" && pass "$1: $2" || { bad "$1: expected '$2' in:"; echo "$out"; }
+}
+expect_compile_error examples/errors/shape_mismatch.mint "inner dimensions p and n must be equal"
+expect_compile_error examples/errors/not_spd.mint "only known to be PSD"
+expect_compile_error examples/errors/real_scale.mint "scale of Normal must be Positive"
+expect_compile_error examples/errors/vector_times_vector.mint "is ambiguous"
+expect_compile_error examples/errors/wrong_annotation.mint "does not fit the annotation SPD[p]"
+
+# ---- runtime checks
+
+expect_runtime_error() { # name source-text substring
+  printf '%s\n' "$2" > "build/$1.mint"
+  build "build/$1.mint" "$1" || return
+  out=$(./build/$1 2>&1) && { bad "$1 ran but should stop"; echo "$out"; return; }
+  grep -qF -- "$3" <<<"$out" && pass "$1: $3" || { bad "$1: expected '$3' in:"; echo "$out"; }
+}
+expect_runtime_error shape_at_read "$(cat examples/errors/dim_mismatch_runtime.mint)" "expected size 5000, got 50000"
+expect_runtime_error domain_at_read 'fn main() {
+    let y: Positive[n] = read("data/logit_y.f64")
+    print(sum(y))
+}' "but the type says every entry is positive"
+python3 -c "
+import struct
+open('build/asym.f64','wb').write(struct.pack('<QQ', 2, 2) + struct.pack('<4d', 1, 100, 0, 1))"
+expect_runtime_error assume_spd_not_symmetric 'fn main() {
+    let A: Matrix[k, k] = read("build/asym.f64")
+    print(solve(assume_spd(A), ones(k)))
+}' "matrix is not symmetric"
+expect_runtime_error assume_spd_negative 'fn main() {
+    print(solve(assume_spd(-1 * I(2)), [1, 1]))
+}' "not numerically positive definite"
+expect_runtime_error bernoulli_bad_data 'model B {
+    data y: Vector[n]
+    param a: Real
+    a ~ Normal(0, 1)
+    y ~ BernoulliLogit(a)
+}
+fn main() {
+    let y: Vector[m] = read("data/linear_y.f64")
+    print(sample(B(y), chains = 1))
+}' "BernoulliLogit needs 0 or 1"
+
+# ---- programs that must now work
+
+build_and_expect() { # name source expected-output-substring
+  printf '%s\n' "$2" > "build/$1.mint"
+  build "build/$1.mint" "$1" || return
+  out=$(./build/$1 2>&1) || { bad "$1 failed to run"; echo "$out"; return; }
+  grep -qF -- "$3" <<<"$out" && pass "$1" || { bad "$1: expected '$3' in:"; echo "$out"; }
+}
+build_and_expect identity_product 'fn main() { print(I(2) * I(2)) }' "[[1, 0],"
+build_and_expect assume_spd_valid 'fn main() {
+    print(solve(assume_spd(2 * I(2)), [1, 1]))
+}' "[0.5, 0.5]"
+
+build_and_expect broadcast_and_cumsum 'fn main() {
+    let M = ones(2, 3) + [10, 20]
+    print(cumsum(M, 3))
+}' "[[11, 22, 33],"
+printf '%s\n' 'fn main() { print(ones(2, 2) + [1, 2]) }' > build/ambiguous.mint
+expect_compile_error build/ambiguous.mint "is ambiguous: both dimensions are 2"
+
+# ---- dynamic Poisson panel: exact gradient (numpy reference from SPEC.md)
+if [ -f bench/dynpois/data_small/y.npy ]; then
+  build examples/dynamic_poisson.mint dynpois && \
+  MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/dynpois | python3 bench/dynpois/check_grad.py bench/dynpois/data_small \
+    && pass "dynamic Poisson log density and gradient match the exact formula" || bad "dynamic Poisson gradient"
+else
+  bad "bench/dynpois/data_small missing (run bench/dynpois/make_data.py)"
+fi
+
+# ---- gradients against finite differences (a NaN counts as infinite error)
+
+gradcheck() { # binary label
+  worst=$(MINT_GRADCHECK=1 MINT_BENCH_GRAD=1 ./build/$1 2>&1 | grep gradcheck | sed 's/.*error=//' | sort -g | tail -1)
+  python3 -c "import sys; w=float('${worst:-inf}'); sys.exit(0 if w < 1e-5 else 1)" && pass "gradcheck $2 ($worst)" || bad "gradcheck $2 ($worst)"
+}
+for e in eight_schools logistic_bayes linear_bayes; do
+  build examples/$e.mint $e && gradcheck $e $e
+done
+printf '%s\n' 'model P {
+    data y: Vector[n]
+    param a: Real
+    a ~ Normal(0, 1)
+    y ~ Normal((exp(-740) * a)^0 + a^1 + a^2, 1)
+}
+fn main() {
+    let y = [0.5, 1.5]
+    print(sample(P(y), chains = 1))
+}' > build/pow_model.mint
+build build/pow_model.mint pow_model && gradcheck pow_model "powers ^0 ^1 ^2"
+build examples/linear_bayes.mint linear_bayes_nss --no-suffstats
+build examples/logistic_bayes.mint lb_nofis --no-fission
+build examples/logistic_bayes.mint lb_strict --strict-fp
+
+# ---- same log density and every gradient component as the hand-written Rust
+
+grads() { MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/$1 | sed -n 's/.*logp=\([^ ]*\) .*/\1/p; s/^grad://p' | tr '\n' ' '; }
+for pair in "logistic_bayes rs_logistic_bayes" "lb_nofis rs_logistic_bayes" "lb_strict rs_logistic_bayes" \
+            "logistic_bayes rs_logistic_bayes_tuned" "linear_bayes rs_linear_bayes" \
+            "linear_bayes_nss rs_linear_bayes" "linear_bayes rs_linear_bayes_suffstats"; do
+  set -- $pair
+  a=$(grads $1); b=$(grads $2)
+  python3 - "$a" "$b" <<'PY' && pass "logp and all gradient components: $1 == $2" || bad "logp/gradient $1 vs $2"
+import sys
+a = [float(x) for x in sys.argv[1].split()]
+b = [float(x) for x in sys.argv[2].split()]
+ok = len(a) == len(b) and len(a) > 2 and all(abs(x - y) <= 1e-9 * max(1.0, abs(y)) for x, y in zip(a, b))
+if not ok:
+    print(f"      lengths {len(a)} {len(b)}; worst diff {max((abs(x-y) for x,y in zip(a,b)), default=0)}")
+sys.exit(0 if ok else 1)
+PY
+done
+
+# ---- Newton: same coefficients as the Rust baseline
+
+build examples/logistic_newton.mint logistic_newton
+a=$(./build/logistic_newton | grep '^w' | tr -d 'w[],'); b=$(./build/rs_logistic_newton | grep '^w' | tr -d 'w[],')
+python3 - "$a" "$b" <<'PY' && pass "newton matches rust" || bad "newton mismatch"
+import sys
+a = [float(x) for x in sys.argv[1].split()]; b = [float(x) for x in sys.argv[2].split()]
+sys.exit(0 if len(a) == len(b) == 50 and max(abs(x - y) for x, y in zip(a, b)) < 1e-8 else 1)
+PY
+
+# ---- eight schools: posterior means of mu and tau against exact grid
+# integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.
+
+out=$(./build/eight_schools 2>/dev/null)
+python3 - "$out" <<'PY' && pass "eight schools posterior" || bad "eight schools posterior"
+import sys
+rows = {l.split()[0]: l.split() for l in sys.argv[1].splitlines() if l and l.split()[0] in ("mu", "tau")}
+ok = len(rows) == 2
+for name, exact in (("mu", 4.4414), ("tau", 3.2904)):
+    if name not in rows:
+        continue
+    mean, sd, ess = float(rows[name][1]), float(rows[name][2]), float(rows[name][6])
+    mcse = sd / ess ** 0.5
+    print(f"      {name}: {mean:.3f} vs exact {exact:.3f} (mcse {mcse:.3f})")
+    ok &= abs(mean - exact) < 4 * mcse
+sys.exit(0 if ok else 1)
+PY
+
+exit $fail

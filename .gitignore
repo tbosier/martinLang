@@ -1,0 +1,6 @@
+build/
+data/
+compiler/target/
+__pycache__/
+.claude/
+.mcp.json

@@ -1,0 +1,26 @@
+{
+ "implementation": "rustmc",
+ "G": 250,
+ "T": 150,
+ "chains": 4,
+ "warmup": 1000,
+ "draws": 125,
+ "thin": 8,
+ "wall_seconds": 109.1176124229969,
+ "gradients": null,
+ "notes": "rustmc 0.13.0 BayesianDynamicPoisson(initial_mean=0.0, coefficient_sd=1.0, group_sd=0.4, process_sd=0.08, shared_process_sd=0.05); fit(y[G,T], chains=4, warmup=1000, draws=125, thin=8, seed=20260930). Sampler: block elliptical slice (no gradients). draws is retained per chain after thinning; each chain ran 2000 sweeps (1000 post-warmup). rustmc's allocation guard checks chains*draws*D = 18,950,500 <= 25,000,000 (the decoded draws it actually keeps hold 1+G+G*T values each: population, group coefficients, states). Latent size D per SPEC = 37901; the latent size in rustmc's allocation guard (read from its error message for an oversized request) is 37901. Likelihood evaluations per chain (incl. warmup, each is one group or all groups): [5585008, 5581154, 5581311, 5581009]. Process CPU seconds during fit 433.1 vs wall 109.1 (ratio 3.97; chains run on a rayon pool).",
+ "extra": {
+  "cpu_seconds": 433.09568199999995,
+  "likelihood_evaluations": [
+   5585008,
+   5581154,
+   5581311,
+   5581009
+  ],
+  "latent_dim_spec": 37901,
+  "latent_dim_rustmc_probe": 37901,
+  "probe_message": "invalid configuration: dynamic GLM would materialize 947525000000 values, above the safety limit of 25 million; reduce whichever of its dimensions is large (chains, draws, series length, forecast horizon, or the model's state, component or group size)",
+  "seed": 20260930,
+  "tag": ""
+ }
+}

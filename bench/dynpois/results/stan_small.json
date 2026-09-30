@@ -1,0 +1,45 @@
+{
+ "implementation": "stan",
+ "G": 20,
+ "T": 150,
+ "chains": 4,
+ "warmup": 1000,
+ "draws": 1000,
+ "thin": 1,
+ "wall_seconds": 67.65584378899075,
+ "gradients": 2010131,
+ "notes": "CmdStan 2.40.0 via cmdstanpy 1.3.0, default NUTS (diag_e, adapt_delta 0.8, max_treedepth 10), chains=4 parallel_chains=4, seed=20260930, warmup=1000, draws=1000 retained, thin=1. Model dynpois.stan (centred: pop, beta, shared, innov parameters; D=3171). wall_seconds = sample() call (CmdStan runs + CSV output of ~3191 columns per draw incl. warmup since save_warmup=True); compile seconds: 7.8 (excluded; measured when the executable was built). Per-chain CmdStan (warmup, sampling) seconds: [(31.825, 33.332), (32.559, 34.038), (32.461, 33.64), (32.22, 33.695)]. gradients = sum of n_leapfrog__ (2002131) plus one start-point gradient per transition (8000) over warmup+sampling, all chains; step-size-search evaluations are not recorded and are excluded. Post-warmup divergences 0, treedepth-10 hits 0, step sizes [0.0173, 0.0168, 0.0164, 0.0169], mean leapfrog/iter (sampling) 255.0.",
+ "extra": {
+  "compile_seconds": 7.822,
+  "chain_elapsed_warmup_sampling": [
+   [
+    31.825,
+    33.332
+   ],
+   [
+    32.559,
+    34.038
+   ],
+   [
+    32.461,
+    33.64
+   ],
+   [
+    32.22,
+    33.695
+   ]
+  ],
+  "divergent": 0,
+  "treedepth_max_hits": 0,
+  "stepsize": [
+   0.017331559,
+   0.016826735,
+   0.016376122,
+   0.016934729
+  ],
+  "leapfrog_total": 2002131,
+  "transitions": 8000,
+  "seed": 20260930,
+  "tag": ""
+ }
+}

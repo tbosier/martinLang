@@ -1,0 +1,12 @@
+{
+  "implementation": "mint",
+  "G": 250,
+  "T": 150,
+  "chains": 4,
+  "warmup": 1000,
+  "draws": 1000,
+  "thin": 1,
+  "wall_seconds": 1448.347601,
+  "gradients": 3668578,
+  "notes": "Mint-compiled log density, NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; process wall 1450.04 s incl. data load and summary; compile 0.12 s; flags ''"
+}
