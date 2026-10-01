@@ -295,6 +295,38 @@ Around the kernel:
 - Gradients of column-indexed parameters go to per-lane partial sums
   (T x 4), reduced once; those of row-indexed and scalar parameters stay in
   vector registers.
+- **Threads** (`--no-parallel-kernel` turns it off; off under `--strict-fp`).
+  A group of eight series touches only its own rows of the matrix parameter
+  and its gradient, so the loop over groups is emitted as a function of its
+  own, `(ctx, g0, g1, tid)`. The context carries theta, grad, the buffers of
+  Positive vector parameters, the scalar parameter values and two output
+  arrays. The runtime's `mint_par_groups` gives thread t of a team of T the
+  groups [n t / T, n (t + 1) / T). Each thread has its own scratch (the same
+  per-thread `mint_ws_slot`s), its own slice of the column partial sums, and
+  writes its log density and scalar adjoints to entry t; the caller adds
+  them up in thread order. Single vectors and leftover rows stay on the
+  calling thread. The team is the chain's threads per chain during sampling
+  (so 1 below 8,192 parameters), 1 for `MINT_BENCH_GRAD` and
+  `MINT_GRADCHECK`, and `MINT_KERNEL_THREADS` overrides both. When one
+  thread is requested the generated code takes the serial loop instead,
+  so the result is bit-identical to a build with `--no-parallel-kernel`.
+  With more threads the log density and the gradients of scalar and
+  column-indexed parameters are summed in a different order. That is
+  deterministic for a given team size, and usually changes only the last
+  bits, but like Mint's other reassociated sums it can change a component
+  by more when large terms cancel.
+- On the large dynamic Poisson model (250 series, 31 groups) the gradient
+  takes 53 µs on one thread and 21.5 µs on three cores that share an L3
+  cache. On three cores spread over the Ryzen's two core complexes it takes
+  32 µs; why the kernel itself runs slower then was not found (the threads
+  write no shared cache lines except at range edges, and removing those
+  stores did not close the gap). In whole 4-chain runs of that model
+  (150 + 150 draws, three threads per chain) the build with the parallel
+  kernel was faster in each of the last three interleaved pairs (22.4, 21.9
+  and 33.0 s against 26.0, 26.8 and 35.1 s). Other jobs were running on the
+  machine, and in earlier pairs either build took anywhere from 22 to 59 s
+  (once 154 s),
+  so the size of the gain is not established.
 
 `tests/run.sh` builds seven models three ways (default, layout without
 fusion, and neither) and requires the same log density and gradient to 1e-12
@@ -304,7 +336,17 @@ one-lane BernoulliLogit path, row, column and scalar parameters inside and
 outside the sum, a column parameter also used by statements of another
 shape, a running sum of data only, and two scan statements sharing a matrix
 parameter. A further test checks that sampled draws come back in the user's
-order. Not covered: a model with running sums over two different shapes,
+order. For the parallel kernel the same models (also at 61 series: seven
+groups, a single vector and a leftover row) and the dynamic Poisson model
+must be bit-identical on 1 thread to the `--no-parallel-kernel` build, and
+on 3 threads agree with 1 thread to 1e-12 of the largest gradient component
+and 1e-10 relative per component. The tests also check which models are
+parallelised (not the one-lane BernoulliLogit kernel, nor a running sum of
+data only), that 3 threads on the large model change the summation order
+(so the split ran), that a team of one gives the serial result, and that
+two 3-thread gradients, and the raw draws of two short
+3-threads-per-chain sampling runs, are identical. They cannot show the
+absence of a race; they would catch one only if it changed these results. Not covered: a model with running sums over two different shapes,
 and gradients away from the benchmark point (at the runtime's random point
 these models' log densities are near -1e16 and finite differences fail for
 every build). The measurements are in
@@ -404,7 +446,8 @@ is checked against the exact formula at both sizes.
 - **Threads within a chain.** When the model has at least 8,192 parameters,
   those passes are split across OpenMP threads, by default
   (online CPUs ÷ 2) ÷ chains per chain; `MINT_THREADS_PER_CHAIN` overrides it.
-  The model gradient itself still runs on one thread per chain.
+  The same threads share the fused scan kernel of the gradient (see the scan
+  kernel section); the rest of the gradient runs on the chain's own thread.
 - **Same draws where serial.** On the serial path the arithmetic and the order
   of random draws are unchanged, so it produces bit-identical draws to the
   original copying sampler. This was checked on eight schools and the dynamic
@@ -454,7 +497,9 @@ Other known limits:
   blocking can be turned off with `--no-gram-blocking`.
 - Errors found while lowering a model body (the constructs listed above) are
   reported without a source position.
-- Model kernels are single-threaded. The parallelism is across chains, plus
-  the sampler's own passes within a chain for large models.
+- Only the fused scan kernel runs on several threads within a chain; every
+  other model statement is single-threaded. The parallelism is across
+  chains, plus the sampler's own passes and the scan kernel within a chain
+  for large models.
 - The Gram kernel is register-blocked but not cache-blocked. A tuned BLAS
   `dsyrk` would beat it on large p.

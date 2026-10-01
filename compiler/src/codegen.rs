@@ -39,6 +39,8 @@ pub struct Opts {
     /// Mint's own vector log in the fission kernel instead of the vector
     /// math library's
     pub inline_log: bool,
+    /// split a fused scan kernel's groups of rows across the chain's threads
+    pub parallel_kernel: bool,
 }
 
 #[derive(Clone)]

@@ -158,15 +158,19 @@ Useful environment variables for compiled programs:
 - `MINT_GRADCHECK=1` compares the compiled gradient with finite differences.
 - `MINT_BENCH_GRAD=K` times K gradient evaluations and exits.
 - `MINT_THREADS_PER_CHAIN=N` sets how many threads each chain's sampler
-  passes use. The default is 1 below 8,192 parameters.
+  passes use. The default is 1 below 8,192 parameters. The same threads
+  also share the fused scan kernel of the model gradient.
+- `MINT_KERNEL_THREADS=N` overrides the number of threads the fused scan
+  kernel uses: during sampling (default: the threads per chain) and in
+  `MINT_BENCH_GRAD` and `MINT_GRADCHECK` (default 1).
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
-`--no-fission-kernel`, `--no-inline-log`, and `--strict-fp` (strict IEEE
-evaluation order, no vector math).
+`--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`, and `--strict-fp`
+(strict IEEE evaluation order, no vector math).
 
 ## The language in one page
 
