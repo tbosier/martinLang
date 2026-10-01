@@ -656,6 +656,94 @@ is checked against the exact formula at both sizes.
   over several seeds it made no measurable difference on eight schools or
   logistic regression, and gave about 3.5x fewer effective draws per gradient
   on the dynamic Poisson model (`bench/metric_experiment.py`).
+- **Warmup.** The default is Stan's: a uniform(-2, 2) start and the
+  program's warmup iterations in windows 75 / 25, 50, 100, ... / 50.
+  `MINT_WARMUP=fast` changes three things and nothing after warmup:
+  - *Start.* Each chain climbs the log density with L-BFGS (6 pairs,
+    backtracking Armijo search) from its uniform start. After every step it
+    builds a diagonal Gaussian from the curvature pairs (a diagonal BFGS-type
+    update that keeps only the diagonal after each pair, so not the diagonal
+    of the full L-BFGS matrix; Pathfinder uses diagonal plus low rank) and
+    estimates its ELBO from 4 draws. The chain starts at the point with the
+    best ELBO. The climb stops 20 steps after the last improvement of the
+    ELBO (or earlier, when no step is found or the log density stops
+    rising). On the time-series model this costs 830 to 1,040 gradients per
+    chain, and the chains start at log density 26,900 to 28,200 where the
+    climbs stopped at 27,700 to 28,300 (one run, seed 1,
+    `MINT_WARMUP_TRACE=1`). On a centred hierarchical model, whose density
+    is unbounded as the scale goes to 0, the climb heads for the
+    singularity but the ELBO falls, so the chain starts before it.
+    `tests/run.sh` checks that on centred eight schools every chain's start
+    was chosen by the ELBO and that the climb went on to a log density at
+    least 10 higher; it does not check the posterior, which is poor under
+    either warmup on that model.
+  - *Schedule.* max(200, warmup / 5) iterations, never more than the
+    program's warmup, in windows 10 / 10, 20, 40, ... / 50, with Stan's
+    stretching of the last window. With warmup = 1000 that is windows of 10,
+    20 and 110 draws.
+  - *Pooling.* At the end of each window the chains wait for each other and
+    estimate the variance from all chains' window draws (combined in chain
+    order, so draws are reproducible), so every chain gets the same metric.
+    With one chain there is nothing to pool, and with `MINT_METRIC=grad`
+    each chain keeps its own estimate.
+
+  The default warmup's gradients are spread evenly: on the time-series model
+  an early iteration costs about as much as a kept draw (255 leapfrog steps),
+  so warmup is half the gradients. Most of the saving is the shorter
+  schedule; the start and the pooling are what let it be this short (Stan's
+  own schedule cut to 300 iterations gave 1.38 to 1.56x over 6 seeds, in
+  the results file as `stan_schedule_300`; a 10 / 10 schedule from the
+  uniform start spent more on warmup than 75 / 25 did in 3 seeds of the
+  time series, because the first windows estimated the metric from draws
+  that had not converged; that run is not in the results file).
+  Measured with `bench/warmup_experiment.py`, 1000 kept draws, 4 chains,
+  ESS the runtime's lowest over all parameters, results in
+  `bench/warmup_results.json`:
+
+  | model | seeds | gradients, Stan → fast (median) | lowest ESS per 1000 gradients, Stan → fast (median) | fast / Stan, paired, geometric mean (range) |
+  |---|---|---|---|---|
+  | time series, 3,171 parameters | 8 | 2.02 M → 1.28 M | 1.02 → 1.56 | 1.56 (1.35 to 1.90) |
+  | time series, 37,901 parameters | 4 | 3.66 M → 2.51 M | 0.109 → 0.164 | 1.60 (1.46 to 1.98) |
+  | logistic regression | 8 | 57.6 k → 35.0 k | 96 → 159 | 1.62 (1.37 to 1.81) |
+  | logistic regression, 1 chain | 8 | 14.3 k → 8.9 k | 95 → 131 | 1.39 (1.06 to 2.35) |
+  | eight schools | 8 | 78.7 k → 45.7 k | 38 → 65 | 1.71 (1.39 to 2.25) |
+
+  The fast warmup was ahead on every one of these 36 paired runs. The lowest
+  ESS itself moves a lot between seeds (805 to 1,546 for one-chain logistic
+  regression with the fast warmup), so single ratios are noisy.
+  Wall time falls with the gradients: the 3,171-parameter runs took 2.4 to
+  2.5 s against 3.7 to 4.0 s, and the 37,901-parameter runs 49 and 53 s
+  against 70 and 76 s (seeds 1 and 2; seeds 3 and 4 ran at a load average
+  of 25 to 34 from other jobs, and their times say nothing). Stan's warmup
+  always ran first in each pair, so a drift in machine load could favour
+  either side. On the three small models the
+  highest R-hat was at most 1.006 with Stan's warmup and 1.002 with fast.
+  On the 37,901-parameter model both are at the mixing bar, as before:
+  highest R-hat 1.005 to 1.015 with Stan's warmup and 1.001 to 1.012 with
+  fast, lowest ESS 309 to 409 and 323 to 543. Divergences in eight
+  schools: 5 in 8 runs with Stan's warmup, 0 with fast.
+
+  Correctness: the eight schools means are within 4 MCSE of the exact values (`tests/run.sh`,
+  4000 draws, serial and 3 threads per chain); on the 3,171-parameter time
+  series, 9 runs of each (seeds 21 to 29) agree on the means of pop, every
+  beta and every terminal state to at most 2.10 MCSE (0.018 posterior sd)
+  over 41 quantities (`bench/compare_means.py`; two groups of Stan runs, 4
+  and 5 of the same seeds, differ by at most 1.48 MCSE). These draws are
+  not in the repository. On the 37,901-parameter model, two runs of each (seeds 3 and 4) differ
+  by at most 3.14 MCSE (0.064 sd) over 501 quantities, while the two Stan
+  runs differ from each other by up to 3.69 MCSE (0.137 sd) and the two
+  fast runs by up to 2.99 MCSE (0.063 sd). Means only, not
+  variances or tails. Stan's warmup stays the default: the fast one was
+  better on every model and seed measured here, but that is four models,
+  and a warmup a fifth as long is the riskier choice for a model whose
+  chains need longer to find the typical set.
+- **Target acceptance.** `MINT_TARGET_ACCEPT` sets the dual averaging target
+  (Stan's 0.8). At 0.7 with the fast warmup the effective draws per
+  gradient rose further (2.14x Stan's warmup at 0.8 on the 3,171-parameter
+  model, 1.87x on logistic regression, same seeds): on the time series the
+  trajectories stay at 255 leapfrog steps, but each step is longer, so a
+  trajectory travels further. But eight schools had 30
+  divergent transitions in 8 runs instead of 0, so 0.8 stays the default.
 - Chains run on separate threads. The generated `logp` functions only read the
   data, so they are safe to call concurrently.
 - The summary reports the mean, sd, quantiles, split R-hat and an

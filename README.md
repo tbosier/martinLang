@@ -178,6 +178,13 @@ Useful environment variables for compiled programs:
   adaptation.
 - `MINT_NARROW=0` keeps a model's kernels on the double data (see below);
   `MINT_NARROW_REPORT=1` prints which narrow copy each data buffer got.
+- `MINT_WARMUP=fast` replaces Stan's warmup with a shorter one: each chain
+  starts from a Pathfinder-style L-BFGS point, warmup runs max(200, warmup / 5)
+  iterations (never more than the program's warmup), and the chains pool
+  their draws for each metric window. On the
+  examples it took 1.4 to 1.7x fewer gradients per effective draw (see the
+  Runtime section of [architecture.md](docs/architecture.md)). Stan's warmup
+  stays the default.
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,

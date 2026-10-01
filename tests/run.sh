@@ -582,6 +582,54 @@ PY
 check_eight serial MINT_THREADS_PER_CHAIN=1
 check_eight "3 threads per chain" MINT_THREADS_PER_CHAIN=3
 check_eight "gradient metric" MINT_METRIC=grad
+check_eight "fast warmup" MINT_WARMUP=fast
+check_eight "fast warmup, 3 threads per chain" MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=3
+
+# The fast warmup pools window estimates across chain threads; the draws must
+# not depend on which chain reaches the barrier first.
+rm -f build/fast_a.draws build/fast_b.draws
+MINT_WARMUP=fast MINT_DRAWS=build/fast_a.draws ./build/eight_schools > /dev/null 2>&1 \
+  && MINT_WARMUP=fast MINT_DRAWS=build/fast_b.draws ./build/eight_schools > /dev/null 2>&1 \
+  && [ -s build/fast_a.draws ] && cmp -s build/fast_a.draws build/fast_b.draws \
+  && pass "fast warmup: identical raw draws in two runs" || bad "fast warmup: raw draws differ between runs"
+# The pathfinder start must not run into the singularity of a centred
+# hierarchical model (its density is unbounded as tau goes to 0).
+printf '%s\n' 'model C {
+    data y: Vector[J]
+    data s: Positive[J]
+    param mu: Real
+    param tau: Positive
+    param theta: Vector[J]
+    mu ~ Normal(0, 5)
+    tau ~ Normal(0, 5)
+    theta ~ Normal(mu, tau)
+    y ~ Normal(theta, s)
+}
+fn main() {
+    let y = [28, 8, -3, 7, -1, 1, 18, 12]
+    let s = [15, 10, 16, 11, 9, 11, 10, 18]
+    print(sample(C(y, s), draws = 200, warmup = 1000, chains = 4, seed = 3))
+}' > build/centered8.mint
+if build build/centered8.mint centered8; then
+  out=$(MINT_WARMUP=fast MINT_WARMUP_TRACE=1 ./build/centered8 2>&1)
+  python3 - "$out" <<'PY' && pass "fast warmup: centred eight schools starts away from the singularity" || bad "fast warmup: centred eight schools start"
+import re, sys
+out = sys.argv[1]
+starts = dict(re.findall(r"chain=(\d+) start lp=(\S+)", out))
+climb = {c: (int(n), int(k), float(e)) for c, n, k, e in
+         re.findall(r"chain=(\d+) lbfgs steps=(\d+) chosen=(-?\d+) .* end lp=(\S+)", out)}
+print(f"      chain: (climb steps, chosen step, end lp), start lp: {climb}, {starts}")
+# Every chain chose a point by ELBO (not the uniform fallback, chosen = -1),
+# and the climb went on well past it towards tau = 0: the log density at its
+# end is far above the chosen point's. The run completes with a finite tau.
+ok = len(starts) == len(climb) == 4
+for c, (n, k, e) in climb.items():
+    ok &= 0 <= k < n - 1 and e > float(starts[c]) + 10
+tau = [l.split() for l in out.splitlines() if l.startswith("tau ")]
+ok &= len(tau) == 1 and 0 < float(tau[0][1]) < 20
+sys.exit(0 if ok else 1)
+PY
+fi
 
 # When OpenMP runs a smaller team than requested, the sampler must follow the
 # team it got: with a limit of one thread the draws equal the serial ones.
