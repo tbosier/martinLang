@@ -295,6 +295,18 @@ fi
 $M emit examples/dynamic_poisson.mint -o build/exp_check.ll 2>/dev/null \
   && python3 tests/exp/check_exp.py build/exp_check.ll && pass "vector exp accuracy and special values" || bad "vector exp accuracy"
 
+# ---- Mint's own vector log, as emitted in the fission kernel: within 2 ulp
+# of long double logl over 4e6 inputs (every binade including subnormals,
+# around 1, around every table boundary), and 0, -0, negatives, subnormals,
+# the extreme doubles, infinities and NaN as in libm.
+
+$M emit examples/logistic_bayes.mint -o build/log_check.ll 2>/dev/null \
+  && python3 tests/log/check_log.py build/log_check.ll && pass "vector log accuracy and special values" || bad "vector log accuracy"
+
+# ---- fission kernel paths against the three-pass fission and the unsplit loop
+
+. tests/fission/run.sh
+
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.
 
