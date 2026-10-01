@@ -513,6 +513,8 @@ struct Mg<'a> {
     exp_override: Option<String>,
     /// A precomputed log(1 + exp(-|eta|)) for the next BernoulliLogit density.
     log_override: Option<String>,
+    /// A precomputed 1/(1 + exp(-|eta|)) for the next BernoulliLogit density.
+    q_override: Option<String>,
     /// Fused scan kernel: the adjoint C computed for copy k, for R.
     pending_ad: HashMap<usize, String>,
 }
@@ -547,6 +549,7 @@ impl<'a> Mg<'a> {
             kscratch: HashMap::new(),
             exp_override: None,
             log_override: None,
+            q_override: None,
             pending_ad: HashMap::new(),
         };
         for d in &tm.dims {
@@ -935,10 +938,19 @@ impl<'a> Mg<'a> {
                 let softplus = self.f.fadd(&pos, &l1p);
                 let ye = self.f.fmul(x, eta);
                 let lp = self.f.fsub(&ye, &softplus);
-                let den = self.f.fadd(&one, &e);
                 let c = self.f.fcmp("oge", eta, &fconst(0.0));
-                let num = self.f.select(&c, &one, &e);
-                let sig = self.f.fdiv(&num, &den);
+                let sig = match self.q_override.take() {
+                    // sigmoid(eta) = q for eta >= 0, e q otherwise
+                    Some(q) => {
+                        let eq = self.f.fmul(&e, &q);
+                        self.f.select(&c, &q, &eq)
+                    }
+                    None => {
+                        let den = self.f.fadd(&one, &e);
+                        let num = self.f.select(&c, &one, &e);
+                        self.f.fdiv(&num, &den)
+                    }
+                };
                 let deta = self.f.fsub(x, &sig);
                 (lp, vec![fconst(0.0), deta])
             }
@@ -1743,7 +1755,8 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
 
 /// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
 /// doubles) are read by the dot products and are still in L1 when the
-/// gradient updates read them again.
+/// gradient updates read them again. 32 was faster than 16, 64 and 128 on
+/// the logistic benchmark (p = 20).
 const CHUNK: u32 = 32;
 
 /// Whether a split (fissioned) statement can run as a fission kernel: its
@@ -1762,12 +1775,20 @@ fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
 }
 
 /// A split likelihood over n observations as one loop over chunks of CHUNK
-/// rows. For each chunk: the row dot products (four rows at a time) into the
-/// products' buffers; the density, its derivatives and the elementwise part
-/// of the backward sweep as Mint's own <4 x double> code (with Mint's exp
-/// and log inline, no calls); then the row updates of the gradient. X is
-/// read from memory once per gradient instead of twice. The rows left over
-/// (n mod CHUNK) take the same three steps in scalar code.
+/// rows. For each chunk:
+///
+///   - the row dot products, four rows at a time, in Mint's vector form;
+///   - the density, its derivatives and the elementwise part of the backward
+///     sweep as Mint's own <4 x double> code with Mint's exp and log inline
+///     (no calls, so nothing is spilled around them). For BernoulliLogit
+///     and PoissonLog the density's exp, and BernoulliLogit's log1p, run in
+///     loops of their own first (see run_chunk);
+///   - the row updates of the gradient, four rows at a time, reading the
+///     chunk's rows of X again from L1.
+///
+/// X is read from memory once per gradient instead of twice. The rows left
+/// over (n mod CHUNK) take the same steps in groups of four, and the last
+/// n mod 4 rows in scalar code.
 fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M], n: &str, lp: &str) {
     const L: u32 = 4;
     let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
@@ -1833,66 +1854,56 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
     let scalars: Vec<String> = g.padj.keys().cloned().collect();
     let vps: HashMap<String, String> = scalars.iter().map(|s| (s.clone(), g.f.acc_new(&fconst(0.0)))).collect();
     g.f.lanes = 1;
-    let chunk_n: u32 = std::env::var("MINT_CHUNK").ok().and_then(|s| s.parse().ok()).unwrap_or(CHUNK);
-    let chunk = chunk_n.to_string();
-    let vecdot = std::env::var("MINT_VECDOT").map(|s| s != "0").unwrap_or(true);
-    let skip = std::env::var("MINT_SKIP").unwrap_or_default();
-    let pf = std::env::var("MINT_PF").map(|s| s != "0").unwrap_or(false);
-    let split: u32 = std::env::var("MINT_SPLIT").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let chunk = CHUNK.to_string();
+    // L1 scratch for the density's own exp (PoissonLog's exp(eta),
+    // BernoulliLogit's exp(-|eta|)) when the linear predictor is cheap to
+    // evaluate twice, and for BernoulliLogit's log1p(e) and 1/(1 + e)
     let cheap = !has_func(&args[0]);
-    let has_exp = matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog);
-    let scr_e = if split >= 1 && cheap && has_exp { Some(g.f.alloca(&format!("[{chunk_n} x double]"))) } else { None };
-    let scr_l = if split >= 2 && scr_e.is_some() && dist == Dist::BernoulliLogit { Some(g.f.alloca(&format!("[{chunk_n} x double]"))) } else { None };
-    let nb = g.f.iop("sdiv", n, &chunk);
-    for_range(g, "0", &nb, |g, b| {
-        let lo = g.f.imul(b, &chunk);
-        let hi = g.f.iadd(&lo, &chunk);
-        if !skip.contains("dots") { dots(g, &lo, &hi, vecdot); }
-        if pf {
-            // the next chunk's rows of each matrix, into L1 while this chunk
-            // computes its densities (X is streamed from L3 or memory)
-            g.m.declare("declare void @llvm.prefetch.p0(ptr, i32, i32, i32)");
-            for node in nodes.iter() {
-                let (mp, _, c) = g.matvec_parts(node);
-                let next = g.f.imul(&hi, &c);
-                let base = g.f.gep(&mp, &next);
-                let len = g.f.imul(&chunk, &c);
-                let lines = g.f.iop("sdiv", &len, "8");
-                for_range(g, "0", &lines, |g, q| {
-                    let o = g.f.imul(q, "8");
-                    let a = g.f.gep(&base, &o);
-                    g.f.emit(format!("call void @llvm.prefetch.p0(ptr {a}, i32 0, i32 3, i32 1)"));
-                });
-            }
-        }
+    let scratch = |g: &mut Mg, on: bool| if on { Some(g.f.alloca(&format!("[{CHUNK} x double]"))) } else { None };
+    let scr_e = scratch(g, cheap && matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog));
+    let scr_l = scratch(g, scr_e.is_some() && dist == Dist::BernoulliLogit);
+    let scr_q = scratch(g, scr_l.is_some() && g.m.inline_log);
+    // The elementwise part and the gradient updates of `rows` rows from lo,
+    // whose dot products are in the buffers.
+    let run_chunk = |g: &mut Mg, lo: &str, rows: u32| {
+        let hi = g.f.iadd(lo, &rows.to_string());
+        let nv = (rows / L).to_string();
         g.f.lanes = L;
         g.vpadj = vps.clone();
         g.f.inline_log = true;
-        let nv = (chunk_n / L).to_string();
-        // the density's exp, then its log, each in a loop of its own over
-        // the chunk (a short dependency chain per iteration, so several
-        // iterations overlap), into L1 scratch
-        if let (Some(se), false) = (&scr_e, skip.contains("exp")) {
+        // The density's exp, then its log, each in a loop of its own over the
+        // chunk, into L1 scratch: each iteration is then a short dependency
+        // chain, and several overlap (one loop doing everything was 15%
+        // slower, and 10% without the separate exp).
+        if let Some(se) = &scr_e {
             for_range(g, "0", &nv, |g, j| {
                 let o = g.f.imul(j, &L.to_string());
-                let i = g.f.iadd(&lo, &o);
+                let i = g.f.iadd(lo, &o);
                 let eta = g.fwd(&args[0], &Ix::vec(&i), &mut HashMap::new());
                 let e = if dist == Dist::PoissonLog { g.f.intrinsic1(g.m, "llvm.exp.f64", &eta) } else { g.bl_exp(&eta) };
                 g.f.store(&e, se, &o);
             });
         }
-        if let (Some(se), Some(sl), false) = (&scr_e, &scr_l, skip.contains("log")) {
+        if let (Some(se), Some(sl)) = (&scr_e, &scr_l) {
             for_range(g, "0", &nv, |g, j| {
                 let o = g.f.imul(j, &L.to_string());
                 let e = g.f.load(se, &o);
-                let l = g.bl_log(&e);
+                let l = match &scr_q {
+                    // 1/(1 + e) once, for the sigmoid and for Mint's log1p
+                    Some(sq) => {
+                        let u = g.f.fadd(&fconst(1.0), &e);
+                        let q = g.f.fdiv(&fconst(1.0), &u);
+                        g.f.store(&q, sq, &o);
+                        g.f.log1p01(g.m, &e, &q)
+                    }
+                    None => g.bl_log(&e),
+                };
                 g.f.store(&l, sl, &o);
             });
         }
-        let nvm = if skip.contains("main") { "0".to_string() } else { nv.clone() };
-        for_range(g, "0", &nvm, |g, j| {
+        for_range(g, "0", &nv, |g, j| {
             let o = g.f.imul(j, &L.to_string());
-            let i = g.f.iadd(&lo, &o);
+            let i = g.f.iadd(lo, &o);
             if let Some(se) = &scr_e {
                 let e = g.f.load(se, &o);
                 g.exp_override = Some(e);
@@ -1901,14 +1912,38 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
                 let l = g.f.load(sl, &o);
                 g.log_override = Some(l);
             }
+            if let Some(sq) = &scr_q {
+                let q = g.f.load(sq, &o);
+                g.q_override = Some(q);
+            }
             body(g, &i, &lpv);
         });
         g.vpadj.clear();
         g.f.inline_log = false;
         g.f.lanes = 1;
-        if !skip.contains("axpy") { axpys(g, &lo, &hi, vecdot); }
+        axpys(g, lo, &hi, true);
+    };
+    let nb = g.f.iop("sdiv", n, &chunk);
+    for_range(g, "0", &nb, |g, b| {
+        let lo = g.f.imul(b, &chunk);
+        let hi = g.f.iadd(&lo, &chunk);
+        dots(g, &lo, &hi, true);
+        run_chunk(g, &lo, CHUNK);
     });
-    let done = g.f.imul(&nb, &chunk);
+    // the rows left over: groups of four in the same vector code, then
+    // single rows in scalar code
+    let full = g.f.imul(&nb, &chunk);
+    let rest = g.f.iop("sub nsw", n, &full);
+    let quads = g.f.iop("sdiv", &rest, &L.to_string());
+    for_range(g, "0", &quads, |g, q| {
+        let o = g.f.imul(q, &L.to_string());
+        let lo = g.f.iadd(&full, &o);
+        let hi = g.f.iadd(&lo, &L.to_string());
+        dots(g, &lo, &hi, true);
+        run_chunk(g, &lo, L);
+    });
+    let q4 = g.f.imul(&quads, &L.to_string());
+    let done = g.f.iadd(&full, &q4);
     dots(g, &done, n, false);
     for_range(g, &done, n, |g, i| body(g, i, lp));
     axpys(g, &done, n, false);
@@ -1959,9 +1994,10 @@ fn masked_load(g: &mut Mg, p: &str, idx: &str, mask: &str) -> String {
 /// then `tail(k, mask)` once if c is not a multiple of 4.
 fn vec_cols(g: &mut Mg, c: &str, body: &mut dyn FnMut(&mut Mg, &str), tail: &mut dyn FnMut(&mut Mg, &str, &str)) {
     let c4 = g.f.iop("sdiv", c, "4");
+    // no runtime unrolling: for short rows (p = 20 is 5 iterations) an
+    // unrolled copy plus its remainder loop cost more than they save
     let md = g.m.loop_as_written();
-    let md = if std::env::var("MINT_NOMD").is_ok() { None } else { Some(md) };
-    for_range_md(g, "0", &c4, md.as_deref(), |g, kb| {
+    for_range_md(g, "0", &c4, Some(&md), |g, kb| {
         let k = g.f.imul(kb, "4");
         body(g, &k);
     });
@@ -1978,20 +2014,14 @@ fn vec_cols(g: &mut Mg, c: &str, body: &mut dyn FnMut(&mut Mg, &str), tail: &mut
     g.f.start_block(&e);
 }
 
-/// Rows per group in the fission kernel's row loops.
-fn row_group() -> u32 {
-    std::env::var("MINT_GROUP").ok().and_then(|s| s.parse().ok()).unwrap_or(ROW_GROUP)
-}
-const ROW_GROUP: u32 = 4;
-
-/// fw[i] = M[i, :] . v for rows lo..hi (hi - lo a multiple of the group
-/// size R, 4 or 8), R rows at a time in Mint's vector form: one accumulator
-/// per row, vectorised along the columns (a masked tail when c is not a
-/// multiple of 4), so each load of v feeds R FMAs; then 4 x 4
-/// transpose-and-adds leave each four rows' dot products in one vector,
-/// stored with one instruction.
+/// fw[i] = M[i, :] . v for rows lo..hi (hi - lo a multiple of 4), four rows
+/// at a time in Mint's vector form: one accumulator per row, vectorised
+/// along the columns (a masked tail when c is not a multiple of 4), so each
+/// load of v feeds four FMAs; then a 4 x 4 transpose-and-add leaves the four
+/// dot products in one vector, stored with one instruction. (Eight rows per
+/// group measured the same.)
 fn dot4_vec(g: &mut Mg, mp: &str, vp: &str, c: &str, lo: &str, hi: &str, fw: &str) {
-    let r = row_group() as usize;
+    let r = 4usize;
     let len = g.f.iop("sub nsw", hi, lo);
     let groups = g.f.iop("sdiv", &len, &r.to_string());
     for_range(g, "0", &groups, |g, gi| {
@@ -2059,12 +2089,12 @@ fn dot4_vec(g: &mut Mg, mp: &str, vp: &str, c: &str, lo: &str, hi: &str, fw: &st
     });
 }
 
-/// gp[:] += sum_i ad[i] M[i, :] for rows lo..hi (hi - lo a multiple of the
-/// group size R), R rows per pass over gp, in Mint's vector form (a masked
-/// tail when c is not a multiple of 4).
+/// gp[:] += sum_i ad[i] M[i, :] for rows lo..hi (hi - lo a multiple of 4),
+/// four rows per pass over gp, in Mint's vector form (a masked tail when c
+/// is not a multiple of 4).
 fn axpy4_vec(g: &mut Mg, mp: &str, c: &str, lo: &str, hi: &str, ad: &str, gp: &str) {
+    let r = 4usize;
     g.m.declare("declare void @llvm.masked.store.v4f64.p0(<4 x double>, ptr, i32, <4 x i1>)");
-    let r = row_group() as usize;
     let len = g.f.iop("sub nsw", hi, lo);
     let groups = g.f.iop("sdiv", &len, &r.to_string());
     for_range(g, "0", &groups, |g, gi| {
