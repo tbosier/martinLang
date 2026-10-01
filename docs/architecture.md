@@ -627,6 +627,8 @@ is checked against the exact formula at both sizes.
   61 series, with 1 and 3 kernel threads requested (a kernel runs at most
   one thread per group of 8 series, so only the 61-series runs split three
   ways). The fused sums themselves are checked only by that one-leaf test.
+  With the low-rank metric (below) the hooks still do only the diagonal
+  part of each leaf; the low-rank part runs in a pass after the kernel.
 - **Fixed summation order.** Every sum over D in the leaf passes (kinetic
   energy, no-U-turn checks) is accumulated in 8 lanes
   (element i in lane i mod 8, each lane in index order, lanes combined in a
@@ -655,7 +657,156 @@ is checked against the exact formula at both sizes.
   `sqrt(var(draws) / var(gradients))`, as nutpie does. It is not the default:
   over several seeds it made no measurable difference on eight schools or
   logistic regression, and gave about 3.5x fewer effective draws per gradient
-  on the dynamic Poisson model (`bench/metric_experiment.py`).
+  on the dynamic Poisson model (`bench/metric_experiment.py`; those runs,
+  made with an earlier sampler, are in `bench/metric_results_diagonal.json`).
+- **Low-rank metric (`MINT_METRIC=lowrank`, opt-in).** The inverse metric is
+  Stan's diagonal `v` plus a correction along at most k directions
+  (`MINT_LOWRANK_K`; by default 16 or 24 if each thread's single-precision
+  share of them fits in its L2 cache, otherwise 8: 24 at 3,171 parameters
+  with one thread per chain, 8 at 37,901 with three; the threads counted are
+  those OpenMP actually gives the chain):
+  `diag(v) + S U diag(lam - 1) U' S`, with
+  `S = diag(sqrt(v))` and orthonormal columns `U`. With the default metric
+  nothing changes: the raw draws are bit-identical to those of the sampler
+  before the option existed (checked on eight schools, logistic and linear
+  regression, the small time-series model, a short run of the large one and
+  the Gaussian test model, with 1 and 3 threads per chain). When the option
+  was merged with the fused leapfrog and the fast warmup, the merged
+  sampler's raw draws were checked again against those of the sampler
+  before the merge, on the same models except the Gaussian, with 1 and 3
+  threads per chain: identical with the default settings, with
+  `MINT_WARMUP=fast`, and in `--fused-leapfrog` builds. That comparison
+  needs a build of the earlier commit and is not part of `tests/run.sh`.
+  - *Estimation.* At the end of each warmup window, from the window's draws
+    and their gradients (the most recent ones that fit in `MINT_LOWRANK_MB`,
+    default 256 MB per chain). In coordinates scaled by `S`, the gradient
+    covariance of a Gaussian posterior is its precision, so the leading
+    eigenvectors of the sample gradient covariance (2k candidates, from the
+    n × n Gram matrix of the n draws when n < D) estimate the directions in
+    which the posterior is narrower than the diagonal assumes. Within their
+    span the covariance is the SPD geometric mean of the draws' covariance
+    and the inverse of the gradients' covariance, as in nutpie's low-rank
+    adaptation. Its eigenvalues outside [1/2, 2] (`MINT_LOWRANK_CUTOFF`) are
+    kept, largest |log lam| first, each limited to [1e-4, 1e4]; a small ridge
+    (`MINT_LOWRANK_GAMMA`, 1e-5) keeps the covariances definite. The leading
+    eigenvectors come from a full eigendecomposition of the Gram matrix; the
+    D-length products are blocked and use the chain's threads. A window whose directions are not finite or not
+    independent falls back to the diagonal.
+  - *Per leapfrog step: one projection and one expansion.* Every momentum,
+    momentum sum and gradient carries its k projections `c = V' x`
+    (`V = S U`) after its D entries. The kinetic energy and the no-U-turn
+    sums then need only O(k) more work (`p_sharp . r` gains
+    `sum_j d_j c_j(p) c_j(r)`, and a sum of momenta projects to the sum of
+    their projections). Momenta and gradients project linearly, so a leaf
+    needs the projection of its new gradient only; it is computed in the
+    leaf's fused pass, block by block next to the second half-step and the
+    merges. The low-rank part of the next leaf's position update,
+    `eps V diag(lam - 1) c(p_half)`, needs that projection complete, so after
+    a barrier the same parallel region adds it to the next leaf's position,
+    which the pass had already started. (When the leaf ends the new subtree,
+    `leaf_start` does it in its own pass, fused with the first half-step.)
+    That is two streams over the D × k directions per leapfrog, one more
+    read-modify-write of the next position, and no extra fork of the thread
+    team.
+  - *Precision.* The directions are stored in single precision in tiles of
+    8 directions × 8 entries. Projections are accumulated in double (the
+    products of the stored values with double vectors are exact before
+    rounding), so the carried projections differ from `V' p` of the stored
+    momentum only by rounding, as the momentum itself does along a
+    trajectory. The position update forms its sum in single precision. Any
+    map of the momentum that is odd keeps the leapfrog volume-preserving and
+    as reversible as any floating-point leapfrog, so this affects how well
+    energy is conserved, not the distribution sampled. Momenta are drawn
+    through a k × k matrix that makes their covariance the inverse of the
+    kinetic energy's matrix for the stored, rounded directions.
+  - *Cost.* The projection is limited by the conversion of the stored
+    values to double (about a quarter of a cycle per direction and entry on
+    the Zen 3 test machine), the expansion by the bandwidth of the cache that
+    holds the directions. On the 3,171-parameter model, with 24 directions
+    and one thread per chain, two `perf` profiles put the two at 0.7 to 0.9
+    and 0.4 to 0.5 times the cost of the model's gradient (on a loaded
+    machine). On the 37,901-parameter model with 3 threads per chain, a
+    leapfrog step cost about 1.2 times as much as with Stan's metric with 8
+    directions and 1.5 times with 24 (profiles of a 300 + 100 run, relative
+    to the gradient's scan kernel). The estimation at the window ends took
+    about 0.3 s per chain on the small model over the whole warmup, most of
+    it the eigendecomposition for the last window's 500 draws. These
+    profiles and timings are not recorded in the repository.
+  - `tests/run.sh` checks it on eight schools (also with every direction
+    kept, 3 threads per chain) and on a 70-dimensional Gaussian whose
+    posterior is 4 to 40 times narrower than the prior along 8 dense
+    directions; every whitened first, second and cross moment must be within
+    4 Monte Carlo standard errors of the exact value (5 for the 2,415 cross
+    moments), with 1 and 3 threads, and the metric must keep 8 directions
+    (the test checks their number, not their span). Pooled over 24 seeds
+    (96 chains of 1000 draws each; `tests/metric/pool_gauss.py` on the draws
+    of `tests/metric/gauss.mint` with seeds 1 to 4 and 6 to 25, run outside
+    the test suite), the largest whitened first and second moment errors
+    were 2.2 and 2.6 standard errors with one thread and 2.7 and 2.4 with
+    three, against 2.2 and 2.8 for Stan's metric.
+  - *With the fused leapfrog* (`mintc --fused-leapfrog`). The kernel's
+    hooks (`leaf_block`) do the diagonal part of each leaf as before: the
+    second half-step, the next leaf's first and the D-length merge sums.
+    They do not project the gradient or add the low-rank part of the next
+    position. The position update needs every thread's projections, and a
+    hook runs inside the kernel's parallel region with no way to wait for
+    the other threads; the projection itself works on whole tiles of 8
+    entries, which a hook's range need not start on, and doing it after the
+    kernel keeps the runtime's blocking and order. So after the kernel, a pass across the chain's threads
+    (`leaf_work` with `half = 0`) projects the gradient and, after a
+    barrier, expands the next position, split, blocked and summed as in the
+    runtime's own leaf pass. The projections, the merges' low-rank parts
+    and the low-rank part of the position are therefore exactly those of
+    the runtime's path, and only the D-length sums are in the hooks' order.
+    With more than one thread per chain this costs one more parallel region
+    per leaf; with any number it costs another read of the
+    gradient and the next position, on top of the two streams over the
+    directions that the runtime's path has as well. With
+    `MINT_FUSED_LEAPFROG=exact` the leaf pass after the kernel does the
+    projections next to the sums, so the draws are the runtime's low-rank
+    draws. `MINT_LEAP_TEST` checks one leaf with 12 fixed directions as
+    well as with the diagonal metric, and `tests/run.sh` checks that
+    `exact` gives the runtime's low-rank draws on two models with 1 and 3
+    threads per chain. Both paths of the one-leaf test share the projection
+    code, so what it checks is that the hooks and the pass after the kernel
+    together produce the runtime's leaf (it fails when that pass, or its
+    position update, is left out); it does not cover a leaf without a next
+    leaf or a merge of two single leaves.
+  - *With the fast warmup* (`MINT_WARMUP=fast`). The chains pool the
+    directions as they pool the diagonal: each chain keeps its window's
+    draws and gradients in its own rows of one shared array, and at the end
+    of a window, once the pooled diagonal is in, chain 0 moves all chains'
+    rows together (in chain order) and estimates the directions from all
+    of them with its own threads, while the other chains wait; every chain
+    then installs the same directions. The estimate is centred on the
+    pooled mean, as the pooled variance is, so differences between the
+    chains' positions count as spread, as they do for the diagonal. The
+    number of directions is the smallest any chain would keep. With one
+    chain, or `MINT_WARMUP_POOL=0`, each chain estimates its own.
+    `tests/run.sh` checks the pooled combination on eight schools and the
+    Gaussian test model (1 and 3 threads per chain), the per-chain one on
+    the Gaussian, and that two pooled runs give identical draws. On the
+    3,171-parameter time series (seed 1, one run of each, one thread per
+    chain) the lowest ESS per 1000 gradients was 0.88 with Stan's metric
+    and warmup, 1.50 with the fast warmup, 5.85 with the low-rank metric and
+    9.78 with both. That is one run per variant: it shows the combination
+    works, not by how much it beats either alone. These runs used the
+    merged sampler and compiler, so they differ from the seed-1 runs
+    recorded earlier in `bench/metric_results.json` and
+    `bench/warmup_results.json` (1.00 and 5.04 for Stan's and the low-rank
+    metric, 1.57 for the fast warmup): the compiler changes merged since
+    those were made change the generated model code, and with the same
+    seed the draws differ from the first one on, with Stan's metric too. On the same generated code, the merged runtime's
+    low-rank draws are bit-identical to the low-rank branch's (checked on
+    this model with 1 and 3 threads per chain). These four runs are not
+    recorded in the repository.
+  - *Posterior means.* On the 3,171-parameter time series, 4 runs (seeds 21
+    to 24) of the low-rank metric through the fused leapfrog, and 4 of the
+    low-rank metric with the fast warmup, each agree with 4 runs of Stan's
+    metric and warmup on the means of pop, every beta and every terminal
+    state to at most 1.94 and 1.52 MCSE (0.022 and 0.017 posterior sd) over
+    41 quantities (`bench/compare_means.py`; the draws are not in the
+    repository).
 - **Warmup.** The default is Stan's: a uniform(-2, 2) start and the
   program's warmup iterations in windows 75 / 25, 50, 100, ... / 50.
   `MINT_WARMUP=fast` changes three things and nothing after warmup:

@@ -231,6 +231,473 @@ static double rng_normal(Rng *r) {
   }
 }
 
+// ---------------------------------------------------------------- dense helpers
+// Used only by the low-rank metric adaptation (MINT_METRIC=lowrank), once per
+// warmup window, on matrices of at most a few hundred rows.
+
+// Symmetric eigendecomposition: Householder tridiagonalisation and the
+// implicit QL algorithm (tred2 and tql2, as in EISPACK and JAMA). A is n x n,
+// row-major; on return its columns are the eigenvectors and w holds the
+// eigenvalues in ascending order.
+static void sym_eig(double *A, int n, double *w) {
+#define V_(i, j) A[(int64_t)(i) * n + (j)]
+  double *d = w, *e = calloc((size_t)n, sizeof(double));
+  for (int j = 0; j < n; j++) d[j] = V_(n - 1, j);
+  for (int i = n - 1; i > 0; i--) {
+    double scale = 0.0, h = 0.0;
+    for (int k = 0; k < i; k++) scale += fabs(d[k]);
+    if (scale == 0.0) {
+      e[i] = d[i - 1];
+      for (int j = 0; j < i; j++) {
+        d[j] = V_(i - 1, j);
+        V_(i, j) = 0.0;
+        V_(j, i) = 0.0;
+      }
+    } else {
+      for (int k = 0; k < i; k++) {
+        d[k] /= scale;
+        h += d[k] * d[k];
+      }
+      double f = d[i - 1], g = sqrt(h);
+      if (f > 0) g = -g;
+      e[i] = scale * g;
+      h -= f * g;
+      d[i - 1] = f - g;
+      for (int j = 0; j < i; j++) e[j] = 0.0;
+      for (int j = 0; j < i; j++) {
+        f = d[j];
+        V_(j, i) = f;
+        g = e[j] + V_(j, j) * f;
+        for (int k = j + 1; k <= i - 1; k++) {
+          g += V_(k, j) * d[k];
+          e[k] += V_(k, j) * f;
+        }
+        e[j] = g;
+      }
+      f = 0.0;
+      for (int j = 0; j < i; j++) {
+        e[j] /= h;
+        f += e[j] * d[j];
+      }
+      double hh = f / (h + h);
+      for (int j = 0; j < i; j++) e[j] -= hh * d[j];
+      for (int j = 0; j < i; j++) {
+        f = d[j];
+        g = e[j];
+        for (int k = j; k <= i - 1; k++) V_(k, j) -= (f * e[k] + g * d[k]);
+        d[j] = V_(i - 1, j);
+        V_(i, j) = 0.0;
+      }
+    }
+    d[i] = h;
+  }
+  for (int i = 0; i < n - 1; i++) {
+    V_(n - 1, i) = V_(i, i);
+    V_(i, i) = 1.0;
+    double h = d[i + 1];
+    if (h != 0.0) {
+      for (int k = 0; k <= i; k++) d[k] = V_(k, i + 1) / h;
+      for (int j = 0; j <= i; j++) {
+        double g = 0.0;
+        for (int k = 0; k <= i; k++) g += V_(k, i + 1) * V_(k, j);
+        for (int k = 0; k <= i; k++) V_(k, j) -= g * d[k];
+      }
+    }
+    for (int k = 0; k <= i; k++) V_(k, i + 1) = 0.0;
+  }
+  for (int j = 0; j < n; j++) {
+    d[j] = V_(n - 1, j);
+    V_(n - 1, j) = 0.0;
+  }
+  V_(n - 1, n - 1) = 1.0;
+  e[0] = 0.0;
+
+  // The QL iterations rotate pairs of eigenvector columns; work on the
+  // transpose so that those rotations run along contiguous rows.
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < i; j++) {
+      double t = V_(i, j);
+      V_(i, j) = V_(j, i);
+      V_(j, i) = t;
+    }
+
+  for (int i = 1; i < n; i++) e[i - 1] = e[i];
+  e[n - 1] = 0.0;
+  double f = 0.0, tst1 = 0.0;
+  const double eps = 0x1.0p-52;
+  for (int l = 0; l < n; l++) {
+    tst1 = fmax(tst1, fabs(d[l]) + fabs(e[l]));
+    int m = l;
+    while (m < n) {
+      if (fabs(e[m]) <= eps * tst1) break;
+      m++;
+    }
+    if (m == n) m = n - 1;
+    if (m > l) {
+      int iter = 0;
+      do {
+        if (++iter > 100) mint_panic("eigendecomposition did not converge");
+        double g = d[l];
+        double p = (d[l + 1] - g) / (2.0 * e[l]);
+        double r = hypot(p, 1.0);
+        if (p < 0) r = -r;
+        d[l] = e[l] / (p + r);
+        d[l + 1] = e[l] * (p + r);
+        double dl1 = d[l + 1];
+        double h = g - d[l];
+        for (int i = l + 2; i < n; i++) d[i] -= h;
+        f += h;
+        p = d[m];
+        double c = 1.0, c2 = c, c3 = c, el1 = e[l + 1], s = 0.0, s2 = 0.0;
+        for (int i = m - 1; i >= l; i--) {
+          c3 = c2;
+          c2 = c;
+          s2 = s;
+          g = c * e[i];
+          h = c * p;
+          r = hypot(p, e[i]);
+          e[i + 1] = s * r;
+          s = e[i] / r;
+          c = p / r;
+          p = c * d[i] - s * g;
+          d[i + 1] = h + s * (c * g + s * d[i]);
+          double *restrict r0 = A + (int64_t)i * n, *restrict r1 = A + (int64_t)(i + 1) * n;
+          for (int k = 0; k < n; k++) {
+            double a0 = r0[k], a1 = r1[k];
+            r1[k] = s * a0 + c * a1;
+            r0[k] = c * a0 - s * a1;
+          }
+        }
+        p = -s * s2 * c3 * el1 * e[l] / dl1;
+        e[l] = s * p;
+        d[l] = c * p;
+      } while (fabs(e[l]) > eps * tst1);
+    }
+    d[l] += f;
+    e[l] = 0.0;
+  }
+  for (int i = 0; i < n - 1; i++) {
+    int k = i;
+    double p = d[i];
+    for (int j = i + 1; j < n; j++)
+      if (d[j] < p) k = j, p = d[j];
+    if (k != i) {
+      d[k] = d[i];
+      d[i] = p;
+      for (int j = 0; j < n; j++) {
+        p = V_(i, j);
+        V_(i, j) = V_(k, j);
+        V_(k, j) = p;
+      }
+    }
+  }
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < i; j++) {
+      double t = V_(i, j);
+      V_(i, j) = V_(j, i);
+      V_(j, i) = t;
+    }
+  free(e);
+#undef V_
+}
+
+// C = A' B / n for A (n x a) and B (n x b), row-major; C is a x b.
+static void gram_at_b(const double *A, int a, const double *B, int b, int n, double *C) {
+  for (int i = 0; i < a; i++)
+    for (int j = 0; j < b; j++) {
+      double s = 0;
+      for (int r = 0; r < n; r++) s += A[(int64_t)r * a + i] * B[(int64_t)r * b + j];
+      C[i * b + j] = s / n;
+    }
+}
+
+// R = V diag(f(w)) V' for a symmetric eigendecomposition (V columns), r x r.
+static void eig_apply(const double *V, const double *fw, int r, double *R) {
+  for (int i = 0; i < r; i++)
+    for (int j = 0; j < r; j++) {
+      double s = 0;
+      for (int m = 0; m < r; m++) s += V[i * r + m] * fw[m] * V[j * r + m];
+      R[i * r + j] = s;
+    }
+}
+
+static void matmul_sq(const double *A, const double *B, int r, double *C) {
+  for (int i = 0; i < r; i++)
+    for (int j = 0; j < r; j++) {
+      double s = 0;
+      for (int m = 0; m < r; m++) s += A[i * r + m] * B[m * r + j];
+      C[i * r + j] = s;
+    }
+}
+
+typedef float v8f __attribute__((vector_size(32), aligned(4)));
+typedef double v4d __attribute__((vector_size(32), aligned(8)));
+
+// Products of matrices stored as rows of length D (D up to tens of
+// thousands, a few hundred rows), blocked so that the rows are streamed
+// from memory once per block of entries, and split across nt threads. Each
+// result entry is summed by one thread in a fixed order, so the results do
+// not depend on the number of threads.
+
+// one 4 x 2 block of row dot products over entries [l0, l1), in four lanes
+static void gram_block(const double *const a[4], const double *const b[2], int64_t l0, int64_t l1,
+                       double o[4][2]) {
+  v4d s[4][2] = {{{0}}};
+  int64_t l = l0;
+  for (; l + 4 <= l1; l += 4) {
+    v4d b0 = *(const v4d *)(b[0] + l), b1 = *(const v4d *)(b[1] + l);
+    for (int i = 0; i < 4; i++) {
+      v4d x = *(const v4d *)(a[i] + l);
+      s[i][0] = __builtin_elementwise_fma(x, b0, s[i][0]);
+      s[i][1] = __builtin_elementwise_fma(x, b1, s[i][1]);
+    }
+  }
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 2; j++) {
+      double t = (s[i][j][0] + s[i][j][1]) + (s[i][j][2] + s[i][j][3]);
+      for (int64_t r = l; r < l1; r++) t += a[i][r] * b[j][r];
+      o[i][j] = t;
+    }
+}
+
+#define GR_DC 128  // entries per block of gram_rows
+
+// C[i ldc + j] = scale * (row i of A) . (row j of B) for i < m, j < p. With
+// sym (A == B, m == p) only j <= i is computed and C is filled symmetrically.
+static void gram_rows(const double *A, int m, const double *B, int p, int64_t D, int sym, double scale, double *C,
+                      int ldc, int nt) {
+  for (int i = 0; i < m; i++)
+    for (int j = 0; j < p; j++) C[(int64_t)i * ldc + j] = 0;
+#pragma omp parallel num_threads(nt) if (nt > 1)
+  for (int64_t l0 = 0; l0 < D; l0 += GR_DC) {
+    int64_t l1 = l0 + GR_DC < D ? l0 + GR_DC : D;
+#pragma omp for schedule(static, 1)
+    for (int i0 = 0; i0 < m; i0 += 4) {
+      const double *a[4];
+      for (int i = 0; i < 4; i++) a[i] = A + (int64_t)(i0 + i < m ? i0 + i : i0) * D;
+      int jend = sym ? (i0 + 4 < m ? i0 + 4 : m) : p;
+      for (int j0 = 0; j0 < jend; j0 += 2) {
+        const double *b[2];
+        for (int j = 0; j < 2; j++) b[j] = B + (int64_t)(j0 + j < jend ? j0 + j : j0) * D;
+        double o[4][2];
+        gram_block(a, b, l0, l1, o);
+        for (int i = 0; i < 4 && i0 + i < m; i++)
+          for (int j = 0; j < 2 && j0 + j < jend; j++)
+            if (!sym || j0 + j <= i0 + i) C[(int64_t)(i0 + i) * ldc + j0 + j] += o[i][j];
+      }
+    }
+  }
+  for (int i = 0; i < m; i++)
+    for (int j = 0; j < (sym ? i + 1 : p); j++) {
+      C[(int64_t)i * ldc + j] *= scale;
+      if (sym) C[(int64_t)j * ldc + i] = C[(int64_t)i * ldc + j];
+    }
+}
+
+#define CB_DC 64  // entries per block of combine_rows
+
+// Row j of C (m x D) = sum_a W[a ldw + j] (row a of B), a < n, summed in
+// order of a. C must not overlap B.
+static void combine_rows(const double *W, int ldw, int n, int m, const double *B, int64_t D, double *C, int nt) {
+#pragma omp parallel for num_threads(nt) schedule(static) if (nt > 1)
+  for (int64_t l0 = 0; l0 < D; l0 += CB_DC) {
+    int64_t len = l0 + CB_DC < D ? CB_DC : D - l0;
+    for (int j0 = 0; j0 < m; j0 += 4) {
+      double acc[4][CB_DC];
+      memset(acc, 0, sizeof acc);
+      for (int a = 0; a < n; a++) {
+        const double *br = B + (int64_t)a * D + l0;
+        double w[4];
+        for (int j = 0; j < 4; j++) w[j] = j0 + j < m ? W[(int64_t)a * ldw + j0 + j] : 0.0;
+        for (int j = 0; j < 4; j++)
+          for (int64_t l = 0; l < len; l++) acc[j][l] = __builtin_elementwise_fma(w[j], br[l], acc[j][l]);
+      }
+      for (int j = 0; j < 4 && j0 + j < m; j++) memcpy(C + (int64_t)(j0 + j) * D + l0, acc[j], sizeof(double) * len);
+    }
+  }
+}
+
+// The r largest eigenvalues (w, descending) and their unit eigenvectors
+// (columns of E, n x r with leading dimension lde) of the symmetric n x n
+// matrix K, from its full eigendecomposition (n is at most the number of
+// draws in a window). Returns r (clipped to n).
+static int top_eigs(const double *K, int n, int r, double *E, int lde, double *w) {
+  if (r > n) r = n;
+  double *A = malloc(sizeof(double) * n * n), *ev = malloc(sizeof(double) * n);
+  memcpy(A, K, sizeof(double) * n * n);
+  sym_eig(A, n, ev);
+  for (int j = 0; j < r; j++) {
+    w[j] = ev[n - 1 - j];
+    for (int a = 0; a < n; a++) E[(int64_t)a * lde + j] = A[a * n + n - 1 - j];
+  }
+  free(A), free(ev);
+  return r;
+}
+
+// Symmetric (Loewdin) orthonormalisation of the m rows of U in place:
+// U <- (U U')^-1/2 U, the orthonormal rows closest to the given ones, so a
+// set that is already orthonormal up to rounding is changed only by
+// rounding, row by row. Returns 0 (and leaves U alone) if the rows are far
+// from independent (eigenvalues of U U' outside [1/4, 4]); the callers pass
+// rows that are orthonormal in exact arithmetic.
+static int lowdin(double *U, int m, int64_t D, int nt) {
+  if (m == 0) return 1;
+  double *G = malloc(sizeof(double) * m * m), *w = malloc(sizeof(double) * m), *T = malloc(sizeof(double) * m * m);
+  double *tmp = mint_alloc((int64_t)m * D);
+  gram_rows(U, m, U, m, D, 1, 1.0, G, m, nt);
+  sym_eig(G, m, w);
+  int ok = isfinite(w[0]) && isfinite(w[m - 1]) && w[0] > 0.25 && w[m - 1] < 4.0;
+  if (ok) {
+    for (int j = 0; j < m; j++) w[j] = 1.0 / sqrt(w[j]);
+    eig_apply(G, w, m, T);
+    combine_rows(T, m, m, m, U, D, tmp, nt);
+    memcpy(U, tmp, sizeof(double) * (size_t)m * (size_t)D);
+  }
+  free(G), free(w), free(T), free(tmp);
+  return ok;
+}
+
+// Low-rank correction to a diagonal metric, estimated from n warmup draws Q
+// and their log-density gradients G (each n x D, row-major; both are
+// overwritten). im is the diagonal inverse metric already chosen for the
+// window, S = sqrt(im) its scale. nt threads share the O(n D) work.
+//
+// In the scaled coordinates x = q / S the gradients are y = S g. For a
+// Gaussian posterior with covariance C (scaled), cov(y) = C^-1, so the
+// leading eigenvectors of cov(y) are the directions in which the posterior
+// is much narrower than the diagonal metric assumes; those set the step size.
+// Within the span of the r = 2 kmax leading ones, the covariance is
+// estimated by the SPD geometric mean Sigma solving
+// Sigma cov(y) Sigma = cov(x) (as nutpie's low-rank adaptation does), which
+// is exact for a Gaussian's true covariances in a span the precision maps to
+// itself, and an estimate with sample covariances. Its
+// eigenvalues lam that lie outside [1/cutoff, cutoff] are kept, at most kmax
+// of them, ordered by |log lam|.
+//
+// Writes the kept directions as orthonormal rows of U (k x D, in scaled
+// coordinates) and their variances lam; returns k.
+static int lowrank_estimate(int64_t D, int n, double *Q, double *G, const double *im, int kmax, double cutoff,
+                            double gamma, double *U, double *lam, int nt) {
+  if (n < 3 || kmax < 1) return 0;
+#pragma omp parallel for num_threads(nt) schedule(static) if (nt > 1)
+  for (int64_t l0 = 0; l0 < D; l0 += CB_DC) {
+    int64_t l1 = l0 + CB_DC < D ? l0 + CB_DC : D;
+    for (int64_t i = l0; i < l1; i++) {
+      double qm = 0, gm = 0;
+      for (int r = 0; r < n; r++) qm += Q[(int64_t)r * D + i], gm += G[(int64_t)r * D + i];
+      qm /= n, gm /= n;
+      double sc = sqrt(im[i]);
+      for (int r = 0; r < n; r++) {
+        Q[(int64_t)r * D + i] = (Q[(int64_t)r * D + i] - qm) / sc;
+        G[(int64_t)r * D + i] = (G[(int64_t)r * D + i] - gm) * sc;
+      }
+    }
+  }
+  // Leading eigenvectors of cov(y) = Y' Y / n: directly when D <= n,
+  // otherwise from the Gram matrix Y Y' / n (n x n), whose eigenvectors e_j
+  // (eigenvalues w_j) give those of Y' Y / n as Y' e_j / sqrt(n w_j),
+  // without forming a D x D matrix.
+  int r = 0;
+  int rmax = 2 * kmax < n - 1 ? 2 * kmax : n - 1;  // candidates; at most kmax are kept
+  if (rmax > D) rmax = (int)D;
+  double *U0 = mint_alloc((int64_t)rmax * D);
+  if (D <= n) {
+    int d = (int)D;
+    double *K = malloc(sizeof(double) * d * d), *w = malloc(sizeof(double) * rmax);
+    double *E = malloc(sizeof(double) * d * rmax);
+    for (int i = 0; i < d; i++)
+      for (int j = 0; j <= i; j++) {
+        double sum = 0;
+        for (int a = 0; a < n; a++) sum += G[(int64_t)a * D + i] * G[(int64_t)a * D + j];
+        K[i * d + j] = K[j * d + i] = sum / n;
+      }
+    int got = top_eigs(K, d, rmax, E, rmax, w);
+    for (int j = 0; j < got; j++) {
+      if (!(w[j] > 1e-12 * w[0])) break;
+      for (int i = 0; i < d; i++) U0[(int64_t)r * D + i] = E[(int64_t)i * rmax + j];
+      r++;
+    }
+    free(K), free(w), free(E);
+  } else {
+    double *K = malloc(sizeof(double) * n * n), *w = malloc(sizeof(double) * rmax);
+    gram_rows(G, n, G, n, D, 1, 1.0 / n, K, n, nt);
+    double *E = malloc(sizeof(double) * n * rmax);  // n x r: scaled leading eigenvectors
+    int got = top_eigs(K, n, rmax, E, rmax, w);
+    for (int j = 0; j < got; j++) {
+      if (!(w[j] > 1e-12 * w[0])) break;
+      double f = 1.0 / sqrt(n * w[j]);
+      for (int a = 0; a < n; a++) E[(int64_t)a * rmax + j] *= f;
+      r++;
+    }
+    combine_rows(E, rmax, n, r, G, D, U0, nt);
+    free(K), free(w), free(E);
+  }
+  int k = 0;
+  if (r > 0 && lowdin(U0, r, D, nt)) {
+    // projections of the scaled draws and gradients on the subspace (n x r)
+    double *PX = malloc(sizeof(double) * n * r), *PY = malloc(sizeof(double) * n * r);
+    gram_rows(Q, n, U0, r, D, 0, 1.0, PX, r, nt);
+    gram_rows(G, n, U0, r, D, 0, 1.0, PY, r, nt);
+    size_t rr = (size_t)r * r;
+    double *Cd = malloc(sizeof(double) * rr), *Cg = malloc(sizeof(double) * rr);
+    double *T1 = malloc(sizeof(double) * rr), *T2 = malloc(sizeof(double) * rr), *T3 = malloc(sizeof(double) * rr);
+    double *ev = malloc(sizeof(double) * r), *fw = malloc(sizeof(double) * r);
+    gram_at_b(PX, r, PX, r, n, Cd);
+    gram_at_b(PY, r, PY, r, n, Cg);
+    for (int j = 0; j < r; j++) Cd[j * r + j] += gamma, Cg[j * r + j] += gamma;
+    // Sigma = Cg^-1/2 (Cg^1/2 Cd Cg^1/2)^1/2 Cg^-1/2
+    memcpy(T1, Cg, sizeof(double) * rr);
+    sym_eig(T1, r, ev);  // T1 = eigenvectors of Cg
+    for (int j = 0; j < r; j++) fw[j] = sqrt(fmax(ev[j], 1e-300));
+    eig_apply(T1, fw, r, T2);  // T2 = Cg^1/2
+    matmul_sq(T2, Cd, r, T3);
+    matmul_sq(T3, T2, r, Cd);  // Cd <- Cg^1/2 Cd Cg^1/2
+    for (int j = 0; j < r; j++) fw[j] = 1.0 / fw[j];
+    eig_apply(T1, fw, r, T2);  // T2 = Cg^-1/2
+    for (size_t m = 0; m < rr; m++) T1[m] = Cd[m];
+    for (int i = 0; i < r; i++)
+      for (int j = 0; j < i; j++) T1[i * r + j] = T1[j * r + i] = 0.5 * (Cd[i * r + j] + Cd[j * r + i]);
+    sym_eig(T1, r, ev);
+    for (int j = 0; j < r; j++) fw[j] = sqrt(fmax(ev[j], 0.0));
+    eig_apply(T1, fw, r, T3);  // T3 = (Cg^1/2 Cd Cg^1/2)^1/2
+    matmul_sq(T2, T3, r, T1);
+    matmul_sq(T1, T2, r, T3);  // T3 = Sigma
+    for (int i = 0; i < r; i++)
+      for (int j = 0; j < i; j++) T3[i * r + j] = T3[j * r + i] = 0.5 * (T3[i * r + j] + T3[j * r + i]);
+    sym_eig(T3, r, ev);
+    // keep eigenvalues outside [1/cutoff, cutoff], largest |log lam| first
+    int *ord = malloc(sizeof(int) * r);
+    int nk = 0;
+    for (int j = 0; j < r; j++)
+      if (isfinite(ev[j]) && ev[j] > 0 && (ev[j] > cutoff || ev[j] < 1.0 / cutoff)) ord[nk++] = j;
+    for (int a = 0; a < nk; a++)
+      for (int b = a + 1; b < nk; b++)
+        if (fabs(log(ev[ord[b]])) > fabs(log(ev[ord[a]]))) {
+          int t = ord[a];
+          ord[a] = ord[b];
+          ord[b] = t;
+        }
+    if (nk > kmax) nk = kmax;
+    double *Wk = malloc(sizeof(double) * r * (nk > 0 ? nk : 1));  // r x nk: the kept eigenvectors of Sigma
+    for (int m = 0; m < nk; m++) {
+      for (int j = 0; j < r; j++) Wk[(int64_t)j * nk + m] = T3[j * r + ord[m]];
+      // Early windows have few draws, sometimes from a chain still moving
+      // to the typical set; there the estimate can come out absurdly small
+      // (1e-7 on the 37,901-parameter model after 25 draws), which would
+      // freeze that direction for the next window. Limit it to 100x
+      // narrower or wider than the diagonal's scale.
+      lam[m] = fmin(fmax(ev[ord[m]], 1e-4), 1e4);
+    }
+    combine_rows(Wk, nk, r, nk, U0, D, U, nt);
+    // orthonormal up to rounding already; to working precision, so that lam
+    // are the variances along exactly these directions
+    k = lowdin(U, nk, D, nt) ? nk : 0;  // otherwise skip the correction for this window
+    free(Wk), free(ord), free(PX), free(PY), free(Cd), free(Cg), free(T1), free(T2), free(T3), free(ev), free(fw);
+  }
+  free(U0);
+  return k;
+}
+
 // ---------------------------------------------------------------- NUTS
 // Multinomial NUTS with the generalised no-U-turn criterion, diagonal metric
 // and Stan's windowed warmup (step-size dual averaging plus metric windows).
@@ -259,6 +726,7 @@ typedef int64_t (*mint_leap_blocks_fn)(int64_t *out);
 #define MAX_LEAP_BLOCKS 64
 
 #define MAX_DEPTH 10
+#define LR_KMAX 128  // most directions of the low-rank metric
 
 // Phase-space states are immutable once built and shared by reference: a
 // leapfrog step writes a new state instead of updating one in place, and the
@@ -266,6 +734,10 @@ typedef int64_t (*mint_leap_blocks_fn)(int64_t *out);
 // D-length vectors. States are reference counted and recycled from a
 // per-chain free list. The arithmetic and the order of random draws are
 // exactly those of Stan's base_nuts structure.
+//
+// With the low-rank metric (MINT_METRIC=lowrank) p and g carry, after their D
+// entries, their k projections on the metric's directions (see Nuts); so do
+// the momentum sums of the tree.
 typedef struct St {
   double *q, *p, *g;  // position, momentum, gradient
   double lp, h;            // log density, Hamiltonian
@@ -293,7 +765,10 @@ typedef struct {
 } Merge;
 
 #define MAX_NT 64
-#define NPART (1 + 6 * (MAX_DEPTH + 2))
+// part[t]: the kinetic energy and six sums per merge, then (low-rank metric)
+// the k projections of the leaf's gradient
+#define NPART_MERGE (1 + 6 * (MAX_DEPTH + 2))
+#define NPART (NPART_MERGE + LR_KMAX)
 #define SLOT_OTHER MAX_NT  // partial sums of the parameters no hook covers
 
 typedef struct {
@@ -328,6 +803,21 @@ typedef struct {
   const St *spec_from;
   double spec_eps;
   double part[MAX_NT + 1][NPART];  // per-thread partial sums of a leaf pass (and SLOT_OTHER)
+  // Low-rank metric (MINT_METRIC=lowrank; k = 0 otherwise):
+  //   inverse metric = diag(inv_m) + sum_j lr_d[j] v_j v_j',  v_j = sqrt(inv_m) u_j,
+  // with orthonormal u_j (before rounding). Every momentum, momentum sum and
+  // gradient carries its k projections c_j = v_j . x in the LR_KMAX slots after
+  // its D entries, so the kinetic energy and the no-U-turn checks need O(k)
+  // extra work. The v_j are stored in single precision (half the memory
+  // traffic of the O(D k) passes); all arithmetic on them is in double except
+  // the position update's sum, and the metric is exactly the one the stored
+  // values define (lr_a makes the momentum draws exact for it).
+  int k;
+  float *lr_v;                     // tiled, see LR_AT
+  int64_t lr_nb;                   // tiles per direction group: ceil(D / 8)
+  double lr_d[LR_KMAX];            // lam_j - 1
+  double lr_a[LR_KMAX * LR_KMAX];   // k x k, for drawing momenta (lr_set)
+  double lr_gm[LR_KMAX * LR_KMAX];  // k x k: v_a . (v_b / inv_m)
 } Nuts;
 
 #define MAX_NT 64
@@ -384,8 +874,8 @@ static St *st_acquire(Nuts *s) {
     if (s->n_all == 4096) mint_panic("sampler state pool exhausted");
     x = calloc(1, sizeof *x);
     x->q = mint_alloc(s->D);
-    x->p = mint_alloc(s->D);
-    x->g = mint_alloc(s->D);
+    x->p = mint_alloc(s->D + LR_KMAX);
+    x->g = mint_alloc(s->D + LR_KMAX);
     s->all[s->n_all++] = x;
   }
   x->rc = 1;
@@ -416,6 +906,10 @@ static double log_sum_exp(double a, double b) {
 static double hamiltonian(Nuts *s, const St *z) {
   double k = 0;
   for (int64_t i = 0; i < s->D; i++) k += z->p[i] * z->p[i] * s->inv_m[i];
+  if (s->k) {  // low-rank part, from the stored projections
+    const double *c = z->p + s->D;
+    for (int j = 0; j < s->k; j++) k += s->lr_d[j] * c[j] * c[j];
+  }
   return -z->lp + 0.5 * k;
 }
 
@@ -581,6 +1075,163 @@ static void kern_merge_leaves(int64_t n, const double *restrict im, const double
   for (int l = 0; l < LN; l++) acc[0][l] = a1[l], acc[1][l] = b1[l];
 }
 
+// ---- the low-rank metric's O(D k) kernels
+//
+// The directions are stored in tiles of 8 directions x 8 consecutive entries
+// (256 bytes): direction j, entry i lives in tile (j / 8, i / 8). The passes
+// stream one array with full-width vector operations. Padding (directions
+// k .. 8 ng - 1 and entries D .. 8 nb - 1) is zero. The threads of a chain
+// split D at multiples of 8 entries (split_range), which are tile boundaries.
+#define LR_AT(s, j, i) \
+  ((s)->lr_v[(((int64_t)((j) >> 3) * (s)->lr_nb + ((i) >> 3)) * 8 + ((j) & 7)) * 8 + ((i) & 7)])
+
+static inline v4d v8f_lo(v8f x) { return __builtin_convertvector(__builtin_shufflevector(x, x, 0, 1, 2, 3), v4d); }
+static inline v4d v8f_hi(v8f x) { return __builtin_convertvector(__builtin_shufflevector(x, x, 4, 5, 6, 7), v4d); }
+
+// q[i] += sum_j w[j] v_j[i] for the entries of tiles [tb, te). The sum is
+// formed in single precision (eight lanes per instruction, directions in
+// index order, each step a fused multiply-add, the same for every entry
+// whichever loop handles it) and added to q in double. The position update
+// q += eps f(p) is volume-preserving, and reversible in the same sense as any
+// floating-point leapfrog, for any f that is odd in p, which a rounded
+// linear map is; so the single-precision sum changes only how well energy is
+// conserved, not what the sampler targets. wf has 8 ng entries, zero beyond k.
+static void lr_expand(const Nuts *s, double *restrict q, const float *wf, int64_t tb, int64_t te) {
+  int64_t D = s->D, nb = s->lr_nb;
+  int ng = (s->k + 7) >> 3;
+  const float *restrict V = s->lr_v;
+  int64_t full = D >> 3;  // tiles with 8 real entries
+  int64_t ib = tb;
+  for (; ib + 8 <= te && ib + 8 <= full; ib += 8) {
+    v8f a0 = {0}, a1 = {0}, a2 = {0}, a3 = {0}, a4 = {0}, a5 = {0}, a6 = {0}, a7 = {0};
+    for (int g = 0; g < ng; g++)
+      for (int j = 0; j < 8; j++) {
+        float ws = wf[8 * g + j];
+        v8f w = {ws, ws, ws, ws, ws, ws, ws, ws};
+        const float *t = V + (((int64_t)g * nb + ib) * 8 + j) * 8;
+        a0 = __builtin_elementwise_fma(w, *(const v8f *)(t), a0);
+        a1 = __builtin_elementwise_fma(w, *(const v8f *)(t + 64), a1);
+        a2 = __builtin_elementwise_fma(w, *(const v8f *)(t + 128), a2);
+        a3 = __builtin_elementwise_fma(w, *(const v8f *)(t + 192), a3);
+        a4 = __builtin_elementwise_fma(w, *(const v8f *)(t + 256), a4);
+        a5 = __builtin_elementwise_fma(w, *(const v8f *)(t + 320), a5);
+        a6 = __builtin_elementwise_fma(w, *(const v8f *)(t + 384), a6);
+        a7 = __builtin_elementwise_fma(w, *(const v8f *)(t + 448), a7);
+      }
+    v8f acc[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+    for (int m = 0; m < 8; m++) {
+      double *x = q + (ib + m) * 8;
+      *(v4d *)x += v8f_lo(acc[m]);
+      *(v4d *)(x + 4) += v8f_hi(acc[m]);
+    }
+  }
+  for (; ib < te; ib++) {
+    v8f a = {0};
+    for (int g = 0; g < ng; g++)
+      for (int j = 0; j < 8; j++) {
+        float ws = wf[8 * g + j];
+        v8f w = {ws, ws, ws, ws, ws, ws, ws, ws};
+        a = __builtin_elementwise_fma(w, *(const v8f *)(V + (((int64_t)g * nb + ib) * 8 + j) * 8), a);
+      }
+    double *x = q + ib * 8;
+    if (ib < full) {
+      *(v4d *)x += v8f_lo(a);
+      *(v4d *)(x + 4) += v8f_hi(a);
+    } else {
+      for (int ii = 0; ib * 8 + ii < D; ii++) x[ii] += (double)a[ii];
+    }
+  }
+}
+
+// c[j] += v_j . x over the entries of tiles [tb, te), in double (products of
+// the stored single-precision values with x are formed exactly as double
+// arithmetic would). Four directions at a time; within each, the entries are
+// summed in four lanes and the lanes combined in a fixed order, so the result
+// depends only on [tb, te).
+static void lr_dots(const Nuts *s, double *c, const double *restrict x, int64_t tb, int64_t te) {
+  int64_t D = s->D, nb = s->lr_nb;
+  int ng = (s->k + 7) >> 3;
+  const float *restrict V = s->lr_v;
+  int64_t full = D >> 3;
+  int64_t tf = te < full ? te : full;
+  for (int g = 0; g < ng; g++)
+    for (int h = 0; h < 8; h += 4) {
+      if (8 * g + h >= s->k) break;
+      v4d a0 = {0}, a1 = {0}, a2 = {0}, a3 = {0};
+      for (int64_t ib = tb; ib < tf; ib++) {
+        v4d xl = *(const v4d *)(x + ib * 8), xh = *(const v4d *)(x + ib * 8 + 4);
+        const float *t = V + ((int64_t)g * nb + ib) * 64 + h * 8;
+        a0 = __builtin_elementwise_fma(v8f_lo(*(const v8f *)(t)), xl, a0);
+        a1 = __builtin_elementwise_fma(v8f_lo(*(const v8f *)(t + 8)), xl, a1);
+        a2 = __builtin_elementwise_fma(v8f_lo(*(const v8f *)(t + 16)), xl, a2);
+        a3 = __builtin_elementwise_fma(v8f_lo(*(const v8f *)(t + 24)), xl, a3);
+        a0 = __builtin_elementwise_fma(v8f_hi(*(const v8f *)(t)), xh, a0);
+        a1 = __builtin_elementwise_fma(v8f_hi(*(const v8f *)(t + 8)), xh, a1);
+        a2 = __builtin_elementwise_fma(v8f_hi(*(const v8f *)(t + 16)), xh, a2);
+        a3 = __builtin_elementwise_fma(v8f_hi(*(const v8f *)(t + 24)), xh, a3);
+      }
+      v4d acc[4] = {a0, a1, a2, a3};
+      for (int j = 0; j < 4 && 8 * g + h + j < s->k; j++)
+        c[8 * g + h + j] += (acc[j][0] + acc[j][1]) + (acc[j][2] + acc[j][3]);
+      if (tb <= full && full < te) {  // the partial last tile (D not a multiple of 8)
+        for (int j = 0; j < 4 && 8 * g + h + j < s->k; j++) {
+          const float *t = V + (((int64_t)g * nb + full) * 8 + h + j) * 8;
+          double sx = 0;
+          for (int64_t ii = 0; full * 8 + ii < D; ii++) sx += (double)t[ii] * x[full * 8 + ii];
+          c[8 * g + h + j] += sx;
+        }
+      }
+    }
+}
+
+#define LR_CHUNK (CHUNK / 8)  // tiles per block of a projection
+
+// c_j = v_j . x for the k directions (x has D entries), split across the
+// chain's threads like the leaf passes and blocked like them
+static void lr_project(Nuts *s, const double *x, double *c) {
+  int nt = s->nt, k = s->k;
+  int used = 1;
+#pragma omp parallel num_threads(nt) if (nt > 1)
+  {
+    int t = omp_get_thread_num(), T = omp_get_num_threads();
+    if (t == 0) used = T;
+    double *part = s->part[t];
+    for (int j = 0; j < k; j++) part[j] = 0;
+    int64_t lo, hi;
+    split_range(s->D, t, T, &lo, &hi);
+    for (int64_t c0 = lo; c0 < hi; c0 += CHUNK) {
+      int64_t c1 = c0 + CHUNK < hi ? c0 + CHUNK : hi;
+      lr_dots(s, part, x, c0 >> 3, (c1 + 7) >> 3);
+    }
+  }
+  if (used < s->team_min) s->team_min = used;
+  for (int j = 0; j < k; j++) {
+    double acc = 0;
+    for (int t = 0; t < used; t++) acc += s->part[t][j];
+    c[j] = acc;
+  }
+}
+
+// The projections of a leaf's momenta from those of its half-step momentum
+// (cph) and of its new gradient (cg): the final momentum p = ph + eps/2 g and
+// the next leaf's half-step momentum p + eps/2 g (momenta and gradients
+// project linearly). Shared by the leaf pass and the code after it, so that
+// both get the same values.
+static inline void lr_next(int k, double eps, const double *cph, const double *cg, double *cp, double *cx) {
+  for (int j = 0; j < k; j++) {
+    double p = cph[j] + 0.5 * eps * cg[j];
+    cp[j] = p;
+    cx[j] = p + 0.5 * eps * cg[j];
+  }
+}
+
+// weights of the position update q += eps (inv_m * ph + sum_j d_j c_j(ph) v_j)
+static inline void lr_weights(const Nuts *s, double eps, const double *cph, float *wf) {
+  int k = s->k;
+  for (int j = 0; j < k; j++) wf[j] = (float)(eps * s->lr_d[j] * cph[j]);
+  for (int j = k; j < ((k + 7) & ~7); j++) wf[j] = 0;
+}
+
 // ---- a leaf of the tree
 //
 // A leaf costs two passes over D around its gradient. The first half-step
@@ -625,8 +1276,11 @@ static void kern_kinetic(int64_t lo, int64_t hi, const double *restrict im, cons
 }
 
 // Leaf J's work on elements [lo, hi), accumulating the kinetic-energy lanes
-// k and the merges' lanes acc.
-static void leaf_range(const LeafJob *J, int64_t lo, int64_t hi, double *k, double (*acc)[6][LN]) {
+// k and the merges' lanes acc. With cg (the low-rank metric, and only for
+// ranges that start on a tile boundary, as split_range's do), also adds the
+// new gradient's projections on the metric's directions, block by block
+// while the gradient is in cache.
+static void leaf_range(const LeafJob *J, int64_t lo, int64_t hi, double *k, double (*acc)[6][LN], double *cg) {
   Nuts *s = J->s;
   St *n = J->n, *nx = J->nx;
   const double *im = s->inv_m;
@@ -637,18 +1291,20 @@ static void leaf_range(const LeafJob *J, int64_t lo, int64_t hi, double *k, doub
       kern_half2(c0, c1, J->eps, im, n->p, n->g, n->q, nx ? nx->p : NULL, nx ? nx->q : NULL, k);
     else
       kern_kinetic(c0, c1, im, n->p, k);
-    if (!J->merges) continue;
-    const double *below = n->p + c0;
-    for (int v = 0; v < J->nlev; v++) {
-      const LevelJob *L = &J->lev[v];
-      double *out = L->out ? L->out + c0 : buf[v & 1];
-      const double *ra = L->ra ? L->ra + c0 : below, *rb = L->rb ? L->rb + c0 : below;
-      if (L->leaves)
-        kern_merge_leaves(m, im + c0, ra, rb, out, acc[v]);
-      else
-        kern_merge(m, im + c0, ra, rb, L->bp + c0, L->ep + c0, L->m2p + c0, L->m1p + c0, out, acc[v]);
-      below = out;
+    if (J->merges) {
+      const double *below = n->p + c0;
+      for (int v = 0; v < J->nlev; v++) {
+        const LevelJob *L = &J->lev[v];
+        double *out = L->out ? L->out + c0 : buf[v & 1];
+        const double *ra = L->ra ? L->ra + c0 : below, *rb = L->rb ? L->rb + c0 : below;
+        if (L->leaves)
+          kern_merge_leaves(m, im + c0, ra, rb, out, acc[v]);
+        else
+          kern_merge(m, im + c0, ra, rb, L->bp + c0, L->ep + c0, L->m2p + c0, L->m1p + c0, out, acc[v]);
+        below = out;
+      }
     }
+    if (cg) lr_dots(s, cg, n->g, c0 >> 3, (c1 + 7) >> 3);
   }
 }
 
@@ -661,26 +1317,65 @@ static void leaf_part(const LeafJob *J, double *part, const double *k, double (*
     for (int j = 0; j < 6; j++) part[1 + 6 * v + j] += lanes_total(acc[v][j]);
 }
 
+// Thread t of T's share of the leaf pass. With the low-rank metric the pass
+// also projects the new gradient on the directions (its momentum's
+// projections follow from it, see lr_next) into part[t][NPART_MERGE ..],
+// and, when there is a next leaf, adds the low-rank part of that leaf's
+// position update after all threads' projections are in: a second pass over
+// the directions, in the same parallel region. J->half == 0 is that
+// low-rank work alone (after the fused leapfrog, whose hooks did the rest):
+// the projections are summed in the same blocks and order as with the rest,
+// so they and the position update come out the same either way.
 static void leaf_work(LeafJob *J, int t, int T) {
+  Nuts *s = J->s;
+  St *n = J->n, *nx = J->nx;
+  int k = s->k;
   int64_t lo, hi;
-  split_range(J->s->D, t, T, &lo, &hi);
-  double k[LN] = {0};
-  double acc[MAX_DEPTH + 2][6][LN];
-  memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
-  leaf_range(J, lo, hi, k, acc);
-  leaf_part(J, J->s->part[t], k, acc, 0);
+  split_range(s->D, t, T, &lo, &hi);
+  double *cg = s->part[t] + NPART_MERGE;  // this thread's projections of the gradient
+  for (int j = 0; j < k; j++) cg[j] = 0;
+  if (J->half) {
+    double kl[LN] = {0};
+    double acc[MAX_DEPTH + 2][6][LN];
+    memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
+    leaf_range(J, lo, hi, kl, acc, k ? cg : NULL);
+    leaf_part(J, s->part[t], kl, acc, 0);
+  } else {
+    for (int64_t c0 = lo; c0 < hi; c0 += CHUNK) {
+      int64_t c1 = c0 + CHUNK < hi ? c0 + CHUNK : hi;
+      lr_dots(s, cg, n->g, c0 >> 3, (c1 + 7) >> 3);
+    }
+  }
+  if (k && nx) {
+#pragma omp barrier
+    // every thread adds the threads' projections in thread order, as
+    // leaf_pass does afterwards
+    double cgt[LR_KMAX], cp[LR_KMAX], cx[LR_KMAX];
+    float wf[LR_KMAX + 8];
+    for (int j = 0; j < k; j++) {
+      double a = s->part[0][NPART_MERGE + j];
+      for (int u = 1; u < T; u++) a += s->part[u][NPART_MERGE + j];
+      cgt[j] = a;
+    }
+    lr_next(k, J->eps, n->p + s->D, cgt, cp, cx);
+    lr_weights(s, J->eps, cx, wf);
+    lr_expand(s, nx->q, wf, lo >> 3, (hi + 7) >> 3);
+  }
 }
 
 // The fused leapfrog's hook (see mint_leap_fn): leaf work on
 // theta[lo .. lo + len), in blocks of LN from lo (the last few elements by
-// index modulo LN, as in kern_half2); the totals are added to the slot.
+// index modulo LN, as in kern_half2); the totals are added to the slot. The
+// low-rank metric's work is not done here: its position update needs every
+// thread's projections, which a hook inside the kernel cannot wait for
+// (leaf_fused_run does it after the kernel).
 static void leaf_block(void *ctx, int64_t slot, int64_t lo, int64_t len) {
   LeafJob *J = ctx;
   if (len <= 0) return;
   double k[LN] = {0};
   double acc[MAX_DEPTH + 2][6][LN];
   memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
-  leaf_range(J, lo, lo + len, k, acc);
+  leaf_range(J, lo, lo + len, k, acc, NULL);
   leaf_part(J, J->s->part[slot], k, acc, 1);
 }
 
@@ -694,9 +1389,15 @@ static void note_team(Nuts *s, int used) {
 // n = first half-step of a leapfrog from z
 static void leaf_start(Nuts *s, const St *z, St *n, double eps) {
   int64_t D = s->D;
-  int nt = s->nt;
+  int nt = s->nt, k = s->k;
+  float wf[LR_KMAX + 8];
+  if (k) {  // the half-step momentum's projections (as lr_next forms them), and the weights
+    for (int j = 0; j < k; j++) n->p[D + j] = z->p[D + j] + 0.5 * eps * z->g[D + j];
+    lr_weights(s, eps, n->p + D, wf);
+  }
   if (nt == 1) {
     kern_half1(0, D, eps, s->inv_m, z->p, z->g, z->q, n->p, n->q);
+    if (k) lr_expand(s, n->q, wf, 0, s->lr_nb);
     return;
   }
   int used = 1;
@@ -707,6 +1408,7 @@ static void leaf_start(Nuts *s, const St *z, St *n, double eps) {
     int64_t lo, hi;
     split_range(D, t, T, &lo, &hi);
     kern_half1(lo, hi, eps, s->inv_m, z->p, z->g, z->q, n->p, n->q);
+    if (k) lr_expand(s, n->q, wf, lo >> 3, (hi + 7) >> 3);
   }
   note_team(s, used);
 }
@@ -732,11 +1434,60 @@ static void leaf_prepare(Nuts *s, St *n, double eps, LeafJob *J) {
   }
 }
 
-// Reads leaf J's sums v (kinetic energy, then six per merge): each merge's
-// result into its Merge, and the next leaf's half-step for build_tree.
-// Returns the Hamiltonian.
-static double leaf_conclude(Nuts *s, const LeafJob *J, const double *v) {
+// The low-rank metric's parts of leaf J's sums v, from the projections (the
+// gradient's total in v[NPART_MERGE ..]): the leaf's momentum projections and
+// the next leaf's half-step ones; the kinetic energy gains sum_j d_j c_j(p)^2;
+// each p_sharp . r of a merge gains sum_j d_j c_j(p) c_j(r), and a merge's sum
+// projects to the sum of its halves' projections.
+static void lr_conclude(Nuts *s, const LeafJob *J, double *v) {
+  int64_t D = s->D;
+  int k = s->k;
+  const double *d = s->lr_d;
+  double *cg = J->n->g + D, *cp = J->n->p + D, cx[LR_KMAX];
+  for (int j = 0; j < k; j++) cg[j] = v[NPART_MERGE + j];
+  lr_next(k, J->eps, cp, cg, cp, cx);
+  if (J->nx) memcpy(J->nx->p + D, cx, sizeof(double) * (size_t)k);
+  for (int j = 0; j < k; j++) v[0] += d[j] * cp[j] * cp[j];
+  double cbelow[2][LR_KMAX];
+  const double *below = cp;
+  for (int l = 0; l < J->nlev; l++) {
+    const LevelJob *L = &J->lev[l];
+    const double *a = L->ra ? L->ra + D : below, *b = L->rb ? L->rb + D : below;
+    double *out = L->out ? L->out + D : cbelow[l & 1];
+    double *x = v + 1 + 6 * l;
+    double corr[6] = {0, 0, 0, 0, 0, 0};
+    if (L->leaves) {
+      for (int j = 0; j < k; j++) {
+        double r = a[j] + b[j];
+        corr[0] += d[j] * b[j] * r;
+        corr[1] += d[j] * a[j] * r;
+        out[j] = r;
+      }
+    } else {
+      const double *be = L->bp + D, *en = L->ep + D, *m2 = L->m2p + D, *m1 = L->m1p + D;
+      for (int j = 0; j < k; j++) {
+        double r = a[j] + b[j], r2 = a[j] + m2[j], r3 = b[j] + m1[j];
+        corr[0] += d[j] * en[j] * r;
+        corr[1] += d[j] * be[j] * r;
+        corr[2] += d[j] * m2[j] * r2;
+        corr[3] += d[j] * be[j] * r2;
+        corr[4] += d[j] * en[j] * r3;
+        corr[5] += d[j] * m1[j] * r3;
+        out[j] = r;
+      }
+    }
+    for (int j = 0; j < 6; j++) x[j] += corr[j];
+    below = out;
+  }
+}
+
+// Reads leaf J's sums v (kinetic energy, then six per merge, then with the
+// low-rank metric the gradient's projections, whose parts are added first):
+// each merge's result into its Merge, and the next leaf's half-step for
+// build_tree. Returns the Hamiltonian.
+static double leaf_conclude(Nuts *s, const LeafJob *J, double *v) {
   int hi = s->npend;
+  if (s->k) lr_conclude(s, J, v);
   for (int l = 0; l < J->nlev; l++) {
     const double *x = v + 1 + 6 * l;
     int ok = J->lev[l].leaves ? (x[0] > 0 && x[1] > 0)
@@ -752,7 +1503,7 @@ static double leaf_conclude(Nuts *s, const LeafJob *J, const double *v) {
 }
 
 // The leaf pass across the chain's threads, split by index ranges; the
-// totals end up in s->part[0].
+// totals end up in s->part[0] (with J->half == 0 only the projections').
 static void leaf_pass(Nuts *s, LeafJob *J) {
   if (s->nt == 1) {
     leaf_work(J, 0, 1);
@@ -766,8 +1517,11 @@ static void leaf_pass(Nuts *s, LeafJob *J) {
       leaf_work(J, t, T);
     }
     note_team(s, used);
-    for (int t = 1; t < used; t++)
-      for (int j = 0; j < 1 + 6 * J->nlev; j++) s->part[0][j] += s->part[t][j];
+    for (int t = 1; t < used; t++) {
+      if (J->half)
+        for (int j = 0; j < 1 + 6 * J->nlev; j++) s->part[0][j] += s->part[t][j];
+      for (int j = 0; j < s->k; j++) s->part[0][NPART_MERGE + j] += s->part[t][NPART_MERGE + j];
+    }
   }
 }
 
@@ -792,6 +1546,14 @@ static double leaf_finish(Nuts *s, St *n, double eps) {
 // leaf_pass's order, which gives the runtime's draws (for testing; that
 // relies on leap computing the same gradient as the model's logp, which
 // MINT_LEAP_TEST and tests/run.sh check). The sums end up in s->part[0].
+//
+// With the low-rank metric the hooks do the diagonal part of the leaf as
+// above, and a pass across the chain's threads after the kernel (leaf_work
+// with half == 0; in exact mode the leaf pass that sums) projects the
+// gradient and adds the low-rank part of the next leaf's position update,
+// split, blocked and summed as in the runtime's own leaf pass. So the
+// projections, and that part of the position, are those of the runtime's
+// path; only the diagonal sums are in the hooks' order.
 static void leaf_fused_run(Nuts *s, LeafJob *J) {
   St *n = J->n;
   int nt = (int)kernel_nt;
@@ -805,7 +1567,7 @@ static void leaf_fused_run(Nuts *s, LeafJob *J) {
     double k[LN] = {0};
     double acc[MAX_DEPTH + 2][6][LN];
     memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
-    for (int b = 0; b < s->nother; b++) leaf_range(J, s->other[2 * b], s->other[2 * b + 1], k, acc);
+    for (int b = 0; b < s->nother; b++) leaf_range(J, s->other[2 * b], s->other[2 * b + 1], k, acc, NULL);
     leaf_part(J, s->part[SLOT_OTHER], k, acc, 0);
   }
   if (s->leap_exact) {
@@ -818,6 +1580,11 @@ static void leaf_fused_run(Nuts *s, LeafJob *J) {
   for (int t = 1; t < nt; t++)
     for (int j = 0; j < nsum; j++) v[j] += s->part[t][j];
   for (int j = 0; j < nsum; j++) v[j] += s->part[SLOT_OTHER][j];
+  if (s->k) {
+    J->half = 0;
+    leaf_pass(s, J);
+    J->half = 1;
+  }
 }
 
 // Leaf n through the fused leapfrog (leaf_fused_run); returns the Hamiltonian.
@@ -852,8 +1619,173 @@ static void leap_other(Nuts *s, mint_leap_blocks_fn blocks) {
   }
 }
 
+static int cholesky_upper(const double *G, int k, double *R) {  // G = R' R, R upper triangular
+  memset(R, 0, sizeof(double) * k * k);
+  for (int j = 0; j < k; j++) {
+    for (int i = 0; i <= j; i++) {
+      double sum = G[i * k + j];
+      for (int m = 0; m < i; m++) sum -= R[m * k + i] * R[m * k + j];
+      if (i == j) {
+        if (!(sum > 0)) return 0;
+        R[j * k + j] = sqrt(sum);
+      } else {
+        R[i * k + j] = sum / R[i * k + i];
+      }
+    }
+  }
+  return 1;
+}
+
+// Installs a low-rank metric: k orthonormal directions U (rows, scaled
+// coordinates) with variances lam. Stores v_j = S u_j in single precision and
+// derives, for the stored values, the k x k matrix A with
+//   (I + W A W')^2 = (I + W diag(lam - 1) W')^-1,  W = V / S (D x k),
+// so that p = S^-1 (x + W A W' x), x ~ N(0, I), has exactly the covariance
+// whose inverse the kinetic energy uses. With G = W'W = R'R (Cholesky) and
+// R diag(lam - 1) R' = E diag(beta) E', A = R^-1 E diag((1 + beta)^-1/2 - 1) E' R^-T.
+// Falls back to the diagonal metric (k = 0) when the stored directions are
+// not finite or not independent.
+static void lr_set(Nuts *s, int k, const double *U, const double *lam) {
+  int64_t D = s->D;
+  memset(s->lr_v, 0, sizeof(float) * (size_t)((k + 7) >> 3) * (size_t)s->lr_nb * 64);
+  for (int j = 0; j < k; j++) {
+    const double *u = U + (int64_t)j * D;
+    for (int64_t i = 0; i < D; i++) LR_AT(s, j, i) = (float)(sqrt(s->inv_m[i]) * u[i]);
+    s->lr_d[j] = lam[j] - 1.0;
+  }
+  s->k = 0;
+  if (k == 0) return;
+  size_t kk = (size_t)k * k;
+  double *Gm = calloc(kk, sizeof(double)), *R = malloc(sizeof(double) * kk), *B = malloc(sizeof(double) * kk);
+  double *Ri = calloc(kk, sizeof(double)), *T = malloc(sizeof(double) * kk), *beta = malloc(sizeof(double) * k);
+  for (int a = 0; a < k; a++)
+    for (int b = 0; b <= a; b++) {
+      double sum = 0;
+      for (int64_t i = 0; i < D; i++) sum += (double)LR_AT(s, a, i) * (double)LR_AT(s, b, i) / s->inv_m[i];
+      Gm[a * k + b] = Gm[b * k + a] = sum;
+    }
+  memcpy(s->lr_gm, Gm, sizeof(double) * kk);
+  int finite = 1;
+  for (int j = 0; j < k && finite; j++)
+    for (int64_t i = 0; i < D && finite; i++) finite = isfinite(LR_AT(s, j, i));
+  for (int j = 0; j < k && finite; j++) finite = isfinite(s->lr_d[j]);
+  if (!finite || !cholesky_upper(Gm, k, R)) goto done;
+  // B = R diag(d) R'
+  for (int a = 0; a < k; a++)
+    for (int b = 0; b < k; b++) {
+      double sum = 0;
+      for (int m = 0; m < k; m++) sum += R[a * k + m] * s->lr_d[m] * R[b * k + m];
+      B[a * k + b] = sum;
+    }
+  sym_eig(B, k, beta);  // B = E diag(beta) E', E in B's columns
+  if (!(1.0 + beta[0] > 0)) goto done;
+  // Ri = R^-1 (upper triangular)
+  for (int j = 0; j < k; j++) {
+    Ri[j * k + j] = 1.0 / R[j * k + j];
+    for (int i = j - 1; i >= 0; i--) {
+      double sum = 0;
+      for (int m = i + 1; m <= j; m++) sum += R[i * k + m] * Ri[m * k + j];
+      Ri[i * k + j] = -sum / R[i * k + i];
+    }
+  }
+  // T = Ri E
+  for (int a = 0; a < k; a++)
+    for (int b = 0; b < k; b++) {
+      double sum = 0;
+      for (int m = 0; m < k; m++) sum += Ri[a * k + m] * B[m * k + b];
+      T[a * k + b] = sum;
+    }
+  // A = T diag(alpha) T'
+  for (int a = 0; a < k; a++)
+    for (int b = 0; b < k; b++) {
+      double sum = 0;
+      for (int m = 0; m < k; m++) sum += T[a * k + m] * (1.0 / sqrt(1.0 + beta[m]) - 1.0) * T[b * k + m];
+      s->lr_a[a * k + b] = sum;
+    }
+  s->k = k;
+done:
+  free(Gm), free(R), free(B), free(Ri), free(T), free(beta);
+}
+
+// Most directions of the low-rank metric: MINT_LOWRANK_K, or by default 16
+// or 24 if each thread's share of that many directions (single precision,
+// D / nt entries each) fits in its L2 cache (512 KiB if the size is not
+// reported), and otherwise 8, whether or not those fit. Each leapfrog step
+// streams the directions twice. On the 37,901-parameter time series (3
+// threads per chain) 24 directions gave more effective draws per gradient
+// than 8 but about as many per second, each step costing more; on the
+// 3,171-parameter one 24 gave the most per gradient and per second
+// (bench/metric_experiment.py).
+static int lowrank_k(int64_t D, int nt) {
+  const char *e = getenv("MINT_LOWRANK_K");
+  int k;
+  if (e) {
+    k = atoi(e);
+  } else {
+    long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2 <= 0) l2 = 512 * 1024;
+    double groups = (double)l2 * nt / (32.0 * (double)D);  // 8 directions x 4 bytes per entry
+    k = groups >= 3 ? 24 : groups >= 2 ? 16 : 8;
+  }
+  if (k > LR_KMAX) k = LR_KMAX;
+  if (k < 0) k = 0;
+  return k;
+}
+
+// Window draws (and as many gradients) the low-rank metric keeps per chain,
+// at most the warmup iterations, within a memory budget of MINT_LOWRANK_MB
+// (default 256) per chain; 0 if fewer than 3 fit.
+static int lowrank_nmax(int64_t D, int64_t warmup) {
+  const char *e = getenv("MINT_LOWRANK_MB");
+  double mb = e ? atof(e) : 256;
+  if (!(mb > 0)) mb = 256;
+  double cap = mb * 1048576.0 / (16.0 * (double)D);
+  int n = (int)(cap < (double)warmup ? cap : (double)warmup);
+  return n < 3 ? 0 : n;
+}
+
 static void sample_momentum(Nuts *s, St *z) {
   for (int64_t i = 0; i < s->D; i++) z->p[i] = rng_normal(&s->rng) / sqrt(s->inv_m[i]);
+  if (s->k) {
+    // p = S^-1 (x + U A U' x) with x ~ N(0, I), S = sqrt(inv_m), U = V / S
+    // and A from lr_set, so that cov(p) is the inverse of the inverse metric.
+    // Above p holds S^-1 x, so U' x = V' p = c0; and S^-1 U = V / inv_m. The
+    // projections of the result are c0 + Gm A c0 (Gm = V' diag(1 / inv_m) V).
+    int64_t D = s->D, nb = s->lr_nb, full = D >> 3;
+    int k = s->k, ng = (k + 7) >> 3;
+    double c0[LR_KMAX], ac[LR_KMAX + 8];
+    lr_project(s, z->p, c0);
+    for (int a = 0; a < k; a++) {
+      double sum = 0;
+      for (int b = 0; b < k; b++) sum += s->lr_a[a * k + b] * c0[b];
+      ac[a] = sum;
+    }
+    for (int j = k; j < 8 * ng; j++) ac[j] = 0;
+    double *cp = z->p + D;
+    for (int a = 0; a < k; a++) {
+      double sum = 0;
+      for (int b = 0; b < k; b++) sum += s->lr_gm[a * k + b] * ac[b];
+      cp[a] = c0[a] + sum;
+    }
+    const double *im = s->inv_m;
+    for (int64_t ib = 0; ib < nb; ib++) {
+      v4d lo = {0}, hi = {0};
+      for (int g = 0; g < ng; g++)
+        for (int j = 0; j < 8; j++) {
+          v8f t = *(const v8f *)(s->lr_v + (((int64_t)g * nb + ib) * 8 + j) * 8);
+          v4d a = {ac[8 * g + j], ac[8 * g + j], ac[8 * g + j], ac[8 * g + j]};
+          lo = __builtin_elementwise_fma(a, v8f_lo(t), lo);
+          hi = __builtin_elementwise_fma(a, v8f_hi(t), hi);
+        }
+      double *p = z->p + ib * 8;
+      if (ib < full) {
+        *(v4d *)p += lo / *(const v4d *)(im + ib * 8);
+        *(v4d *)(p + 4) += hi / *(const v4d *)(im + ib * 8 + 4);
+      } else {
+        for (int ii = 0; ib * 8 + ii < D; ii++) p[ii] += (ii < 4 ? lo[ii] : hi[ii - 4]) / im[ib * 8 + ii];
+      }
+    }
+  }
 }
 
 
@@ -861,7 +1793,7 @@ static void sample_momentum(Nuts *s, St *z) {
 static St *st_clone_position(Nuts *s, const St *z) {
   St *x = st_acquire(s);
   memcpy(x->q, z->q, s->D * sizeof(double));
-  memcpy(x->g, z->g, s->D * sizeof(double));
+  memcpy(x->g, z->g, (s->D + s->k) * sizeof(double));  // with the gradient's projections
   x->lp = z->lp;
   return x;
 }
@@ -966,7 +1898,7 @@ static double transition(Nuts *s, Traj *t) {
   St *edge_fwd = NULL, *edge_bck = NULL, *sample = NULL, *propose = NULL;
   St **refs[] = {&fwd_fwd, &fwd_bck, &bck_fwd, &bck_bck, &edge_fwd, &edge_bck, &sample, &propose};
   for (size_t k = 0; k < sizeof refs / sizeof refs[0]; k++) st_set(s, refs[k], z0);
-  vcopy(t->rho, z0->p, D);
+  vcopy(t->rho, z0->p, D + s->k);
 
   double log_sum_weight = 0;
   double H0 = hamiltonian(s, z0);
@@ -1027,19 +1959,33 @@ static double transition(Nuts *s, Traj *t) {
 
 // Stan's heuristic: double or halve the step size until the acceptance
 // probability of a single leapfrog step crosses 0.8.
+// Hamiltonian after one leapfrog step from z into n
+static double step_energy(Nuts *s, const St *z, St *n, double eps) {
+  if (!s->k) {
+    leapfrog_into(s, z, n, eps);
+    return hamiltonian(s, n);
+  }
+  int64_t D = s->D;
+  leaf_start(s, z, n, eps);
+  eval(s, n);
+  for (int64_t i = 0; i < D; i++) n->p[i] += 0.5 * eps * n->g[i];
+  double cx[LR_KMAX];
+  lr_project(s, n->g, n->g + D);
+  lr_next(s->k, eps, n->p + D, n->g + D, n->p + D, cx);
+  return hamiltonian(s, n);
+}
+
 static void init_stepsize(Nuts *s) {
   St *a = st_clone_position(s, s->cur), *b = st_acquire(s);
   sample_momentum(s, a);
   double H0 = hamiltonian(s, a);
-  leapfrog_into(s, a, b, s->eps);
-  double h = hamiltonian(s, b);
+  double h = step_energy(s, a, b, s->eps);
   if (isnan(h)) h = INFINITY;
   int direction = (H0 - h) > log(0.8) ? 1 : -1;
   for (;;) {
     sample_momentum(s, a);
     H0 = hamiltonian(s, a);
-    leapfrog_into(s, a, b, s->eps);
-    h = hamiltonian(s, b);
+    h = step_energy(s, a, b, s->eps);
     if (isnan(h)) h = INFINITY;
     double dH = H0 - h;
     if (direction == 1 && !(dH > log(0.8))) break;
@@ -1363,11 +2309,23 @@ static int lbfgs_init(Nuts *s, int64_t maxit, int trace, int chain) {
 // squared deviations, waits for the others, and combines all chains' in chain
 // order, so each chain gets the same metric and the result does not depend
 // on thread timing.
+//
+// With the low-rank metric (MINT_METRIC=lowrank) the directions are pooled
+// too: chain c keeps its window's draws and gradients in rows
+// [c lr_nmax, (c + 1) lr_nmax) of lr_q and lr_g, and after the variances are
+// combined chain 0 estimates the directions from every chain's rows (in
+// chain order) against the pooled diagonal, while the others wait; each
+// chain then installs the same estimate (lowrank_pool).
 typedef struct {
   pthread_barrier_t bar;
   int64_t chains;
   int64_t *n;
   const double **mean, **m2;
+  int lr_nmax;                 // rows per chain; 0: no low-rank pooling
+  double *lr_q, *lr_g, *lr_u;  // chains x lr_nmax x D, twice; the most directions any chain keeps x D
+  int *lr_rows, *lr_kmax;      // per chain: rows kept this window, most directions
+  int lr_k;                    // directions chain 0 estimated
+  double lr_lam[LR_KMAX];
 } Pool;
 
 // Pooled variance of coordinate i over every chain's window; *n_out the pooled count.
@@ -1386,6 +2344,40 @@ static void pool_combine(Pool *p, int64_t D, double *var, double *n_out) {
     }
     var[i] = n > 1 ? m2 / (n - 1.0) : 1.0;
   }
+}
+
+// The pooled low-rank estimate at the end of a window (see Pool): chain
+// `chain` kept `rows` draws in its rows of P->lr_q and P->lr_g and asks for
+// at most kmax directions. Chain 0 moves every chain's rows together (in
+// chain order) and estimates from all of them with its own threads, using
+// the smallest kmax any chain asked for (each chain's directions are
+// allocated for its own); im is the pooled diagonal, the same in every
+// chain. Returns the number of directions (in P->lr_u, P->lr_lam) and the
+// pooled number of draws in *n_out.
+static int lowrank_pool(Pool *P, int chain, int64_t D, int rows, int kmax, const double *im, double cutoff,
+                        double gamma, int nt, int *n_out) {
+  P->lr_rows[chain] = rows;
+  P->lr_kmax[chain] = kmax;
+  pthread_barrier_wait(&P->bar);
+  if (chain == 0) {
+    int64_t n = 0;
+    int km = kmax;
+    for (int64_t c = 0; c < P->chains; c++) {
+      if (P->lr_kmax[c] < km) km = P->lr_kmax[c];
+      int64_t from = c * (int64_t)P->lr_nmax;
+      if (from != n) {  // n <= from: moving down never overwrites rows not yet moved
+        memmove(P->lr_q + n * D, P->lr_q + from * D, sizeof(double) * (size_t)P->lr_rows[c] * (size_t)D);
+        memmove(P->lr_g + n * D, P->lr_g + from * D, sizeof(double) * (size_t)P->lr_rows[c] * (size_t)D);
+      }
+      n += P->lr_rows[c];
+    }
+    P->lr_k = lowrank_estimate(D, (int)n, P->lr_q, P->lr_g, im, km, cutoff, gamma, P->lr_u, P->lr_lam, nt);
+  }
+  pthread_barrier_wait(&P->bar);
+  int n = 0;
+  for (int64_t c = 0; c < P->chains; c++) n += P->lr_rows[c];
+  *n_out = n;
+  return P->lr_k;
 }
 
 // ---- keeping a chain's threads on one L3 cache
@@ -1522,6 +2514,7 @@ typedef struct {
   int64_t n_grad, divergent, n_fused;
   int64_t warmup_grad;  // gradients used before the first kept draw (initialisation and warmup)
   double mean_leapfrog;
+  int rank;  // low-rank metric: number of directions at the end of warmup
 } ChainJob;
 
 static void *run_chain(void *arg) {
@@ -1546,11 +2539,11 @@ static void *run_chain(void *arg) {
   rng_seed(&s->rng, job->seed * 0x9E3779B97F4A7C15ull + (uint64_t)job->chain + 1);
   for (int d = 0; d <= MAX_DEPTH; d++) {
     Level *L = &s->lv[d];
-    L->rho_init = mint_alloc(D);
+    L->rho_init = mint_alloc(D + LR_KMAX);
   }
   Traj t;
   double **tv[] = {&t.rho, &t.rho_next};
-  for (size_t k = 0; k < sizeof tv / sizeof tv[0]; k++) *tv[k] = mint_alloc(D);
+  for (size_t k = 0; k < sizeof tv / sizeof tv[0]; k++) *tv[k] = mint_alloc(D + LR_KMAX);
 
   // Initialise uniformly on (-2, 2) in the unconstrained space, as Stan does.
   s->cur = st_acquire(s);
@@ -1577,6 +2570,51 @@ static void *run_chain(void *arg) {
   // gradient at the initial point instead of the identity.
   const char *metric_env = getenv("MINT_METRIC");
   int grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
+  // "lowrank": Stan's diagonal plus a low-rank correction estimated from the
+  // gradients of the draws in each window (lowrank_estimate).
+  int lowrank = metric_env && strcmp(metric_env, "lowrank") == 0;
+  int lr_kmax = 0, lr_nmax = 0;
+  double lr_cutoff = 2.0, lr_gamma = 1e-5;
+  double *lr_q = NULL, *lr_g = NULL, *lr_u = NULL, lr_lam[LR_KMAX];
+  Pool *lr_pool = NULL;  // the chains pool their low-rank estimates
+  if (lowrank) {
+    const char *e;
+    int team = 1;  // the team OpenMP actually gives this chain, which may be smaller than asked for
+    if (s->nt > 1) {
+#pragma omp parallel num_threads(s->nt)
+      {
+        if (omp_get_thread_num() == 0) team = omp_get_num_threads();
+      }
+    }
+    lr_kmax = lowrank_k(D, team);
+    if (lr_kmax > D) lr_kmax = (int)D;
+    if ((e = getenv("MINT_LOWRANK_CUTOFF"))) lr_cutoff = atof(e);
+    if (!(lr_cutoff >= 1.0)) lr_cutoff = 2.0;
+    if ((e = getenv("MINT_LOWRANK_GAMMA"))) lr_gamma = atof(e);
+    if (!(lr_gamma >= 0)) lr_gamma = 1e-5;
+    // Draws and gradients of the current window are kept, at most lr_nmax of
+    // each (the most recent): in this chain's rows of the pool's arrays when
+    // the chains pool their windows (MINT_WARMUP=fast), else its own.
+    lr_nmax = lowrank_nmax(D, warmup);
+    lr_pool = job->pool && job->pool->lr_nmax ? job->pool : NULL;
+    if (lr_nmax && lr_kmax && lr_pool) {
+      if (lr_pool->lr_nmax != lr_nmax) mint_panic("internal error: low-rank pool size");
+      lr_q = lr_pool->lr_q + (int64_t)job->chain * lr_nmax * D;
+      lr_g = lr_pool->lr_g + (int64_t)job->chain * lr_nmax * D;
+    }
+    if (lr_nmax && lr_kmax) {
+      if (!lr_pool) {
+        lr_q = mint_alloc((int64_t)lr_nmax * D);
+        lr_g = mint_alloc((int64_t)lr_nmax * D);
+        lr_u = mint_alloc((int64_t)lr_kmax * D);
+      }
+      s->lr_nb = (D + 7) / 8;
+      size_t bytes = sizeof(float) * (size_t)((lr_kmax + 7) >> 3) * (size_t)s->lr_nb * 64;
+      if (posix_memalign((void **)&s->lr_v, 64, bytes)) mint_panic("out of memory");
+    } else {
+      lowrank = 0;
+    }
+  }
   const char *init_env = getenv("MINT_METRIC_INIT");
   if (grad_metric && !(init_env && strcmp(init_env, "0") == 0)) {
     for (int64_t i = 0; i < D; i++) {
@@ -1624,6 +2662,11 @@ static void *run_chain(void *arg) {
               gm2[i] += d * (gq[i] - gmean[i]);
             }
           }
+          if (lowrank) {
+            int64_t slot = (wn - 1) % lr_nmax;
+            vcopy(lr_q + slot * D, q, D);
+            vcopy(lr_g + slot * D, gq, D);
+          }
         }
         if (end_window(&w)) {
           if (trace) fprintf(stderr, "warmup chain=%d it=%lld gradients=%lld eps=%.4g\n", job->chain, (long long)it,
@@ -1642,6 +2685,27 @@ static void *run_chain(void *arg) {
               double var = wn > 1 ? wm2[i] / (n - 1.0) : 1.0;
               if (grad_metric && wn > 1 && gm2[i] > 0) var = sqrt(var / (gm2[i] / (n - 1.0)));
               s->inv_m[i] = (n / (n + 5.0)) * var + 1e-3 * (5.0 / (n + 5.0));
+            }
+          }
+          if (lowrank) {
+            int nst = wn < lr_nmax ? (int)wn : lr_nmax;
+            double t_lr = mint_clock();
+            int k;
+            const double *lam = lr_lam;
+            if (lr_pool) {
+              k = lowrank_pool(lr_pool, job->chain, D, nst, lr_kmax, s->inv_m, lr_cutoff, lr_gamma, s->nt, &nst);
+              lr_set(s, k, lr_pool->lr_u, lr_pool->lr_lam);
+              lam = lr_pool->lr_lam;
+            } else {
+              k = lowrank_estimate(D, nst, lr_q, lr_g, s->inv_m, lr_kmax, lr_cutoff, lr_gamma, lr_u, lr_lam, s->nt);
+              lr_set(s, k, lr_u, lr_lam);
+            }
+            if (s->k) lr_project(s, s->cur->g, s->cur->g + D);  // the current gradient, for the new directions
+            if (getenv("MINT_LOWRANK_VERBOSE")) {
+              fprintf(stderr, "chain %d window end at %lld: %d draws%s, rank %d (%.3f s), lam", job->chain,
+                      (long long)it, nst, lr_pool ? " (pooled)" : "", s->k, mint_clock() - t_lr);
+              for (int j = 0; j < s->k && j < 8; j++) fprintf(stderr, " %.3g", lam[j]);
+              fprintf(stderr, "%s\n", s->k > 8 ? " ..." : "");
             }
           }
           vzero(wmean, D);
@@ -1675,6 +2739,9 @@ static void *run_chain(void *arg) {
   job->team_min = s->team_min;
   if (bound) restore_team(s->nt);
   job->mean_leapfrog = job->draws ? (double)total_leapfrog / (double)job->draws : 0;
+  job->rank = s->k;
+  if (!lr_pool) free(lr_q), free(lr_g);
+  free(lr_u), free(s->lr_v);
 
   free(wmean);
   free(wm2);
@@ -1806,17 +2873,22 @@ static void bench_grad(mint_logp_fn f, int64_t D, int64_t reps) {
 // metric, step size and the states of one merge fixed below; eps of both
 // signs) through the runtime's own path (the model's logp, then the leaf
 // pass) and through the fused leapfrog (MINT_KERNEL_THREADS threads in the
-// kernel). The gradient, log density, final momentum, the next leaf's
-// half-step and the merge's summed momentum must be bit-identical; the
-// kinetic energy and the merge's six sums are summed in a different order
-// and are compared relative to the largest of them. With MINT_LEAP_TEST=K
-// > 1, also times K steady-state leaves of each (no merge, eps = 0 so the
+// kernel), first with the diagonal metric and then with a low-rank one
+// (LEAP_TEST_K fixed directions; its projections and its part of the next
+// position are computed after the kernel, see leaf_fused_run). The
+// gradient, log density, final momentum, the next leaf's half-step and the
+// merge's summed momentum (with the low-rank metric also their projections,
+// and the gradient's) must be bit-identical; the kinetic energy and the
+// merge's six sums are summed in a different order and are compared
+// relative to the largest of them. With MINT_LEAP_TEST=K > 1, also times K
+// steady-state leaves of each (diagonal metric, no merge, eps = 0 so the
 // values stay put, three rotating states, the runtime's pass on as many
 // threads as the kernel), alternating blocks of each so that both see the
 // same machine. Then exits.
+#define LEAP_TEST_K 12  // a full group of 8 directions and part of a second
 static St *test_state(int64_t D) {
   St *x = calloc(1, sizeof *x);
-  x->q = mint_alloc(D), x->p = mint_alloc(D), x->g = mint_alloc(D);
+  x->q = mint_alloc(D), x->p = mint_alloc(D + LR_KMAX), x->g = mint_alloc(D + LR_KMAX);
   return x;
 }
 
@@ -1831,7 +2903,7 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
   double *im = mint_alloc(D);
   St *z = test_state(D), *na = test_state(D), *nb = test_state(D), *xa = test_state(D), *xb = test_state(D);
   double *v[6];
-  for (int j = 0; j < 6; j++) v[j] = mint_alloc(D);
+  for (int j = 0; j < 6; j++) v[j] = mint_alloc(D + LR_KMAX);
   bench_point(z->q, D);
   f(z->q, z->g);
   for (int64_t i = 0; i < D; i++) {
@@ -1840,6 +2912,20 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
     for (int j = 0; j < 5; j++) v[j][i] = 0.2 * (double)((i * (31 + 6 * j) + j) % 19 - 9) / 9.0;
   }
   s->inv_m = im;
+  // the low-rank case's directions (not orthonormal: the leaf's arithmetic
+  // does not rely on that), their d_j, and the projections that the leaf's
+  // half-step momentum and the merge's states carry
+  int kt = D < LEAP_TEST_K ? (int)D : LEAP_TEST_K;
+  s->lr_nb = (D + 7) / 8;
+  size_t lr_bytes = sizeof(float) * (size_t)((kt + 7) >> 3) * (size_t)s->lr_nb * 64;
+  if (posix_memalign((void **)&s->lr_v, 64, lr_bytes)) mint_panic("out of memory");
+  memset(s->lr_v, 0, lr_bytes);
+  for (int j = 0; j < kt; j++) {
+    for (int64_t i = 0; i < D; i++)
+      LR_AT(s, j, i) = (float)(0.05 * (double)((i * (7 + 2 * j) + 3 * j) % 23 - 11) / 11.0);
+    s->lr_d[j] = j % 3 == 0 ? -0.6 : 0.4 * (double)(j + 1);
+    for (int m = 0; m < 5; m++) v[m][D + j] = 0.1 * (double)((j * (5 + m) + m) % 9 - 4);
+  }
   // step sizes scaled to the gradient at the benchmark point, so that the
   // momenta and sums stay of moderate size (and the 1e-12 below means
   // something)
@@ -1847,51 +2933,61 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
   for (int64_t i = 0; i < D; i++) gmax = fmax(gmax, fabs(z->g[i]));
   double escale = 1.0 / fmax(1.0, 0.01 * gmax);
   int bad = 0;
-  for (int sgn = 0; sgn < 2; sgn++) {
-    double eps = (sgn ? -0.00137 : 0.00213) * escale;
-    kern_half1(0, D, eps, im, z->p, z->g, z->q, na->p, na->q);
-    memcpy(nb->p, na->p, (size_t)D * sizeof(double));
-    memcpy(nb->q, na->q, (size_t)D * sizeof(double));
-    double sums[2][7];
-    double *out[2] = {v[5], mint_alloc(D)};
-    for (int w = 0; w < 2; w++) {
-      St *n = w ? nb : na, *x = w ? xb : xa;
-      LeafJob J = {.s = s, .n = n, .nx = x, .eps = eps, .nlev = 1, .half = 1, .merges = 1};
-      J.lev[0] = (LevelJob){.ra = v[0], .bp = v[1], .ep = v[2], .m2p = v[3], .m1p = v[4], .out = out[w]};
-      if (w == 0) {
-        n->lp = f(n->q, n->g);
-        leaf_pass(s, &J);
-      } else {
-        leaf_fused_run(s, &J);
+  for (int lr = 0; lr < 2; lr++)
+    for (int sgn = 0; sgn < 2; sgn++) {
+      s->k = lr ? kt : 0;
+      int k = s->k;
+      double eps = (sgn ? -0.00137 : 0.00213) * escale;
+      kern_half1(0, D, eps, im, z->p, z->g, z->q, na->p, na->q);
+      for (int j = 0; j < k; j++) na->p[D + j] = 0.3 * (double)(j % 5 - 2);  // the half-step's projections
+      memcpy(nb->p, na->p, (size_t)(D + k) * sizeof(double));
+      memcpy(nb->q, na->q, (size_t)D * sizeof(double));
+      double sums[2][7];
+      double *out[2] = {v[5], mint_alloc(D + LR_KMAX)};
+      for (int w = 0; w < 2; w++) {
+        St *n = w ? nb : na, *x = w ? xb : xa;
+        LeafJob J = {.s = s, .n = n, .nx = x, .eps = eps, .nlev = 1, .half = 1, .merges = 1};
+        J.lev[0] = (LevelJob){.ra = v[0], .bp = v[1], .ep = v[2], .m2p = v[3], .m1p = v[4], .out = out[w]};
+        // NaN in every partial sum, so that neither path can pass on values
+        // the other left there
+        for (int t = 0; t <= MAX_NT; t++)
+          for (int j = 0; j < NPART; j++) s->part[t][j] = NAN;
+        if (w == 0) {
+          n->lp = f(n->q, n->g);
+          leaf_pass(s, &J);
+        } else {
+          leaf_fused_run(s, &J);
+        }
+        if (k) lr_conclude(s, &J, s->part[0]);
+        memcpy(sums[w], s->part[0], sizeof sums[w]);
       }
-      memcpy(sums[w], s->part[0], sizeof sums[w]);
+      int64_t d[6] = {0};
+      for (int64_t i = 0; i < D + k; i++) {
+        d[0] += memcmp(&na->g[i], &nb->g[i], sizeof(double)) != 0;
+        d[1] += memcmp(&na->p[i], &nb->p[i], sizeof(double)) != 0;
+        d[2] += memcmp(&xa->p[i], &xb->p[i], sizeof(double)) != 0;
+        if (i < D) d[3] += memcmp(&xa->q[i], &xb->q[i], sizeof(double)) != 0;
+        d[4] += memcmp(&out[0][i], &out[1][i], sizeof(double)) != 0;
+      }
+      d[5] = memcmp(&na->lp, &nb->lp, sizeof(double)) != 0;
+      // each sum relative to itself, or to 1e-3 of the largest when it is
+      // smaller than that (a sum near zero after cancellation)
+      double big = 0, worst = 0;
+      for (int j = 0; j < 7; j++) big = fmax(big, fabs(sums[0][j]));
+      for (int j = 0; j < 7; j++) {
+        double e = fabs(sums[0][j] - sums[1][j]) / fmax(fabs(sums[0][j]), 1e-3 * big);
+        if (!isfinite(sums[0][j]) || !isfinite(sums[1][j]) || isnan(e)) e = INFINITY;  // fmax drops NaN
+        worst = fmax(worst, e);
+      }
+      printf("leap-test: threads=%d metric=%s eps=%g elements that differ: gradient %lld, momentum %lld, "
+             "next momentum %lld, next position %lld, merged momentum %lld; logp differs %lld; kinetic energy "
+             "%.17g fused %.17g; largest relative sum difference %.3g\n",
+             s->nt, k ? "lowrank" : "diagonal", eps, (long long)d[0], (long long)d[1], (long long)d[2],
+             (long long)d[3], (long long)d[4], (long long)d[5], sums[0][0], sums[1][0], worst);
+      bad |= d[0] || d[1] || d[2] || d[3] || d[4] || d[5] || !(worst < 1e-12);
+      free(out[1]);
     }
-    int64_t d[6] = {0};
-    for (int64_t i = 0; i < D; i++) {
-      d[0] += memcmp(&na->g[i], &nb->g[i], sizeof(double)) != 0;
-      d[1] += memcmp(&na->p[i], &nb->p[i], sizeof(double)) != 0;
-      d[2] += memcmp(&xa->p[i], &xb->p[i], sizeof(double)) != 0;
-      d[3] += memcmp(&xa->q[i], &xb->q[i], sizeof(double)) != 0;
-      d[4] += memcmp(&out[0][i], &out[1][i], sizeof(double)) != 0;
-    }
-    d[5] = memcmp(&na->lp, &nb->lp, sizeof(double)) != 0;
-    // each sum relative to itself, or to 1e-3 of the largest when it is
-    // smaller than that (a sum near zero after cancellation)
-    double big = 0, worst = 0;
-    for (int j = 0; j < 7; j++) big = fmax(big, fabs(sums[0][j]));
-    for (int j = 0; j < 7; j++) {
-      double e = fabs(sums[0][j] - sums[1][j]) / fmax(fabs(sums[0][j]), 1e-3 * big);
-      if (!isfinite(sums[0][j]) || !isfinite(sums[1][j]) || isnan(e)) e = INFINITY;  // fmax drops NaN
-      worst = fmax(worst, e);
-    }
-    printf("leap-test: threads=%d eps=%g elements that differ: gradient %lld, momentum %lld, next momentum %lld, "
-           "next position %lld, merged momentum %lld; logp differs %lld; kinetic energy %.17g fused %.17g; "
-           "largest relative sum difference %.3g\n",
-           s->nt, eps, (long long)d[0], (long long)d[1], (long long)d[2], (long long)d[3], (long long)d[4],
-           (long long)d[5], sums[0][0], sums[1][0], worst);
-    bad |= d[0] || d[1] || d[2] || d[3] || d[4] || d[5] || !(worst < 1e-12);
-    free(out[1]);
-  }
+  s->k = 0;
   if (reps > 1) {
     St *S[3];
     for (int i = 0; i < 3; i++) {
@@ -1947,6 +3043,7 @@ typedef struct {
   int64_t n_fused;  // leaves that ran through it
   int64_t warmup_iters;
   int warmup_fast;
+  int lowrank, rank_min, rank_max;
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -2124,7 +3221,9 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   WarmupCfg cfg = warmup_cfg(warmup);
   const char *metric_env = getenv("MINT_METRIC");
   post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
+  post->lowrank = metric_env && strcmp(metric_env, "lowrank") == 0;
   Pool pool, *pool_p = NULL;
+  memset(&pool, 0, sizeof pool);
   if (cfg.pool && chains > 1 && !post->grad_metric) {
     pool.chains = chains;
     pool.n = calloc((size_t)chains, sizeof *pool.n);
@@ -2132,6 +3231,19 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     pool.m2 = calloc((size_t)chains, sizeof *pool.m2);
     if (pthread_barrier_init(&pool.bar, NULL, (unsigned)chains) != 0) mint_panic("could not create a barrier");
     pool_p = &pool;
+    // the low-rank metric's window rows (see Pool); a chain's team is at most
+    // tpc threads, so it keeps at most lowrank_k(D, tpc) directions
+    int kmax = lowrank_k(D, tpc);
+    if (kmax > D) kmax = (int)D;
+    int nmax = post->lowrank ? lowrank_nmax(D, cfg.iters) : 0;
+    if (nmax && kmax) {
+      pool.lr_nmax = nmax;
+      pool.lr_q = mint_alloc((int64_t)chains * nmax * D);
+      pool.lr_g = mint_alloc((int64_t)chains * nmax * D);
+      pool.lr_u = mint_alloc((int64_t)kmax * D);
+      pool.lr_rows = calloc((size_t)chains, sizeof *pool.lr_rows);
+      pool.lr_kmax = calloc((size_t)chains, sizeof *pool.lr_kmax);
+    }
   }
   post->warmup_iters = cfg.iters;
   post->warmup_fast = cfg.fast;
@@ -2168,9 +3280,13 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   if (pool_p) {
     pthread_barrier_destroy(&pool.bar);
     free(pool.n), free(pool.mean), free(pool.m2);
+    free(pool.lr_q), free(pool.lr_g), free(pool.lr_u), free(pool.lr_rows), free(pool.lr_kmax);
   }
   post->leapfrog = model_leap && leap_mode >= 2 ? (leap_mode == 3 ? 2 : 1) : 0;
+  post->rank_min = jobs[0].rank, post->rank_max = jobs[0].rank;
   for (int64_t c = 0; c < chains; c++) {
+    if (jobs[c].rank < post->rank_min) post->rank_min = jobs[c].rank;
+    if (jobs[c].rank > post->rank_max) post->rank_max = jobs[c].rank;
     if (jobs[c].team_min < post->team_min) post->team_min = jobs[c].team_min;
     post->n_grad += jobs[c].n_grad;
     post->n_fused += jobs[c].n_fused;
@@ -2277,10 +3393,11 @@ void mint_print_posterior(MintPosterior *p) {
           p->seconds, 1e9 * p->seconds / (double)(p->n_grad ? p->n_grad : 1), prep_seconds);
   fprintf(stderr, "gradients: warmup=%lld sampling=%lld (warmup=%s, %lld iterations)\n", (long long)p->warmup_grad,
           (long long)(p->n_grad - p->warmup_grad), p->warmup_fast ? "fast" : "stan", (long long)p->warmup_iters);
+  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s", p->threads_per_chain,
+          p->team_min, p->grad_metric ? "grad" : p->lowrank ? "lowrank" : "stan");
+  if (p->lowrank) fprintf(stderr, " (rank %d to %d)", p->rank_min, p->rank_max);
   // the leapfrog as it ran: "fused" only when leaves went through it
-  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s leapfrog=%s",
-          p->threads_per_chain, p->team_min, p->grad_metric ? "grad" : "stan",
-          !p->n_fused ? "runtime" : p->leapfrog == 2 ? "fused-exact" : "fused");
+  fprintf(stderr, " leapfrog=%s", !p->n_fused ? "runtime" : p->leapfrog == 2 ? "fused-exact" : "fused");
   if (p->n_fused) fprintf(stderr, " (%lld of %lld gradients)", (long long)p->n_fused, (long long)p->n_grad);
   fprintf(stderr, "\n");
 }

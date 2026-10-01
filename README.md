@@ -176,6 +176,15 @@ Useful environment variables for compiled programs:
   and exits; `=K` also times K leaves of each.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+- `MINT_METRIC=lowrank` adds to Stan's diagonal metric up to 8, 16 or 24
+  directions, depending on the model's size, the threads per chain and the
+  L2 cache size (`MINT_LOWRANK_K` sets another
+  number), estimated from the gradients of the warmup draws; see
+  [hierarchical.md](docs/hierarchical.md) for what it gains and costs. It
+  works with the fused leapfrog (the low-rank part of each leaf runs in a
+  pass after the kernel) and with `MINT_WARMUP=fast`, under which the
+  chains pool their window draws for the directions as they do for the
+  diagonal.
 - `MINT_NARROW=0` keeps a model's kernels on the double data (see below);
   `MINT_NARROW_REPORT=1` prints which narrow copy each data buffer got.
 - `MINT_WARMUP=fast` replaces Stan's warmup with a shorter one: each chain

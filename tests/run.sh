@@ -355,9 +355,10 @@ fi
 # ---- fused leapfrog (mintc --fused-leapfrog). The leap entry point hands
 # each kernel thread's rows of a covered matrix parameter to the sampler's
 # leaf work. MINT_LEAP_TEST runs one leaf with a merge through it and
-# through the runtime's own path: the gradient, log density, momentum, next
-# half-step and merged momentum must be bit-identical, and the kinetic
-# energy and merge sums equal to 1e-12, with 1 and 3 kernel threads
+# through the runtime's own path, with the diagonal metric and with a
+# low-rank one: the gradient, log density, momentum, next half-step and
+# merged momentum (and their low-rank projections) must be bit-identical,
+# and the kinetic energy and merge sums equal to 1e-12, with 1 and 3 kernel threads
 # requested (a kernel never runs more threads than it has groups of 8
 # series: at 7, 13 and 16 series one, at 20 two, at 61 three). Models with
 # nothing to cover (a running sum of data only; a matrix parameter shared
@@ -379,7 +380,8 @@ leap_check() { # MODEL G leap|none
   [ "$want" = leap ] || return
   for t in 1 3; do
     out=$(MINT_KERNEL_THREADS=$t MINT_LEAP_TEST=1 ./build/leap_$n 2>&1)
-    grep -q "^leap-test: ok" <<<"$out" && pass "fused leapfrog $n, $t kernel threads requested: same leaf as the runtime's" \
+    grep -q "^leap-test: ok" <<<"$out" && [ "$(grep -c "metric=lowrank" <<<"$out")" = 2 ] \
+      && pass "fused leapfrog $n, $t kernel threads requested: same leaf as the runtime's (diagonal and low-rank metric)" \
       || { bad "fused leapfrog $n, $t kernel threads requested: leaf differs"; echo "$out"; }
   done
 }
@@ -422,6 +424,28 @@ for m in nested dps; do
     draws_same "fused leapfrog $m, $t threads per chain: deterministic" leap_$m \
       "MINT_THREADS_PER_CHAIN=$t" "MINT_THREADS_PER_CHAIN=$t"
     ran "fused leapfrog $m, $t threads per chain: on by default in a --fused-leapfrog build" leap_$m "MINT_THREADS_PER_CHAIN=$t" fused
+  done
+done
+# The low-rank metric through the fused leapfrog: the hooks do the diagonal
+# part of each leaf, a pass after the kernel the projections and the
+# low-rank part of the next position (leaf_fused_run). With exact sums the
+# draws must be the runtime's low-rank draws; the fused sums must run with
+# directions kept (cutoff 1 keeps every direction it finds, so the rank is
+# not 0 even after these short warmups).
+for m in nested dps; do
+  [ -x build/leap_$m ] || continue
+  for t in 1 3; do
+    lr="MINT_METRIC=lowrank MINT_LOWRANK_CUTOFF=1 MINT_THREADS_PER_CHAIN=$t"
+    draws_same "fused leapfrog $m, low-rank metric, $t threads per chain: exact sums give the runtime's draws" leap_$m \
+      "$lr MINT_FUSED_LEAPFROG=0" "$lr MINT_FUSED_LEAPFROG=exact"
+    out=$(env $lr MINT_FUSED_LEAPFROG=exact ./build/leap_$m 2>&1 >/dev/null)
+    grep -q "metric=lowrank (rank [1-9][0-9]* to [0-9]*) leapfrog=fused-exact (" <<<"$out" \
+      && pass "fused leapfrog $m, low-rank metric, $t threads per chain: the exact run kept directions" \
+      || { bad "fused leapfrog $m, low-rank metric, $t threads per chain: exact run"; echo "$out" | grep sampler; }
+    out=$(env $lr ./build/leap_$m 2>&1 >/dev/null)
+    grep -q "metric=lowrank (rank [1-9][0-9]* to [0-9]*) leapfrog=fused (" <<<"$out" \
+      && pass "fused leapfrog $m, low-rank metric, $t threads per chain: fused sums ran with directions kept" \
+      || { bad "fused leapfrog $m, low-rank metric, $t threads per chain: fused run"; echo "$out" | grep sampler; }
   done
 done
 if [ -f bench/dynpois/data_large/y.f64 ] && [ -f build/par_dynpois_run.mint ]; then
@@ -630,6 +654,58 @@ ok &= len(tau) == 1 and 0 < float(tau[0][1]) < 20
 sys.exit(0 if ok else 1)
 PY
 fi
+check_eight "low-rank metric" MINT_METRIC=lowrank
+# cutoff 1 keeps every direction: a dense metric (rank 10 here), threaded path
+check_eight "low-rank metric, full rank, 3 threads" MINT_METRIC=lowrank MINT_LOWRANK_CUTOFF=1 MINT_THREADS_PER_CHAIN=3
+MINT_METRIC=lowrank MINT_LOWRANK_CUTOFF=1 MINT_THREADS_PER_CHAIN=3 ./build/eight_schools 2>&1 >/dev/null \
+  | grep -qF "metric=lowrank (rank 10 to 10)" && pass "low-rank metric with cutoff 1 keeps all 10 directions" \
+  || bad "low-rank metric with cutoff 1 did not keep all 10 directions"
+check_eight "low-rank metric, fast warmup" MINT_METRIC=lowrank MINT_WARMUP=fast
+check_eight "low-rank metric, fast warmup, 3 threads" MINT_METRIC=lowrank MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=3
+
+# ---- a Gaussian posterior with known mean and covariance, much narrower
+# than the prior along 8 dense directions: every whitened first, second and
+# cross moment within its Monte Carlo error (tests/metric/check_gauss.py),
+# for the default metric and the low-rank one (which must keep 8
+# directions).
+
+python3 tests/metric/make_gauss.py
+if build tests/metric/gauss.mint gauss; then
+  check_gauss() {
+    local label=$1; shift
+    local out
+    rm -f build/gauss.draws
+    out=$(env "$@" MINT_DRAWS=build/gauss.draws ./build/gauss 2>&1) \
+      || { bad "Gaussian sampler run ($label)"; echo "$out"; return; }
+    python3 tests/metric/check_gauss.py build/gauss.draws && pass "Gaussian posterior moments ($label)" \
+      || bad "Gaussian posterior moments ($label)"
+    if [ "$label" != "default metric" ]; then
+      grep -qF "metric=lowrank (rank 8 to 8)" <<<"$out" && pass "low-rank metric keeps 8 directions, as many as there are narrow ones ($label)" \
+        || { bad "low-rank metric rank ($label)"; grep -F "metric=" <<<"$out"; }
+    fi
+  }
+  check_gauss "default metric" MINT_THREADS_PER_CHAIN=1
+  check_gauss "low-rank metric" MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=1
+  check_gauss "low-rank metric, 3 threads" MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=3
+  # with the fast warmup the chains pool their windows for the low-rank
+  # estimate too (chain 0 estimates from every chain's draws), or, with
+  # MINT_WARMUP_POOL=0, estimate it each on their own
+  check_gauss "low-rank metric, fast warmup (pooled)" MINT_METRIC=lowrank MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=1
+  check_gauss "low-rank metric, fast warmup (pooled), 3 threads" MINT_METRIC=lowrank MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=3
+  check_gauss "low-rank metric, fast warmup, not pooled" MINT_METRIC=lowrank MINT_WARMUP=fast MINT_WARMUP_POOL=0
+  out=$(MINT_METRIC=lowrank MINT_WARMUP=fast MINT_LOWRANK_VERBOSE=1 ./build/gauss 2>&1 >/dev/null)
+  grep -q "^chain 3 window end .*draws (pooled), rank 8" <<<"$out" \
+    && pass "low-rank metric, fast warmup: the estimate is pooled across the chains" \
+    || { bad "low-rank metric, fast warmup: no pooled estimate"; grep "window end" <<<"$out"; }
+  # two pooled runs give the same draws (a smoke test of the barriers: the
+  # estimate is meant not to depend on which chain reaches them first)
+  rm -f build/gauss_fa.draws build/gauss_fb.draws
+  MINT_METRIC=lowrank MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=2 MINT_DRAWS=build/gauss_fa.draws ./build/gauss > /dev/null 2>&1
+  MINT_METRIC=lowrank MINT_WARMUP=fast MINT_THREADS_PER_CHAIN=2 MINT_DRAWS=build/gauss_fb.draws ./build/gauss > /dev/null 2>&1
+  [ -s build/gauss_fa.draws ] && cmp -s build/gauss_fa.draws build/gauss_fb.draws \
+    && pass "low-rank metric, fast warmup: identical raw draws in two runs" \
+    || bad "low-rank metric, fast warmup: raw draws differ between runs"
+fi
 
 # When OpenMP runs a smaller team than requested, the sampler must follow the
 # team it got: with a limit of one thread the draws equal the serial ones.
@@ -637,5 +713,11 @@ serial=$(MINT_THREADS_PER_CHAIN=1 ./build/eight_schools 2>/dev/null)
 limited=$(MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/eight_schools 2>/dev/null)
 [ -n "$serial" ] && [ "$serial" = "$limited" ] && pass "sampler follows a reduced OpenMP team" \
   || bad "reduced OpenMP team changed the draws"
+rm -f build/gauss_serial.draws build/gauss_limited.draws
+MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=1 MINT_DRAWS=build/gauss_serial.draws ./build/gauss > /dev/null 2>&1
+MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 MINT_DRAWS=build/gauss_limited.draws ./build/gauss > /dev/null 2>&1
+[ -s build/gauss_serial.draws ] && cmp -s build/gauss_serial.draws build/gauss_limited.draws \
+  && pass "low-rank sampler follows a reduced OpenMP team (identical raw draws)" \
+  || bad "reduced OpenMP team changed the low-rank draws"
 
 exit $fail

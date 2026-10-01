@@ -103,7 +103,9 @@ runs clear it (pop has ESS 449 to 503), but an earlier pair with the same
 settings fell just short (ESS 363 to 370). Splitting the sampler's sums across
 threads changes rounding and therefore the chains' paths, so treat the large
 model as borderline. A longer run, or better mass-matrix adaptation, is the
-fix. Stan's shorter run does not meet the bar. rustmc is far from it: its four
+fix: the optional low-rank metric (below) needed 1.7 to 2.5x fewer gradients
+per effective draw over three seeds, though it did not clear the bar in
+every run either. Stan's shorter run does not meet the bar. rustmc is far from it: its four
 chains disagree about pop (1.51, 1.31, 1.54, 1.44).
 
 **Agreement of posterior means** (max difference over pop, beta and terminal
@@ -189,8 +191,82 @@ differs by more than 3 MCSE in any pair where both runs mixed.
   change that. On eight schools and logistic regression the two metrics'
   ranges over 5 seeds overlap, so no difference was found there. Stan's
   metric stays the default. Why the gradient metric does badly here was not
-  established. The full comparison is `bench/metric_experiment.py`, with
-  results in `bench/metric_results.json`.
+  established. Those runs (with an earlier sampler) are in
+  `bench/metric_results_diagonal.json`.
+- **An option, not the default: a low-rank metric (`MINT_METRIC=lowrank`).**
+  It adds to Stan's diagonal metric a few directions estimated from the
+  gradients of each warmup window's draws, as nutpie's low-rank adaptation
+  does: 24 on the small model, 8 on the large one (by default 16 or 24 if
+  each thread's share of the directions fits in its L2 cache, otherwise 8).
+  How it works, and what it costs per leapfrog step, is in
+  [architecture.md](architecture.md#runtime-runtimemint_rtc). Results from
+  `bench/metric_experiment.py`: 4 chains, 1000 + 1000, 1 sampler thread per
+  chain below 8,192 parameters and 3 above (the runtime's defaults); every
+  run is in `bench/metric_results.json`. Medians with the range over seeds,
+  except the last column:
+
+  | model | metric | seeds | lowest ESS per 1000 gradients | lowest ESS per second | leapfrog steps per draw | max R-hat, worst seed |
+  |---|---|---|---|---|---|---|
+  | eight schools | Stan | 5 | 38 (37 to 44) | 489,000 (470,000 to 527,000) | 9.3 | 1.002 |
+  | eight schools | low-rank | 5 | 44 (37 to 45) | 405,000 (236,000 to 425,000) | 7.3 | 1.001 |
+  | logistic regression | Stan | 5 | 95 (82 to 105) | 14,400 (12,700 to 16,000) | 7.0 | 1.001 |
+  | logistic regression | low-rank | 5 | 128 (123 to 160) | 19,500 (18,100 to 23,900) | 7.0 | 1.000 |
+  | time series, D = 3,171 | Stan | 6 | 1.00 (0.93 to 1.15) | 546 (508 to 630) | 255 | 1.003 |
+  | time series, D = 3,171 | low-rank | 6 | 5.22 (4.80 to 5.74) | 1,232 (1,147 to 1,330) | 63 | 1.001 |
+  | time series, D = 37,901 | Stan | 3 | 0.10 (0.09 to 0.11) | 5.3 (4.6 to 5.5) | 511 | 1.010 |
+  | time series, D = 37,901 | low-rank | 3 | 0.23 (0.18 to 0.24) | 8.9 (7.1 to 9.5) | 255 | 1.021 |
+
+  - Per gradient, which does not depend on machine load: on the small time
+    series every low-rank seed beats every Stan seed, by 4.7 to 6.0x seed by
+    seed; on the large one by 1.7 to 2.5x (3 seeds); on logistic regression
+    by 1.3 to 1.5x, with ranges that do not overlap. On eight schools the
+    metric ends warmup with 0 or 1 directions and the ranges overlap: seed
+    by seed it gave 0.86 to 1.18 times Stan's figure, so no difference was
+    established.
+  - Per second the gain is smaller, because each leapfrog step streams the
+    directions twice. These runs shared the machine with other jobs (load
+    average 6 to 17 on 24 hardware threads, recorded per run); the
+    runs of a seed were made back to back, and runs that met a load spike
+    were repeated. On the small time series the low-rank runs took 2.4 to
+    2.6 s against 3.7 to 3.8 s (2.0 to 2.6x more effective draws per second
+    seed by seed; per CPU second, which load moves less for these serial
+    runs, 2.0 to 2.4x). On the large model they took 51 to 53 s against 71
+    to 73 s (1.3 to 1.9x per second). On eight schools, where a whole run
+    takes 10 ms, the estimation at each window end makes the low-rank metric
+    slower per second.
+  - The number of directions: on the small model fewer were worse per
+    gradient (16 directions gave 3.96, range 3.67 to 4.03, per 1000
+    gradients; 8 gave 2.46, range 1.95 to 3.18). On the large model 24
+    directions were better per gradient than 8 in each of the three seeds
+    (0.25 to 0.29 against 0.18 to 0.24; 16 gave 0.23 and 0.30 on two
+    seeds), but a step with 24 costs about 1.5 times one with Stan's metric
+    against 1.2 times with 8, and per second the three were similar: 24
+    directions gave 6.6 to 7.3 effective draws per second (75 to 81 s per
+    run), 16 gave 6.8 and 8.6, 8 gave 7.1 to 9.5. The default takes the
+    cheaper step there. The rule was chosen on these two models, so it is
+    tuned to them.
+  - 3 sampler threads per chain on the small model were slower for both
+    metrics (5.6 to 5.7 s and 17 to 18 s), as they are for Stan's metric by
+    design below 8,192 parameters.
+  - Neither metric clears the mixing bar of the results section on the
+    large model in every run by the runtime's own estimates: the lowest ESS
+    was 362 to 499 with the low-rank metric and 332 to 399 with Stan's, and
+    the largest split R-hat over all 37,901 parameters 1.004 to 1.021
+    against 1.003 to 1.010. These are not the ArviZ figures used above.
+  - The draws are sensitive to small changes: replacing an approximate
+    eigensolver (Lanczos, residuals below 1e-10) by the exact one in the
+    estimation moved the small model's per-seed figures for 8 directions
+    from 1.58 to 3.18 on one seed. Individual seeds are noisy; the ranges
+    above are the evidence.
+
+  It is not the default. It was better per gradient on the three models
+  where it found directions, with no difference established on the fourth,
+  and faster per second in every run on the three larger ones. But four
+  models are a small sample, the number of directions was tuned on two of
+  them, it keeps up to 256 MB of warmup draws per chain, and as a default it would change the draws of
+  every program. Making it the default should wait for a broader set of
+  posteriors, including ones where the gradient covariance is a poor guide
+  to the covariance (funnels, heavy tails).
 
 ## Caveats
 
