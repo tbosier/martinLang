@@ -204,13 +204,14 @@ done
 
 # ---- fused scan kernels: every path (nested running sums, the one-lane
 # BernoulliLogit path, row/column/scalar parameters, row counts that are not
-# multiples of the vector width) must give the same log density and gradient
-# as the same model built without the scan layout, scan fusion and inline exp,
-# and must pass the finite-difference check.
+# multiples of the vector width, and 16, which leaves the scan layout no
+# last block) must give the same log density and gradient as the same model
+# built without the scan layout, scan fusion and inline exp, and must pass
+# the finite-difference check.
 
 python3 tests/scan/make_data.py build
-for m in nested bernoulli mixed nested_sq colreuse datascan twohosts; do
-  for G in 7 13 20; do
+for m in nested bernoulli mixed nested_sq colreuse datascan twohosts twoowned; do
+  for G in 7 13 16 20; do
     sed "s/NG/$G/" tests/scan/$m.mint > build/scan_$m.$G.mint
     build build/scan_$m.$G.mint scan_${m}_${G}_opt || continue
     build build/scan_$m.$G.mint scan_${m}_${G}_ref --no-scan-layout --no-scan-fusion --no-inline-exp || continue
