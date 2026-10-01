@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Dist, Func, SShape, TExpr, TModel, TModelStmt, TK};
 use crate::codegen::{scalar_func, Opts};
-use crate::ir::{fconst, for_range, for_range_md, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::ir::{fconst, for_range, for_range_md, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
 use crate::types::{Dim, Dom, Ty};
 
 pub fn data_global(model: &str, name: &str) -> String {
@@ -527,6 +527,8 @@ struct Mg<'a> {
     /// whose leapfrog work the fused scan kernels hand to the runtime's hook,
     /// with their offsets in theta.
     leap_cov: Vec<(String, String)>,
+    /// The model's parameters (for `leap_blocks_of`).
+    leap_tm_params: Vec<(String, Ty)>,
 }
 
 impl HasFb for Mg<'_> {
@@ -564,6 +566,7 @@ impl<'a> Mg<'a> {
             ws_slot_of: HashMap::new(),
             par_nt: None,
             leap_cov: Vec::new(),
+            leap_tm_params: tm.params.clone(),
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -1861,17 +1864,26 @@ fn gen_leap_blocks(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)], 
     g.finish(&header, &[format!("ret i64 {k}")]);
 }
 
-/// The leap entry point: rows r0..r1 of every column of the covered
-/// parameters among `owned` are done; hand them to the runtime's hook.
-fn leap_hook_calls(g: &mut Mg, owned: &[String], rows: &str, cols: &str, slot: &str, r0: &str, r1: &str, hook: &str, hctx: &str) {
+/// The covered parameters among a kernel's `owned`: (offset, length) in
+/// theta.
+fn leap_blocks_of(g: &mut Mg, owned: &[String]) -> Vec<(String, String)> {
     let cov: Vec<(String, String)> = g.leap_cov.iter().filter(|(n, _)| owned.contains(n)).cloned().collect();
-    if cov.is_empty() {
-        return;
+    let mut out = Vec::new();
+    for (n, off) in cov {
+        let Some((_, Ty::Matrix(r, c, _))) = g.leap_tm_params.iter().find(|(m, _)| *m == n).cloned() else { unreachable!() };
+        let (r, c) = (g.dim(&r), g.dim(&c));
+        let len = g.f.imul(&r, &c);
+        out.push((off, len));
     }
-    for (_, off) in cov {
-        g.f.emit(format!(
-            "call void {hook}(ptr {hctx}, i64 {slot}, i64 {off}, i64 {rows}, i64 {cols}, i64 {r0}, i64 {r1})"
-        ));
+    out
+}
+
+/// The leap entry point, after a kernel run on the calling thread alone:
+/// all of the covered parameters among `owned` are final; the hook (as
+/// thread `slot` of `nthreads`) takes each.
+fn leap_hook_calls(g: &mut Mg, owned: &[String], slot: &str, nthreads: &str, hook: &str, hctx: &str) {
+    for (off, len) in leap_blocks_of(g, owned) {
+        g.f.emit(format!("call void {hook}(ptr {hctx}, i64 {slot}, i64 {nthreads}, i64 {off}, i64 {len})"));
     }
 }
 
@@ -2542,15 +2554,52 @@ fn gen_fused_scan<'s>(
         let vps: Vec<HashMap<String, String>> =
             (0..UNROLL).map(|_| scalars.iter().map(|n| (n.clone(), g.f.acc_new(&fconst(0.0)))).collect()).collect();
         g.f.lanes = 1;
-        let serial_groups = |g: &mut Mg| {
+        // the vector accumulators into the log density and the scalar
+        // adjoints (after the groups and single vectors of the serial code)
+        let reduce_vec = |g: &mut Mg| {
+            g.f.lanes = lanes;
+            let mut tot = g.f.acc_get(&lpv[0]);
+            for a in &lpv[1..] {
+                let v = g.f.acc_get(a);
+                tot = g.f.fadd(&tot, &v);
+            }
+            let s = g.f.hsum(g.m, &tot);
+            let mut sums = Vec::new();
+            for n in &scalars {
+                let mut tot = g.f.acc_get(&vps[0][n]);
+                for m in &vps[1..] {
+                    let v = g.f.acc_get(&m[n]);
+                    tot = g.f.fadd(&tot, &v);
+                }
+                sums.push((n.clone(), g.f.hsum(g.m, &tot)));
+            }
+            g.f.lanes = 1;
+            g.f.acc_add(lp, &s);
+            for (n, v) in sums {
+                let acc = g.padj[&n].clone();
+                g.f.acc_add(&acc, &v);
+            }
+        };
+        // groups, single vectors, then leftover rows, on the calling thread
+        let serial_all = |g: &mut Mg| {
             for_range(g, "0", &groups, |g, b| {
                 let r0 = g.f.imul(b, &wide);
                 scan_group(g, &sc, lanes, UNROLL, &r0, &lpv, &vps);
             });
-            leap_hook_calls(g, owned, &rows, &cols, "0", "0", &done_wide, "%hook", "%hctx");
+            let d2 = done_wide.clone();
+            for_range(g, "0", &singles, |g, b| {
+                let off = g.f.imul(b, &lanes.to_string());
+                let r0 = g.f.iadd(&d2, &off);
+                scan_group(g, &sc, lanes, 1, &r0, &lpv, &vps);
+            });
+            reduce_vec(g);
+            let lp1 = [lp.to_string()];
+            for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+            leap_hook_calls(g, owned, "0", "1", "%hook", "%hctx");
         };
         if let Some(nt) = &par {
-            // With more than one thread requested, the outlined kernel;
+            // With more than one thread requested, the outlined kernel (its
+            // thread 0 also runs the single vectors and leftover rows);
             // otherwise exactly the serial code (and its arithmetic).
             let kn = gen_par_kernel(g, tm, k, &sc, nodes, &scalars);
             let (l_par, l_ser, l_join) = (g.f.label("par"), g.f.label("ser"), g.f.label("pjoin"));
@@ -2558,51 +2607,22 @@ fn gen_fused_scan<'s>(
             g.f.emit(format!("{c} = icmp sgt i64 {nt}, 1"));
             g.f.emit(format!("br i1 {c}, label %{l_par}, label %{l_ser}"));
             g.f.start_block(&l_par);
-            let u = par_kernel_call(g, tm, &kn, &cp, &scalars, &groups, nt, lp);
+            let u = par_kernel_call(g, tm, &kn, &cp, owned, &scalars, &groups, nt, lp);
             g.f.emit(format!("store i64 {u}, ptr {used_at}"));
             g.f.br(&l_join);
             g.f.start_block(&l_ser);
             zero_parts(g);
-            serial_groups(g);
+            serial_all(g);
             g.f.br(&l_join);
             g.f.start_block(&l_join);
         } else {
-            serial_groups(g);
+            serial_all(g);
         }
-        let d2 = done_wide.clone();
-        for_range(g, "0", &singles, |g, b| {
-            let off = g.f.imul(b, &lanes.to_string());
-            let r0 = g.f.iadd(&d2, &off);
-            scan_group(g, &sc, lanes, 1, &r0, &lpv, &vps);
-        });
-        g.f.lanes = lanes;
-        let mut tot = g.f.acc_get(&lpv[0]);
-        for a in &lpv[1..] {
-            let v = g.f.acc_get(a);
-            tot = g.f.fadd(&tot, &v);
-        }
-        let s = g.f.hsum(g.m, &tot);
-        let mut sums = Vec::new();
-        for n in &scalars {
-            let mut tot = g.f.acc_get(&vps[0][n]);
-            for m in &vps[1..] {
-                let v = g.f.acc_get(&m[n]);
-                tot = g.f.fadd(&tot, &v);
-            }
-            sums.push((n.clone(), g.f.hsum(g.m, &tot)));
-        }
-        g.f.lanes = 1;
-        g.f.acc_add(lp, &s);
-        for (n, v) in sums {
-            let acc = g.padj[&n].clone();
-            g.f.acc_add(&acc, &v);
-        }
+    } else {
+        let lp1 = [lp.to_string()];
+        for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+        leap_hook_calls(g, owned, "0", "1", "%hook", "%hctx");
     }
-    let lp1 = [lp.to_string()];
-    for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
-    // the rows the calling thread ran after the groups
-    let rest = if lanes > 1 { done_wide.clone() } else { "0".to_string() };
-    leap_hook_calls(g, owned, &rows, &cols, &PAR_MAX_THREADS.to_string(), &rest, &rows, "%hook", "%hctx");
     let used = if par.is_some() {
         let r = g.f.reg();
         g.f.emit(format!("{r} = load i64, ptr {used_at}"));
@@ -2675,7 +2695,6 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
     let kn = format!("mint_model_{}_{}scan{k}", tm.name, if leap { "leap_" } else { "" });
     let pos = pos_vectors(tm);
     let ncp = sc.cp.len();
-    let leap_base = CTX_FIXED + ncp + 2 * pos.len() + scalars.len();
     let covered: Vec<String> = g.leap_cov.iter().map(|(n, _)| n.clone()).collect();
     // The same per-thread slots as the caller's buffers, requested at the
     // same sizes: on the calling thread they are the caller's own buffers,
@@ -2716,8 +2735,8 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
                     let v = km.f.reg();
                     km.f.emit(format!("{v} = load double, ptr {a}"));
                     km.pval.insert(n.clone(), v);
-                    // never used: the kernel's scalar gradients go to its
-                    // vector accumulators
+                    // the leftover rows' (one lane): the groups' and single
+                    // vectors' go to the vector accumulators
                     let acc = km.f.acc_new(&fconst(0.0));
                     km.padj.insert(n.clone(), acc);
                 }
@@ -2757,20 +2776,29 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let r0 = km.f.imul(b, &wide);
             scan_group(km, &sck, lanes, UNROLL, &r0, &lpv, &vps);
         });
-        if leap {
-            // this thread's rows are done: the runtime's hook
-            let mut hp = Vec::new();
-            for j in 0..2 {
-                let a = km.f.reg();
-                km.f.emit(format!("{a} = getelementptr inbounds i64, ptr %ctx, i64 {}", leap_base + j));
-                let v = km.f.reg();
-                km.f.emit(format!("{v} = load ptr, ptr {a}"));
-                hp.push(v);
-            }
-            let r0 = km.f.imul("%g0", &wide);
-            let r1 = km.f.imul("%g1", &wide);
-            let (rows, cols) = (sck.rows.clone(), sck.cols.clone());
-            leap_hook_calls(&mut km, sc.owned, &rows, &cols, "%tid", &r0, &r1, &hp[0], &hp[1]);
+        // thread 0 (the calling thread) also runs the single vectors and the
+        // leftover rows, so that every row is done when the team's threads
+        // meet (the leap entry point's hook runs after that)
+        let lp1 = km.f.acc_new(&fconst(0.0));
+        {
+            let rows = sck.rows.clone();
+            let groups = km.f.iop("sdiv", &rows, &wide);
+            let done_wide = km.f.imul(&groups, &wide);
+            let rest = km.f.iop("sub nsw", &rows, &done_wide);
+            let singles = km.f.iop("sdiv", &rest, &lanes.to_string());
+            let s_end = km.f.imul(&singles, &lanes.to_string());
+            let done = km.f.iadd(&done_wide, &s_end);
+            let t0 = km.f.reg();
+            km.f.emit(format!("{t0} = icmp eq i64 %tid, 0"));
+            if_then(&mut km, &t0, |km| {
+                for_range(km, "0", &singles, |km, b| {
+                    let off = km.f.imul(b, &lanes.to_string());
+                    let r0 = km.f.iadd(&done_wide, &off);
+                    scan_group(km, &sck, lanes, 1, &r0, &lpv, &vps);
+                });
+                let lpa = [lp1.clone()];
+                for_range(km, &done, &rows, |km, r| scan_group(km, &sck, 1, 1, r, &lpa, &[]));
+            });
         }
         km.f.lanes = lanes;
         let mut tot = km.f.acc_get(&lpv[0]);
@@ -2789,6 +2817,18 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             sums.push(km.f.hsum(km.m, &tot));
         }
         km.f.lanes = 1;
+        // the leftover rows' scalar accumulators
+        let l1 = km.f.acc_get(&lp1);
+        let s = km.f.fadd(&s, &l1);
+        let sums: Vec<String> = sums
+            .iter()
+            .zip(scalars)
+            .map(|(v, n)| {
+                let a = km.padj[n].clone();
+                let x = km.f.acc_get(&a);
+                km.f.fadd(v, &x)
+            })
+            .collect();
         let out_lp = km.f.reg();
         km.f.emit(format!("{out_lp} = getelementptr inbounds i64, ptr %ctx, i64 {CTX_OUT_LP}"));
         let out_lp2 = km.f.reg();
@@ -2836,11 +2876,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
 /// the register holding the number of threads that ran (the number of
 /// column partial-sum slices to reduce).
 #[allow(clippy::too_many_arguments)]
-fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
+fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], owned: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
     let pos = pos_vectors(tm);
-    let leap = !g.leap_cov.is_empty();
-    let leap_base = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
-    let nslots = leap_base + if leap { 2 } else { 0 };
+    let nslots = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
     let ctx = g.f.alloca(&format!("[{nslots} x i64]"));
     let out_lp = g.f.alloca(&format!("[{PAR_MAX_THREADS} x double]"));
     let out_sc = g.f.alloca(&format!("[{} x double]", PAR_MAX_THREADS * scalars.len().max(1)));
@@ -2867,14 +2905,29 @@ fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[
         let v = g.f.opnd(&v);
         put(g, CTX_FIXED + cp.len() + 2 * pos.len() + j, "double", &v);
     }
-    if leap {
-        // the leap entry point's hook and its context
-        put(g, leap_base, "ptr", "%hook");
-        put(g, leap_base + 1, "ptr", "%hctx");
-    }
-    g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
+    let blocks = leap_blocks_of(g, owned);
     let used = g.f.reg();
-    g.f.emit(format!("{used} = call i64 @mint_par_groups(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt})"));
+    if blocks.is_empty() {
+        g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
+        g.f.emit(format!("{used} = call i64 @mint_par_groups(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt})"));
+    } else {
+        // The leap entry point: once every thread of the team is done
+        // (all rows of the covered parameters are final), each runs the
+        // hook on its share of each covered block (mint_par_groups_leap).
+        let n = blocks.len();
+        let arr = g.f.alloca(&format!("[{} x i64]", 2 * n));
+        for (k, (off, len)) in blocks.iter().enumerate() {
+            for (j, v) in [off, len].iter().enumerate() {
+                let a = g.f.reg();
+                g.f.emit(format!("{a} = getelementptr inbounds i64, ptr {arr}, i64 {}", 2 * k + j));
+                g.f.emit(format!("store i64 {v}, ptr {a}"));
+            }
+        }
+        g.m.declare("declare i64 @mint_par_groups_leap(ptr, ptr, i64, i64, ptr, ptr, ptr, i64)");
+        g.f.emit(format!(
+            "{used} = call i64 @mint_par_groups_leap(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt}, ptr %hook, ptr %hctx, ptr {arr}, i64 {n})"
+        ));
+    }
     let ns = scalars.len().to_string();
     for_range(g, "0", &used, |g, t| {
         let v = g.f.load(&out_lp, t);
