@@ -512,6 +512,12 @@ struct Mg<'a> {
     exp_override: Option<String>,
     /// Fused scan kernel: the adjoint C computed for copy k, for R.
     pending_ad: HashMap<usize, String>,
+    /// Scratch buffer register -> its `mint_ws_slot` index, so an outlined
+    /// kernel can ask for the same per-thread slot.
+    ws_slot_of: HashMap<String, usize>,
+    /// When fused scan kernels may run on several threads: the register
+    /// holding the requested thread count (`mint_par_threads`).
+    par_nt: Option<String>,
 }
 
 impl HasFb for Mg<'_> {
@@ -544,6 +550,8 @@ impl<'a> Mg<'a> {
             kscratch: HashMap::new(),
             exp_override: None,
             pending_ad: HashMap::new(),
+            ws_slot_of: HashMap::new(),
+            par_nt: None,
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -1311,6 +1319,20 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             pos_slots.push((n.clone(), len));
         }
     }
+    // Fused scan kernels whose groups of rows can be split across the
+    // chain's threads: the requested thread count is read once per call.
+    if opts.parallel_kernel && opts.scan_fusion && !opts.strict_fp {
+        let any = stmts.iter().enumerate().any(|(k, s)| {
+            let Stmt::Tilde { dist, lhs, args, shape, ss: None, fission } = s else { return false };
+            absorbed[k].is_none() && fused_scan_rows(&g, lhs, args, shape, *fission).is_some() && kernel_lanes(*dist, lhs, args, false) > 1
+        });
+        if any {
+            g.m.declare("declare i64 @mint_par_threads()");
+            let r = g.f.reg();
+            g.f.emit(format!("{r} = call i64 @mint_par_threads()"));
+            g.par_nt = Some(r);
+        }
+    }
     let mut ws_slots: Vec<(usize, String, bool)> = Vec::new(); // (node, len, active)
     let mut part_slots: Vec<(String, String)> = Vec::new(); // (param, 4 * cols)
     let mut kscr_slots: Vec<(usize, String)> = Vec::new(); // (first node, doubles)
@@ -1323,7 +1345,11 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             let per = g.f.imul(&per, &(KERNEL_WIDTH * (1 + nodes.len() as u32)).to_string());
             kscr_slots.push((nodes[0] as *const M as usize, per));
             let n4 = g.dim(c);
-            let n4 = g.f.imul(&n4, "4");
+            let mut n4 = g.f.imul(&n4, "4");
+            if let Some(nt) = g.par_nt.clone() {
+                // one slice per thread of a parallel kernel
+                n4 = g.f.imul(&n4, &nt);
+            }
             for p in fused_col_params(lhs, args, *fission) {
                 if !part_slots.iter().any(|(q, _)| q == &p) {
                     part_slots.push((p, n4.clone()));
@@ -1347,6 +1373,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         let mut buf = |g: &mut Mg, n: &str| -> String {
             let r = g.f.reg();
             g.f.emit(format!("{r} = call noalias ptr @mint_ws_slot(i64 {slot}, i64 {n})"));
+            g.ws_slot_of.insert(r.clone(), slot);
             slot += 1;
             r
         };
@@ -1426,7 +1453,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         if fused_scan_rows(&g, lhs, args, shape, *fission).is_some() && opts.scan_fusion {
             let guests: Vec<&Stmt> = stmts.iter().enumerate().filter(|(t, _)| absorbed[*t] == Some(k)).map(|(_, s)| s).collect();
             let own = owned.get(&k).cloned().unwrap_or_default();
-            gen_fused_scan(&mut g, *dist, lhs, args, shape, &nodes, &guests, &own, &lp);
+            gen_fused_scan(&mut g, tm, k, *dist, lhs, args, shape, &nodes, &guests, &own, &lp);
             continue;
         }
         // before the loop: materialise each node (children first)
@@ -1837,8 +1864,28 @@ fn vec_ok(e: &M) -> bool {
 /// use vector accumulators. The rows left over (R mod 4) run through the
 /// same generator with one lane. Nothing but the adjoints (C x 4 doubles per
 /// group, in L1) is written besides the gradient.
+/// Everything one group of rows needs, as registers of the function being
+/// emitted: the logp function itself, or an outlined parallel kernel.
+struct Scan<'s> {
+    dist: Dist,
+    lhs: &'s M,
+    args: &'s [M],
+    guests: &'s [&'s Stmt],
+    owned: &'s [String],
+    keys: Vec<usize>,
+    inner: Vec<&'s M>,
+    /// row- and column-indexed vector parameters
+    rp: Vec<String>,
+    cp: Vec<String>,
+    rows: String,
+    cols: String,
+    last: String,
+    /// the running sums' adjoint buffers
+    ad: Vec<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, nodes: &[&M], guests: &[&Stmt], owned: &[String], lp: &str) {
+fn scan_new<'s>(g: &mut Mg, dist: Dist, lhs: &'s M, args: &'s [M], shape: &SShape, nodes: &[&'s M], guests: &'s [&'s Stmt], owned: &'s [String]) -> Scan<'s> {
     let SShape::Mat(rd, cd) = shape else { unreachable!() };
     let (rows, cols) = (g.dim(rd), g.dim(cd));
     let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
@@ -1859,282 +1906,84 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
         axis_params(e, Ax::Row, &mut rp);
     }
     let cp: Vec<String> = fused_col_params(lhs, args, false);
-    g.col_part = cp.iter().map(|p| (p.clone(), g.part_bufs[p].clone())).collect();
-    let lanes = kernel_lanes(dist, lhs, args, false);
     let last = g.f.iop("sub nsw", &cols, "1");
-    let n4 = g.f.imul(&cols, "4");
-    for p in &cp {
-        let b = g.col_part[p].clone();
-        g.f.memzero(g.m, &b, &n4);
-    }
+    Scan { dist, lhs, args, guests, owned, keys, inner, rp, cp, rows, cols, last, ad }
+}
 
-    // One group of `u` vectors of `l` rows starting at r0 (u * l rows in all),
-    // accumulating the log density in `lpa`. The u copies are independent
-    // (their own carries and accumulators), which gives the CPU u chains and
-    // uses whole cache lines.
-    let group = |g: &mut Mg, l: u32, u: u32, r0: &str, lpa: &[String], vps: &[HashMap<String, String>]| {
-        g.f.lanes = l;
-        let use_copy_accs = |g: &mut Mg, k: usize| {
-            if !vps.is_empty() {
-                g.vpadj = vps[k].clone();
-            }
-        };
-        // one register per column-indexed parameter per column, shared by the
-        // copies, then one update of the per-lane partial sums
-        let col_begin = |g: &mut Mg| {
-            for p in &cp {
-                let acc = g.f.acc_new(&fconst(0.0));
-                g.inv_acc.insert((p.clone(), Ax::Col), acc);
-            }
-        };
-        let col_flush = |g: &mut Mg, col: &str| {
-            for p in &cp {
-                let acc = g.inv_acc.remove(&(p.clone(), Ax::Col)).unwrap();
-                let v = g.f.acc_get(&acc);
-                let b = g.col_part[p].clone();
-                let at = g.f.imul(col, "4");
-                g.f.add_to(&b, &at, &v);
-            }
-        };
-        let r0s: Vec<String> = (0..u).map(|k| g.f.iadd(r0, &(k * l).to_string())).collect();
-        // The adjoints of this group's running sums live in a small contiguous
-        // scratch, [col * (u * l) + k * l + lane], reused by every group: it
-        // stays in L1, where the full-matrix index would scatter it.
-        let width = (u * l).to_string();
-        let ad_at = |g: &mut Mg, col: &str, k: usize| {
-            let a = g.f.imul(col, &width);
-            g.f.iadd(&a, &(k as u32 * l).to_string())
-        };
-        let row_accs: Vec<Vec<String>> = (0..u).map(|_| rp.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
-        let carry: Vec<Vec<String>> = (0..u).map(|_| keys.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
-        let use_row_accs = |g: &mut Mg, k: usize| {
-            for (p, acc) in rp.iter().zip(&row_accs[k]) {
-                g.inv_acc.insert((p.clone(), Ax::Row), acc.clone());
-            }
-        };
-        // The density's own exp runs in a pass of its own when there is one
-        // (PoissonLog): A computes the running sums and eta into an L1
-        // scratch, B takes exp over the scratch with nothing else live (so
-        // its constants stay in registers), C finishes the density and its
-        // derivatives. Otherwise the three are one loop.
-        //
-        // One scratch slot holds eta, then exp(eta) (B works in place), then
-        // the first running sum's adjoint (C overwrites each exp value after
-        // reading it); the running sums have one slot each. With 8 rows and
-        // 150 columns that is 19 KB, which stays in L1.
-        let split = dist == Dist::PoissonLog;
-        let scr = g.kscratch[&keys[0]].clone();
-        let cw = g.f.imul(&cols, &width);
-        let eta_p = scr.clone();
-        let ex_p = scr.clone();
-        let s_p: Vec<String> = (0..keys.len())
-            .map(|j| {
-                let o = g.f.imul(&cw, &(1 + j).to_string());
-                g.f.gep(&scr, &o)
-            })
-            .collect();
-        // adjoints: the first running sum's in the shared slot when split
-        // (only with a single running sum: a nested one's parent adds into
-        // its child's adjoint through the general buffer)
-        let alias = split && keys.len() == 1;
-        let ad: Vec<String> = ad.iter().enumerate().map(|(j, a)| if alias && j == 0 { scr.clone() } else { a.clone() }).collect();
-        // When the density's argument is a sum of terms (beta + state), its
-        // backward sweep needs no values, so C can reload eta instead of the
-        // running sum: A then stores eta alone and B writes exp(eta) into the
-        // running sum's (unused) slot. With a single running sum, C hands its
-        // adjoint to R in a register.
-        let lean = alias && additive(&args[0]) && !lhs.has_cumsum();
-        let ex_p = if lean { s_p[0].clone() } else { ex_p };
-        if split {
-            for_range(g, "0", &cols, |g, col| {
-                let base = g.f.imul(col, &rows);
-                for k in 0..u as usize {
-                    let flat = g.f.iadd(&base, &r0s[k]);
-                    let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
-                    let at = ad_at(g, col, k);
-                    let mut vals = HashMap::new();
-                    for (j, e) in inner.iter().enumerate() {
-                        let v = g.fwd(e, &ix, &mut vals);
-                        let prev = g.f.acc_get(&carry[k][j]);
-                        let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
-                        let t = g.f.ty();
-                        g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
-                        if !lean {
-                            g.f.store(&s, &s_p[j], &at);
-                        }
-                        vals.insert(keys[j], s);
-                    }
-                    let eta = g.fwd(&args[0], &ix, &mut vals);
-                    g.f.store(&eta, &eta_p, &at);
-                }
-            });
-            let n = g.f.imul(&cols, &u.to_string());
-            for_range(g, "0", &n, |g, i| {
-                let at = g.f.imul(i, &l.to_string());
-                let eta = g.f.load(&eta_p, &at);
-                let e = g.f.intrinsic1(g.m, "llvm.exp.f64", &eta);
-                g.f.store(&e, &ex_p, &at);
-            });
-        }
-        // C: the density and its derivatives at column col (each running
-        // sum's adjoint stored); R: the reverse running sums at column col
-        let c_col = |g: &mut Mg, col: &str| {
-            let base = g.f.imul(col, &rows);
-        for k in 0..u as usize {
-            use_row_accs(g, k);
-            use_copy_accs(g, k);
-            let flat = g.f.iadd(&base, &r0s[k]);
-            let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
-            let at = ad_at(g, col, k);
-            let mut vals = HashMap::new();
-            if lean {
-                let eta = g.f.load(&eta_p, &at);
-                vals.insert(&args[0] as *const M as usize, eta);
-            }
-            for (j, e) in inner.iter().enumerate() {
-                if lean {
-                    break;
-                }
-                let s = if split {
-                    g.f.load(&s_p[j], &at)
-                } else {
-                    let v = g.fwd(e, &ix, &mut vals);
-                    let prev = g.f.acc_get(&carry[k][j]);
-                    let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
-                    let t = g.f.ty();
-                    g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
-                    // kept for the reverse pass, where a nested running
-                    // sum's operand may need its child's value
-                    g.f.store(&s, &s_p[j], &at);
-                    s
-                };
-                vals.insert(keys[j], s);
-            }
-            for key in &keys {
-                let acc = g.f.acc_new(&fconst(0.0));
-                g.node_acc.insert(*key, acc);
-            }
-            let x = g.fwd(lhs, &ix, &mut vals);
-            let a: Vec<String> = args.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
-            if split {
-                let e = g.f.load(&ex_p, &at);
-                g.exp_override = Some(e);
-            }
-            let (term, partials) = g.lpdf(dist, &x, &a);
-            g.f.acc_add(&lpa[k % lpa.len()], &term);
-            g.bwd(lhs, &partials[0], &ix, &vals);
-            for (e, d) in args.iter().zip(&partials[1..]) {
-                g.bwd(e, d, &ix, &vals);
-            }
-            for (j, key) in keys.iter().enumerate() {
-                let acc = g.node_acc.remove(key).unwrap();
-                let v = g.f.acc_get(&acc);
-                if alias {
-                    g.pending_ad.insert(k, v);
-                } else {
-                    g.f.store(&v, &ad[j], &at);
-                }
-            }
-        }
-        };
-        let r_col = |g: &mut Mg, col: &str| {
-            let base = g.f.imul(col, &rows);
-        for k in 0..u as usize {
-            use_row_accs(g, k);
-            use_copy_accs(g, k);
-            let flat = g.f.iadd(&base, &r0s[k]);
-            let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
-            let at = ad_at(g, col, k);
-            g.ad_at = Some(at.clone());
-            for n in owned {
-                let acc = g.f.acc_new(&fconst(0.0));
-                g.elem_acc.insert(n.clone(), acc);
-            }
-            for j in (0..keys.len()).rev() {
-                let a = match g.pending_ad.remove(&k) {
-                    Some(v) if alias => v,
-                    _ => g.f.load(&ad[j], &at),
-                };
-                let prev = g.f.acc_get(&carry[k][j]);
-                let sum = g.f.fadd(&prev, &a);
-                let t = g.f.ty();
-                g.f.emit(format!("store {t} {sum}, ptr {}", carry[k][j]));
-                // the values of the running sums nested inside this one
-                let mut vals = HashMap::new();
-                for i in 0..j {
-                    let v = g.f.load(&s_p[i], &at);
-                    vals.insert(keys[i], v);
-                }
-                g.fwd(inner[j], &ix, &mut vals);
-                g.bwd(inner[j], &sum, &ix, &vals);
-            }
-            g.ad_at = None;
-            // absorbed element-wise statements over the same elements
-            for Stmt::Tilde { dist: d2, lhs: l2, args: a2, .. } in guests {
-                let mut vals = HashMap::new();
-                let x = g.fwd(l2, &ix, &mut vals);
-                let av: Vec<String> = a2.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
-                let (term, partials) = g.lpdf(*d2, &x, &av);
-                g.f.acc_add(&lpa[k % lpa.len()], &term);
-                g.bwd(l2, &partials[0], &ix, &vals);
-                for (e, d) in a2.iter().zip(&partials[1..]) {
-                    g.bwd(e, d, &ix, &vals);
-                }
-            }
-            for n in owned {
-                let acc = g.elem_acc.remove(n).unwrap();
-                let v = g.f.acc_get(&acc);
-                let gp = g.gptr[n].clone();
-                g.f.store(&v, &gp, &flat);
-            }
-        }
-        };
-        let t = g.f.ty();
-        let zero = g.f.opnd(&fconst(0.0));
-        if split {
-            // With the running sums already in the scratch, C does not depend
-            // on the column order, so it runs backwards together with R: each
-            // adjoint goes straight into the reverse running sum.
-            for c in carry.iter().flatten() {
-                g.f.emit(format!("store {t} {zero}, ptr {c}"));
-            }
-            for_range(g, "0", &cols, |g, kk| {
-                let col = g.f.iop("sub nsw", &last, kk);
-                col_begin(g);
-                c_col(g, &col);
-                r_col(g, &col);
-                col_flush(g, &col);
-            });
-        } else {
-            for_range(g, "0", &cols, |g, col| {
-                col_begin(g);
-                c_col(g, col);
-                col_flush(g, col);
-            });
-            // reverse: parents before children, so a parent's contribution to
-            // a child's adjoint at this element is in place before the child
-            // reads it
-            for c in carry.iter().flatten() {
-                g.f.emit(format!("store {t} {zero}, ptr {c}"));
-            }
-            for_range(g, "0", &cols, |g, kk| {
-                let col = g.f.iop("sub nsw", &last, kk);
-                col_begin(g);
-                r_col(g, &col);
-                col_flush(g, &col);
-            });
-        }
-        g.vpadj.clear();
-        for k in 0..u as usize {
-            for (p, acc) in rp.iter().zip(&row_accs[k]) {
-                g.inv_acc.remove(&(p.clone(), Ax::Row));
-                let v = g.f.acc_get(acc);
-                let gp = g.gptr[p].clone();
-                g.f.add_to(&gp, &r0s[k], &v);
-            }
-        }
-        g.f.lanes = 1;
+/// Whether `e` contains a matrix-vector product (whose backward sweep
+/// writes a whole gradient vector, so it cannot be split across threads).
+fn has_matvec(e: &M) -> bool {
+    match e {
+        M::MatVec { .. } => true,
+        M::Cumsum { inner, .. } => has_matvec(inner),
+        M::Bin(_, a, b) => has_matvec(a) || has_matvec(b),
+        M::Neg(a) | M::Func(_, a) => has_matvec(a),
+        _ => false,
+    }
+}
+
+/// Fused, vectorised form of a statement over a column-major R x C shape
+/// whose running sums run along C (the time axis of a panel of series).
+///
+/// The rows are taken four at a time, one row per vector lane; because the
+/// storage is column-major, four adjacent rows at one column are one
+/// contiguous vector load. For each group of rows:
+///
+///   forward, column by column: each running sum is a vector register (its
+///   carry) plus the operand; the likelihood term and its derivatives follow
+///   immediately, and each running sum's adjoint is stored once;
+///   reverse, from the last column: a second register carries each adjoint's
+///   reverse running sum, which is pushed through the operand.
+///
+/// Gradients of row-indexed parameters stay in registers for the whole
+/// group; those of column-indexed parameters go to per-lane partial sums
+/// (C x 4, reduced once at the end); scalar parameters and the log density
+/// use vector accumulators. The rows left over (R mod 4) run through the
+/// same generator with one lane. Nothing but the adjoints (C x 4 doubles per
+/// group, in L1) is written besides the gradient.
+///
+/// Groups touch only their own rows, so with `par_nt` set the groups of
+/// eight rows run in an outlined function (`gen_par_kernel`) that the
+/// runtime splits across the chain's threads (`mint_par_groups`). Single
+/// vectors and leftover rows stay on the calling thread.
+#[allow(clippy::too_many_arguments)]
+fn gen_fused_scan<'s>(
+    g: &mut Mg,
+    tm: &TModel,
+    k: usize,
+    dist: Dist,
+    lhs: &'s M,
+    args: &'s [M],
+    shape: &SShape,
+    nodes: &[&'s M],
+    guests: &'s [&'s Stmt],
+    owned: &'s [String],
+    lp: &str,
+) {
+    let sc = scan_new(g, dist, lhs, args, shape, nodes, guests, owned);
+    let lanes = kernel_lanes(dist, lhs, args, false);
+    let guest_matvec = guests.iter().any(|s| {
+        let Stmt::Tilde { lhs: l2, args: a2, .. } = s;
+        has_matvec(l2) || a2.iter().any(has_matvec)
+    });
+    let par = match &g.par_nt {
+        Some(nt) if lanes > 1 && !guest_matvec => Some(nt.clone()),
+        _ => None,
     };
+    let (rows, cols) = (sc.rows.clone(), sc.cols.clone());
+    let cp = sc.cp.clone();
+    g.col_part = cp.iter().map(|p| (p.clone(), g.part_bufs[p].clone())).collect();
+    let n4 = g.f.imul(&cols, "4");
+    // (a parallel kernel zeroes each thread's slice itself)
+    let zero_parts = |g: &mut Mg| {
+        for p in &cp {
+            let b = g.col_part[p].clone();
+            g.f.memzero(g.m, &b, &n4);
+        }
+    };
+    if par.is_none() {
+        zero_parts(g);
+    }
 
     // groups of UNROLL vectors, then single vectors, then single rows (all of
     // them when the statement is not vectorised)
@@ -2146,25 +1995,50 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
     let singles = g.f.iop("sdiv", &rest, &lanes.to_string());
     let s_end = g.f.imul(&singles, &lanes.to_string());
     let done = if lanes > 1 { g.f.iadd(&done_wide, &s_end) } else { "0".to_string() };
+    // column partial sums written: one slice per thread that ran
+    let used_at = g.f.alloca("i64");
+    g.f.emit(format!("store i64 1, ptr {used_at}"));
     if lanes > 1 {
-        // vector accumulators for the log density and the scalar parameters
         // one vector accumulator per copy for the log density and each scalar
         // parameter, so the copies do not wait on each other
         g.f.lanes = lanes;
         let lpv: Vec<String> = (0..UNROLL).map(|_| g.f.acc_new(&fconst(0.0))).collect();
-        let scalars: Vec<String> = g.padj.keys().cloned().collect();
+        let mut scalars: Vec<String> = g.padj.keys().cloned().collect();
+        scalars.sort();
         let vps: Vec<HashMap<String, String>> =
             (0..UNROLL).map(|_| scalars.iter().map(|n| (n.clone(), g.f.acc_new(&fconst(0.0)))).collect()).collect();
         g.f.lanes = 1;
-        for_range(g, "0", &groups, |g, b| {
-            let r0 = g.f.imul(b, &wide);
-            group(g, lanes, UNROLL, &r0, &lpv, &vps);
-        });
+        let serial_groups = |g: &mut Mg| {
+            for_range(g, "0", &groups, |g, b| {
+                let r0 = g.f.imul(b, &wide);
+                scan_group(g, &sc, lanes, UNROLL, &r0, &lpv, &vps);
+            });
+        };
+        if let Some(nt) = &par {
+            // With more than one thread requested, the outlined kernel;
+            // otherwise exactly the serial code (and its arithmetic).
+            let kn = gen_par_kernel(g, tm, k, &sc, nodes, &scalars);
+            let (l_par, l_ser, l_join) = (g.f.label("par"), g.f.label("ser"), g.f.label("pjoin"));
+            let c = g.f.reg();
+            g.f.emit(format!("{c} = icmp sgt i64 {nt}, 1"));
+            g.f.emit(format!("br i1 {c}, label %{l_par}, label %{l_ser}"));
+            g.f.start_block(&l_par);
+            let u = par_kernel_call(g, tm, &kn, &cp, &scalars, &groups, nt, lp);
+            g.f.emit(format!("store i64 {u}, ptr {used_at}"));
+            g.f.br(&l_join);
+            g.f.start_block(&l_ser);
+            zero_parts(g);
+            serial_groups(g);
+            g.f.br(&l_join);
+            g.f.start_block(&l_join);
+        } else {
+            serial_groups(g);
+        }
         let d2 = done_wide.clone();
         for_range(g, "0", &singles, |g, b| {
             let off = g.f.imul(b, &lanes.to_string());
             let r0 = g.f.iadd(&d2, &off);
-            group(g, lanes, 1, &r0, &lpv, &vps);
+            scan_group(g, &sc, lanes, 1, &r0, &lpv, &vps);
         });
         g.f.lanes = lanes;
         let mut tot = g.f.acc_get(&lpv[0]);
@@ -2190,23 +2064,544 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
         }
     }
     let lp1 = [lp.to_string()];
-    for_range(g, &done, &rows, |g, r| group(g, 1, 1, r, &lp1, &[]));
-    // column-indexed gradients: reduce the four per-lane partial sums
+    for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+    let used = if par.is_some() {
+        let r = g.f.reg();
+        g.f.emit(format!("{r} = load i64, ptr {used_at}"));
+        r
+    } else {
+        "1".to_string()
+    };
+    // column-indexed gradients: reduce the four per-lane partial sums (of
+    // every thread's slice, in thread order)
     for p in &cp {
         let b = g.col_part[p].clone();
         let gp = g.gptr[p].clone();
+        let one = used == "1";
+        let used2 = used.clone();
+        let n42 = n4.clone();
         for_range(g, "0", &cols, |g, c| {
             let at = g.f.imul(c, "4");
-            let mut tot = g.f.load(&b, &at);
-            for l in 1..4 {
-                let i = g.f.iadd(&at, &l.to_string());
-                let x = g.f.load(&b, &i);
-                tot = g.f.fadd(&tot, &x);
+            let lanes4 = |g: &mut Mg, at: &str| {
+                let mut tot = g.f.load(&b, at);
+                for l in 1..4 {
+                    let i = g.f.iadd(at, &l.to_string());
+                    let x = g.f.load(&b, &i);
+                    tot = g.f.fadd(&tot, &x);
+                }
+                tot
+            };
+            let tot = lanes4(g, &at);
+            if one {
+                g.f.add_to(&gp, c, &tot);
+            } else {
+                let acc = g.f.acc_new(&tot);
+                for_range(g, "1", &used2, |g, t| {
+                    let o = g.f.imul(t, &n42);
+                    let a2 = g.f.iadd(&o, &at);
+                    let v = lanes4(g, &a2);
+                    add_in_order(g, &acc, &v);
+                });
+                let tot = g.f.acc_get(&acc);
+                g.f.add_to(&gp, c, &tot);
             }
-            g.f.add_to(&gp, c, &tot);
         });
     }
     g.col_part.clear();
+}
+
+/// Slots of the context a fused scan statement passes to its parallel
+/// kernel (8 bytes each): theta, grad, the per-thread log density and scalar
+/// adjoint outputs, then the column partial-sum buffers, the constrained
+/// values and adjoints of each Positive vector parameter, and the values of
+/// the scalar parameters (sorted by name).
+const CTX_THETA: usize = 0;
+const CTX_GRAD: usize = 1;
+const CTX_OUT_LP: usize = 2;
+const CTX_OUT_SC: usize = 3;
+const CTX_FIXED: usize = 4;
+/// Most threads a parallel kernel may use (MINT_PAR_MAX in the runtime).
+const PAR_MAX_THREADS: usize = 64;
+
+fn pos_vectors(tm: &TModel) -> Vec<String> {
+    tm.params.iter().filter(|(_, t)| matches!(t, Ty::Vector(_, Dom::Positive))).map(|(n, _)| n.clone()).collect()
+}
+
+/// Emits the outlined kernel of a fused scan statement: groups g0..g1 of
+/// eight rows on thread `tid`, with its own scratch (per-thread
+/// `mint_ws_slot`s), its own slice of the column partial sums, and its log
+/// density and scalar adjoints written to entry `tid` of the output arrays.
+/// Returns the name of the entry point `(ctx, g0, g1, tid)`.
+fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], scalars: &[String]) -> String {
+    let kn = format!("mint_model_{}_scan{k}", tm.name);
+    let pos = pos_vectors(tm);
+    let ncp = sc.cp.len();
+    // The same per-thread slots as the caller's buffers, requested at the
+    // same sizes: on the calling thread they are the caller's own buffers,
+    // and are never reallocated under it.
+    let ad_slots: Vec<usize> = sc.ad.iter().map(|a| g.ws_slot_of[a]).collect();
+    let k_slot = g.ws_slot_of[&g.kscratch[&sc.keys[0]]];
+    let strict = g.f.strict;
+    let cm = g.cm.clone();
+    let lanes = kernel_lanes(sc.dist, sc.lhs, sc.args, false);
+    let shape = match nodes[0] {
+        M::Cumsum { shape, .. } => shape.clone(),
+        _ => unreachable!(),
+    };
+    let SShape::Mat(_, cd) = &shape else { unreachable!() };
+    {
+        let mut km = Mg::new(&mut *g.m, tm, strict);
+        km.cm = cm;
+        let (layout, _) = km.layout(tm);
+        let sc_base = CTX_FIXED + ncp + 2 * pos.len();
+        for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+            match t {
+                Ty::Vector(_, Dom::Positive) => {
+                    let i = pos.iter().position(|q| q == n).unwrap();
+                    km.pptr.insert(n.clone(), format!("%kpv{i}"));
+                    km.gptr.insert(n.clone(), format!("%kpa{i}"));
+                }
+                Ty::Vector(..) | Ty::Matrix(..) => {
+                    let p = km.f.gep("%theta", off);
+                    let gp = km.f.gep("%grad", off);
+                    km.pptr.insert(n.clone(), p);
+                    km.gptr.insert(n.clone(), gp);
+                }
+                Ty::Scalar(_) => {
+                    let j = scalars.iter().position(|q| q == n).unwrap();
+                    let a = km.f.reg();
+                    km.f.emit(format!("{a} = getelementptr inbounds i64, ptr %ctx, i64 {}", sc_base + j));
+                    let v = km.f.reg();
+                    km.f.emit(format!("{v} = load double, ptr {a}"));
+                    km.pval.insert(n.clone(), v);
+                    // never used: the kernel's scalar gradients go to its
+                    // vector accumulators
+                    let acc = km.f.acc_new(&fconst(0.0));
+                    km.padj.insert(n.clone(), acc);
+                }
+                _ => unreachable!(),
+            }
+        }
+        for (j, (node, slot)) in nodes.iter().zip(&ad_slots).enumerate() {
+            let M::Cumsum { shape, .. } = node else { unreachable!() };
+            let n = shape_size(&mut km, shape);
+            let r = km.f.reg();
+            km.f.emit(format!("{r} = call noalias ptr @mint_ws_slot(i64 {slot}, i64 {n})"));
+            // forward values come from registers and the group scratch; a
+            // load from the caller's forward buffer would be a bug
+            km.split.insert(sc.keys[j], ("null".to_string(), Some(r)));
+        }
+        let cols = km.dim(cd);
+        let per = km.f.imul(&cols, &(KERNEL_WIDTH * (1 + nodes.len() as u32)).to_string());
+        let r = km.f.reg();
+        km.f.emit(format!("{r} = call noalias ptr @mint_ws_slot(i64 {k_slot}, i64 {per})"));
+        km.kscratch.insert(sc.keys[0], r);
+        let n4 = km.f.imul(&cols, "4");
+        let off = km.f.imul("%tid", &n4);
+        for (i, p) in sc.cp.iter().enumerate() {
+            let b = km.f.gep(&format!("%kp{i}"), &off);
+            km.f.memzero(km.m, &b, &n4);
+            km.col_part.insert(p.clone(), b);
+        }
+        let sck = scan_new(&mut km, sc.dist, sc.lhs, sc.args, &shape, nodes, sc.guests, sc.owned);
+        const UNROLL: u32 = KERNEL_UNROLL;
+        let wide = (lanes * UNROLL).to_string();
+        km.f.lanes = lanes;
+        let lpv: Vec<String> = (0..UNROLL).map(|_| km.f.acc_new(&fconst(0.0))).collect();
+        let vps: Vec<HashMap<String, String>> =
+            (0..UNROLL).map(|_| scalars.iter().map(|n| (n.clone(), km.f.acc_new(&fconst(0.0)))).collect()).collect();
+        km.f.lanes = 1;
+        for_range(&mut km, "%g0", "%g1", |km, b| {
+            let r0 = km.f.imul(b, &wide);
+            scan_group(km, &sck, lanes, UNROLL, &r0, &lpv, &vps);
+        });
+        km.f.lanes = lanes;
+        let mut tot = km.f.acc_get(&lpv[0]);
+        for a in &lpv[1..] {
+            let v = km.f.acc_get(a);
+            tot = km.f.fadd(&tot, &v);
+        }
+        let s = km.f.hsum(km.m, &tot);
+        let mut sums = Vec::new();
+        for n in scalars {
+            let mut tot = km.f.acc_get(&vps[0][n]);
+            for m in &vps[1..] {
+                let v = km.f.acc_get(&m[n]);
+                tot = km.f.fadd(&tot, &v);
+            }
+            sums.push(km.f.hsum(km.m, &tot));
+        }
+        km.f.lanes = 1;
+        let out_lp = km.f.reg();
+        km.f.emit(format!("{out_lp} = getelementptr inbounds i64, ptr %ctx, i64 {CTX_OUT_LP}"));
+        let out_lp2 = km.f.reg();
+        km.f.emit(format!("{out_lp2} = load ptr, ptr {out_lp}"));
+        km.f.store(&s, &out_lp2, "%tid");
+        let out_sc = km.f.reg();
+        km.f.emit(format!("{out_sc} = getelementptr inbounds i64, ptr %ctx, i64 {CTX_OUT_SC}"));
+        let out_sc2 = km.f.reg();
+        km.f.emit(format!("{out_sc2} = load ptr, ptr {out_sc}"));
+        let base = km.f.imul("%tid", &scalars.len().to_string());
+        for (j, v) in sums.iter().enumerate() {
+            let at = km.f.iadd(&base, &j.to_string());
+            km.f.store(v, &out_sc2, &at);
+        }
+        let mut params = vec!["ptr noalias %theta".to_string(), "ptr noalias %grad".to_string()];
+        params.extend((0..ncp).map(|i| format!("ptr noalias %kp{i}")));
+        for i in 0..pos.len() {
+            params.push(format!("ptr noalias %kpv{i}"));
+            params.push(format!("ptr noalias %kpa{i}"));
+        }
+        params.extend(["ptr %ctx".to_string(), "i64 %g0".to_string(), "i64 %g1".to_string(), "i64 %tid".to_string()]);
+        let header = format!("define internal void @{kn}_body({})", params.join(", "));
+        km.finish(&header, &["ret void".to_string()]);
+    }
+    // the entry point the runtime calls: unpack the context
+    let mut w = format!("define internal void @{kn}(ptr %ctx, i64 %g0, i64 %g1, i64 %tid) {{\nentry:\n");
+    let mut argv = Vec::new();
+    let mut slots = vec![CTX_THETA, CTX_GRAD];
+    slots.extend((0..ncp + 2 * pos.len()).map(|i| CTX_FIXED + i));
+    for (i, s) in slots.iter().enumerate() {
+        w += &format!("  %a{i} = getelementptr inbounds i64, ptr %ctx, i64 {s}\n  %p{i} = load ptr, ptr %a{i}\n");
+        argv.push(format!("ptr %p{i}"));
+    }
+    argv.extend(["ptr %ctx".to_string(), "i64 %g0".to_string(), "i64 %g1".to_string(), "i64 %tid".to_string()]);
+    w += &format!("  call void @{kn}_body({})\n  ret void\n}}\n", argv.join(", "));
+    g.m.funcs.push(w);
+    kn
+}
+
+/// Fills the context of a parallel scan kernel, runs it over `groups`
+/// groups with up to `nt` threads, and adds the threads' log densities and
+/// scalar adjoints to the caller's accumulators in thread order. Returns
+/// the register holding the number of threads that ran (the number of
+/// column partial-sum slices to reduce).
+#[allow(clippy::too_many_arguments)]
+fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
+    let pos = pos_vectors(tm);
+    let nslots = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let ctx = g.f.alloca(&format!("[{nslots} x i64]"));
+    let out_lp = g.f.alloca(&format!("[{PAR_MAX_THREADS} x double]"));
+    let out_sc = g.f.alloca(&format!("[{} x double]", PAR_MAX_THREADS * scalars.len().max(1)));
+    let put = |g: &mut Mg, i: usize, ty: &str, v: &str| {
+        let a = g.f.reg();
+        g.f.emit(format!("{a} = getelementptr inbounds i64, ptr {ctx}, i64 {i}"));
+        g.f.emit(format!("store {ty} {v}, ptr {a}"));
+    };
+    put(g, CTX_THETA, "ptr", "%theta");
+    put(g, CTX_GRAD, "ptr", "%grad");
+    put(g, CTX_OUT_LP, "ptr", &out_lp);
+    put(g, CTX_OUT_SC, "ptr", &out_sc);
+    for (i, p) in cp.iter().enumerate() {
+        let b = g.part_bufs[p].clone();
+        put(g, CTX_FIXED + i, "ptr", &b);
+    }
+    for (i, n) in pos.iter().enumerate() {
+        let (v, a) = (g.pptr[n].clone(), g.gptr[n].clone());
+        put(g, CTX_FIXED + cp.len() + 2 * i, "ptr", &v);
+        put(g, CTX_FIXED + cp.len() + 2 * i + 1, "ptr", &a);
+    }
+    for (j, n) in scalars.iter().enumerate() {
+        let v = g.pval[n].clone();
+        let v = g.f.opnd(&v);
+        put(g, CTX_FIXED + cp.len() + 2 * pos.len() + j, "double", &v);
+    }
+    g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
+    let used = g.f.reg();
+    g.f.emit(format!("{used} = call i64 @mint_par_groups(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt})"));
+    let ns = scalars.len().to_string();
+    for_range(g, "0", &used, |g, t| {
+        let v = g.f.load(&out_lp, t);
+        add_in_order(g, lp, &v);
+        let base = g.f.imul(t, &ns);
+        for (j, n) in scalars.iter().enumerate() {
+            let at = g.f.iadd(&base, &j.to_string());
+            let v = g.f.load(&out_sc, &at);
+            let acc = g.padj[n].clone();
+            add_in_order(g, &acc, &v);
+        }
+    });
+    used
+}
+
+/// acc += v without `reassoc`, so a loop of these sums in loop order (the
+/// threads' partial results are added in thread order).
+fn add_in_order(g: &mut Mg, acc: &str, v: &str) {
+    let old = g.f.acc_get(acc);
+    let s = g.f.fadd(&old, v);
+    let t = g.f.ty();
+    g.f.emit(format!("store {t} {s}, ptr {acc}"));
+}
+
+/// One group of `u` vectors of `l` rows starting at r0 (u * l rows in all),
+/// accumulating the log density in `lpa`. The u copies are independent
+/// (their own carries and accumulators), which gives the CPU u chains and
+/// uses whole cache lines.
+fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], vps: &[HashMap<String, String>]) {
+    let Scan { dist, lhs, args, guests, owned, keys, inner, rp, cp, rows, cols, last, ad } = sc;
+    let (dist, lhs, args, guests, owned) = (*dist, *lhs, *args, *guests, *owned);
+    let (rows, cols, last) = (rows.clone(), cols.clone(), last.clone());
+    g.f.lanes = l;
+    let use_copy_accs = |g: &mut Mg, k: usize| {
+        if !vps.is_empty() {
+            g.vpadj = vps[k].clone();
+        }
+    };
+    // one register per column-indexed parameter per column, shared by the
+    // copies, then one update of the per-lane partial sums
+    let col_begin = |g: &mut Mg| {
+        for p in cp.iter() {
+            let acc = g.f.acc_new(&fconst(0.0));
+            g.inv_acc.insert((p.clone(), Ax::Col), acc);
+        }
+    };
+    let col_flush = |g: &mut Mg, col: &str| {
+        for p in cp.iter() {
+            let acc = g.inv_acc.remove(&(p.clone(), Ax::Col)).unwrap();
+            let v = g.f.acc_get(&acc);
+            let b = g.col_part[p].clone();
+            let at = g.f.imul(col, "4");
+            g.f.add_to(&b, &at, &v);
+        }
+    };
+    let r0s: Vec<String> = (0..u).map(|k| g.f.iadd(r0, &(k * l).to_string())).collect();
+    // The adjoints of this group's running sums live in a small contiguous
+    // scratch, [col * (u * l) + k * l + lane], reused by every group: it
+    // stays in L1, where the full-matrix index would scatter it.
+    let width = (u * l).to_string();
+    let ad_at = |g: &mut Mg, col: &str, k: usize| {
+        let a = g.f.imul(col, &width);
+        g.f.iadd(&a, &(k as u32 * l).to_string())
+    };
+    let row_accs: Vec<Vec<String>> = (0..u).map(|_| rp.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
+    let carry: Vec<Vec<String>> = (0..u).map(|_| keys.iter().map(|_| g.f.acc_new(&fconst(0.0))).collect()).collect();
+    let use_row_accs = |g: &mut Mg, k: usize| {
+        for (p, acc) in rp.iter().zip(&row_accs[k]) {
+            g.inv_acc.insert((p.clone(), Ax::Row), acc.clone());
+        }
+    };
+    // The density's own exp runs in a pass of its own when there is one
+    // (PoissonLog): A computes the running sums and eta into an L1
+    // scratch, B takes exp over the scratch with nothing else live (so
+    // its constants stay in registers), C finishes the density and its
+    // derivatives. Otherwise the three are one loop.
+    //
+    // One scratch slot holds eta, then exp(eta) (B works in place), then
+    // the first running sum's adjoint (C overwrites each exp value after
+    // reading it); the running sums have one slot each. With 8 rows and
+    // 150 columns that is 19 KB, which stays in L1.
+    let split = dist == Dist::PoissonLog;
+    let scr = g.kscratch[&keys[0]].clone();
+    let cw = g.f.imul(&cols, &width);
+    let eta_p = scr.clone();
+    let ex_p = scr.clone();
+    let s_p: Vec<String> = (0..keys.len())
+        .map(|j| {
+            let o = g.f.imul(&cw, &(1 + j).to_string());
+            g.f.gep(&scr, &o)
+        })
+        .collect();
+    // adjoints: the first running sum's in the shared slot when split
+    // (only with a single running sum: a nested one's parent adds into
+    // its child's adjoint through the general buffer)
+    let alias = split && keys.len() == 1;
+    let ad: Vec<String> = ad.iter().enumerate().map(|(j, a)| if alias && j == 0 { scr.clone() } else { a.clone() }).collect();
+    // When the density's argument is a sum of terms (beta + state), its
+    // backward sweep needs no values, so C can reload eta instead of the
+    // running sum: A then stores eta alone and B writes exp(eta) into the
+    // running sum's (unused) slot. With a single running sum, C hands its
+    // adjoint to R in a register.
+    let lean = alias && additive(&args[0]) && !lhs.has_cumsum();
+    let ex_p = if lean { s_p[0].clone() } else { ex_p };
+    if split {
+        for_range(g, "0", &cols, |g, col| {
+            let base = g.f.imul(col, &rows);
+            for k in 0..u as usize {
+                let flat = g.f.iadd(&base, &r0s[k]);
+                let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+                let at = ad_at(g, col, k);
+                let mut vals = HashMap::new();
+                for (j, e) in inner.iter().enumerate() {
+                    let v = g.fwd(e, &ix, &mut vals);
+                    let prev = g.f.acc_get(&carry[k][j]);
+                    let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
+                    let t = g.f.ty();
+                    g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
+                    if !lean {
+                        g.f.store(&s, &s_p[j], &at);
+                    }
+                    vals.insert(keys[j], s);
+                }
+                let eta = g.fwd(&args[0], &ix, &mut vals);
+                g.f.store(&eta, &eta_p, &at);
+            }
+        });
+        let n = g.f.imul(&cols, &u.to_string());
+        for_range(g, "0", &n, |g, i| {
+            let at = g.f.imul(i, &l.to_string());
+            let eta = g.f.load(&eta_p, &at);
+            let e = g.f.intrinsic1(g.m, "llvm.exp.f64", &eta);
+            g.f.store(&e, &ex_p, &at);
+        });
+    }
+    // C: the density and its derivatives at column col (each running
+    // sum's adjoint stored); R: the reverse running sums at column col
+    let c_col = |g: &mut Mg, col: &str| {
+        let base = g.f.imul(col, &rows);
+    for k in 0..u as usize {
+        use_row_accs(g, k);
+        use_copy_accs(g, k);
+        let flat = g.f.iadd(&base, &r0s[k]);
+        let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+        let at = ad_at(g, col, k);
+        let mut vals = HashMap::new();
+        if lean {
+            let eta = g.f.load(&eta_p, &at);
+            vals.insert(&args[0] as *const M as usize, eta);
+        }
+        for (j, e) in inner.iter().enumerate() {
+            if lean {
+                break;
+            }
+            let s = if split {
+                g.f.load(&s_p[j], &at)
+            } else {
+                let v = g.fwd(e, &ix, &mut vals);
+                let prev = g.f.acc_get(&carry[k][j]);
+                let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
+                let t = g.f.ty();
+                g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
+                // kept for the reverse pass, where a nested running
+                // sum's operand may need its child's value
+                g.f.store(&s, &s_p[j], &at);
+                s
+            };
+            vals.insert(keys[j], s);
+        }
+        for key in keys.iter() {
+            let acc = g.f.acc_new(&fconst(0.0));
+            g.node_acc.insert(*key, acc);
+        }
+        let x = g.fwd(lhs, &ix, &mut vals);
+        let a: Vec<String> = args.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
+        if split {
+            let e = g.f.load(&ex_p, &at);
+            g.exp_override = Some(e);
+        }
+        let (term, partials) = g.lpdf(dist, &x, &a);
+        g.f.acc_add(&lpa[k % lpa.len()], &term);
+        g.bwd(lhs, &partials[0], &ix, &vals);
+        for (e, d) in args.iter().zip(&partials[1..]) {
+            g.bwd(e, d, &ix, &vals);
+        }
+        for (j, key) in keys.iter().enumerate() {
+            let acc = g.node_acc.remove(key).unwrap();
+            let v = g.f.acc_get(&acc);
+            if alias {
+                g.pending_ad.insert(k, v);
+            } else {
+                g.f.store(&v, &ad[j], &at);
+            }
+        }
+    }
+    };
+    let r_col = |g: &mut Mg, col: &str| {
+        let base = g.f.imul(col, &rows);
+    for k in 0..u as usize {
+        use_row_accs(g, k);
+        use_copy_accs(g, k);
+        let flat = g.f.iadd(&base, &r0s[k]);
+        let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
+        let at = ad_at(g, col, k);
+        g.ad_at = Some(at.clone());
+        for n in owned {
+            let acc = g.f.acc_new(&fconst(0.0));
+            g.elem_acc.insert(n.clone(), acc);
+        }
+        for j in (0..keys.len()).rev() {
+            let a = match g.pending_ad.remove(&k) {
+                Some(v) if alias => v,
+                _ => g.f.load(&ad[j], &at),
+            };
+            let prev = g.f.acc_get(&carry[k][j]);
+            let sum = g.f.fadd(&prev, &a);
+            let t = g.f.ty();
+            g.f.emit(format!("store {t} {sum}, ptr {}", carry[k][j]));
+            // the values of the running sums nested inside this one
+            let mut vals = HashMap::new();
+            for i in 0..j {
+                let v = g.f.load(&s_p[i], &at);
+                vals.insert(keys[i], v);
+            }
+            g.fwd(inner[j], &ix, &mut vals);
+            g.bwd(inner[j], &sum, &ix, &vals);
+        }
+        g.ad_at = None;
+        // absorbed element-wise statements over the same elements
+        for Stmt::Tilde { dist: d2, lhs: l2, args: a2, .. } in guests {
+            let mut vals = HashMap::new();
+            let x = g.fwd(l2, &ix, &mut vals);
+            let av: Vec<String> = a2.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
+            let (term, partials) = g.lpdf(*d2, &x, &av);
+            g.f.acc_add(&lpa[k % lpa.len()], &term);
+            g.bwd(l2, &partials[0], &ix, &vals);
+            for (e, d) in a2.iter().zip(&partials[1..]) {
+                g.bwd(e, d, &ix, &vals);
+            }
+        }
+        for n in owned {
+            let acc = g.elem_acc.remove(n).unwrap();
+            let v = g.f.acc_get(&acc);
+            let gp = g.gptr[n].clone();
+            g.f.store(&v, &gp, &flat);
+        }
+    }
+    };
+    let t = g.f.ty();
+    let zero = g.f.opnd(&fconst(0.0));
+    if split {
+        // With the running sums already in the scratch, C does not depend
+        // on the column order, so it runs backwards together with R: each
+        // adjoint goes straight into the reverse running sum.
+        for c in carry.iter().flatten() {
+            g.f.emit(format!("store {t} {zero}, ptr {c}"));
+        }
+        for_range(g, "0", &cols, |g, kk| {
+            let col = g.f.iop("sub nsw", &last, kk);
+            col_begin(g);
+            c_col(g, &col);
+            r_col(g, &col);
+            col_flush(g, &col);
+        });
+    } else {
+        for_range(g, "0", &cols, |g, col| {
+            col_begin(g);
+            c_col(g, col);
+            col_flush(g, col);
+        });
+        // reverse: parents before children, so a parent's contribution to
+        // a child's adjoint at this element is in place before the child
+        // reads it
+        for c in carry.iter().flatten() {
+            g.f.emit(format!("store {t} {zero}, ptr {c}"));
+        }
+        for_range(g, "0", &cols, |g, kk| {
+            let col = g.f.iop("sub nsw", &last, kk);
+            col_begin(g);
+            r_col(g, &col);
+            col_flush(g, &col);
+        });
+    }
+    g.vpadj.clear();
+    for k in 0..u as usize {
+        for (p, acc) in rp.iter().zip(&row_accs[k]) {
+            g.inv_acc.remove(&(p.clone(), Ax::Row));
+            let v = g.f.acc_get(acc);
+            let gp = g.gptr[p].clone();
+            g.f.add_to(&gp, &r0s[k], &v);
+        }
+    }
+    g.f.lanes = 1;
 }
 
 fn gen_ss_logp(g: &mut Mg, tm: &TModel, k: usize, plan: &SsPlan, sigma: &M, len: &Dim, lp: &str) {

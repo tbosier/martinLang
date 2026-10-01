@@ -280,6 +280,50 @@ typedef struct {
 
 #define MAX_NT 64
 
+// ---------------------------------------------------------------- threads inside the gradient
+//
+// A fused scan kernel (compiler/src/model.rs, gen_fused_scan) works on
+// independent groups of rows. The generated logp hands the groups to
+// mint_par_groups, which splits them across the calling chain's threads:
+// thread t of a team of T runs groups [n t / T, n (t + 1) / T) and writes its
+// partial sums to slot t, which the generated code adds up in thread order.
+// So the gradient is deterministic for a given team size. The thread count is
+// per calling thread: run_chain sets it to the chain's threads per chain;
+// elsewhere (the gradient benchmark, the gradient check) it is 1.
+// MINT_KERNEL_THREADS overrides both.
+typedef void (*mint_group_fn)(void *ctx, int64_t g0, int64_t g1, int64_t tid);
+static __thread int64_t kernel_nt = 1;
+
+static int64_t kernel_threads(int64_t dflt) {
+  const char *e = getenv("MINT_KERNEL_THREADS");
+  int64_t n = e ? atoll(e) : dflt;
+  if (n < 1) n = 1;
+  if (n > MAX_NT) n = MAX_NT;  // the generated code has room for MAX_NT slots
+  return n;
+}
+
+int64_t mint_par_threads(void) { return kernel_nt; }
+
+// Runs fn over groups 0..ngroups on up to nt threads; returns the number of
+// threads (slots) that ran. With one thread fn runs here, without OpenMP.
+int64_t mint_par_groups(mint_group_fn fn, void *ctx, int64_t ngroups, int64_t nt) {
+  if (nt > ngroups) nt = ngroups;
+  if (nt > MAX_NT) nt = MAX_NT;
+  if (nt <= 1) {
+    fn(ctx, 0, ngroups, 0);
+    return 1;
+  }
+  // OpenMP may run a smaller team than asked for; the split follows the team
+  int used = 1;
+#pragma omp parallel num_threads((int)nt)
+  {
+    int t = omp_get_thread_num(), T = omp_get_num_threads();
+    if (t == 0) used = T;
+    fn(ctx, ngroups * t / T, ngroups * (t + 1) / T, t);
+  }
+  return used;
+}
+
 static St *st_acquire(Nuts *s) {
   St *x = s->free_list;
   if (x) {
@@ -716,6 +760,8 @@ static void *run_chain(void *arg) {
   s->D = D;
   s->nt = job->threads_per_chain;
   s->team_min = s->nt;
+  int64_t saved_knt = kernel_nt;
+  kernel_nt = kernel_threads(s->nt);
   s->f = job->f;
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
@@ -841,6 +887,7 @@ static void *run_chain(void *arg) {
   }
   free(s->inv_m);
   free(sp);
+  kernel_nt = saved_knt;
   return NULL;
 }
 
@@ -1058,6 +1105,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   if (warmup < 0) mint_panic("sample: warmup must be non-negative");
 
   const char *bench = getenv("MINT_BENCH_GRAD");
+  kernel_nt = kernel_threads(1);
   if (getenv("MINT_GRADCHECK")) {
     double *q = mint_alloc(D);
     bench_point(q, D);
@@ -1069,6 +1117,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     free(q);
   }
   if (bench) bench_grad(f, D, atoll(bench));
+  kernel_nt = 1;
 
   MintPosterior *post = calloc(1, sizeof *post);
   post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;

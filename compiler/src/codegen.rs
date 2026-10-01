@@ -33,6 +33,8 @@ pub struct Opts {
     pub row_fusion: bool,
     /// run scan statements as one fused, row-blocked loop nest
     pub scan_fusion: bool,
+    /// split a fused scan kernel's groups of rows across the chain's threads
+    pub parallel_kernel: bool,
 }
 
 #[derive(Clone)]

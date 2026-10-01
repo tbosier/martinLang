@@ -71,7 +71,8 @@ language features.
    model still run as separate passes over each state, though. The next step
    is having the compiler emit the leapfrog step fused with the model, so that
    position, momentum and gradient are updated in the same loop that computes
-   the gradient. The model gradient itself is still one thread per chain.
+   the gradient. The fused scan kernel of the gradient now runs on the
+   chain's threads; the rest of the gradient is one thread per chain.
 4. **Adaptation that needs fewer gradients.** A gradient-informed diagonal
    metric halved trajectory lengths on the time-series model but gave about
    3.5x fewer effective draws per gradient, and made no measurable difference

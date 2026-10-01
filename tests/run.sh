@@ -132,6 +132,9 @@ if [ -f bench/dynpois/data_small/y.npy ]; then
   build build/dynpois_large_check.mint dynpois_large_check && \
   MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/dynpois_large_check | python3 bench/dynpois/check_grad.py bench/dynpois/data_large \
     && pass "dynamic Poisson log density and gradient match the exact formula (large)" || bad "dynamic Poisson gradient (large)"
+  [ -x build/dynpois_large_check ] && MINT_KERNEL_THREADS=3 MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/dynpois_large_check \
+    | python3 bench/dynpois/check_grad.py bench/dynpois/data_large \
+    && pass "dynamic Poisson gradient matches the exact formula (large, kernel on 3 threads)" || bad "dynamic Poisson gradient (large, kernel on 3 threads)"
 else
   bad "bench/dynpois/data_small missing (run bench/dynpois/make_data.py)"
 fi
@@ -248,6 +251,90 @@ PY
     python3 -c "import sys; sys.exit(0 if float('${worst:-inf}') < 1e-5 else 1)" && pass "gradcheck scan kernel $m G=$G ($worst)" || bad "gradcheck scan kernel $m G=$G ($worst)"
   done
 done
+
+# ---- parallel scan kernel. With one thread the kernel is the serial code, so
+# the gradient must be bit-identical to the build without the parallel
+# kernel. With the groups of rows split across 3 threads the summation order
+# changes, so the log density and every gradient component must agree with
+# the one-thread result to a tolerance (1e-12 of the largest component, and
+# 1e-10 relative per component). G=61 is 7 groups of 8 rows (split 2/2/3), a
+# single vector and a leftover row; G=7, 13 and 20 have fewer groups than
+# threads. BernoulliLogit (one lane) and a running sum of data only are not
+# parallelised, and the generated code must say so.
+
+# close_grad A B LABEL
+close_grad() {
+  python3 - "$1" "$2" <<'PY' && pass "$3" || bad "$3"
+import sys, math
+def rd(p):
+    o = open(p).read()
+    return float(o.split("logp=")[1].split()[0]), [float(x) for x in o.split("grad:")[1].split()]
+(la, ga), (lb, gb) = rd(sys.argv[1]), rd(sys.argv[2])
+if not all(map(math.isfinite, ga + gb + [la, lb])):
+    print("      non-finite log density or gradient")
+    sys.exit(1)
+top = max(abs(x) for x in gb)
+err = max(abs(a - b) for a, b in zip(ga, gb)) / top
+rel = max(abs(a - b) / max(abs(b), 1e-6 * top) for a, b in zip(ga, gb))
+print(f"      logp {la:.15g} vs {lb:.15g}; max grad diff / max |grad| {err:.1e}; worst per-component {rel:.1e}")
+sys.exit(0 if len(ga) == len(gb) and abs(la - lb) <= 1e-12 * abs(lb) and err < 1e-12 and rel < 1e-10 else 1)
+PY
+}
+# grad_out BIN THREADS OUT: log density and gradient at the benchmark point, without the timing
+grad_out() {
+  MINT_KERNEL_THREADS=$2 MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/$1 | sed 's/ns_per_eval=[0-9.]*//' > "$3"
+}
+par_check() { # NAME SOURCE par|serial
+  local n=$1 src=$2 want=$3
+  build "$src" par_$n || return
+  build "$src" par_${n}_seq --no-parallel-kernel || return
+  local has=serial
+  grep -q "call i64 @mint_par_groups" build/par_$n.ll && has=par
+  [ "$has" = "$want" ] && pass "parallel scan kernel $n: generated code is $want" || { bad "parallel scan kernel $n: expected $want code, got $has"; return; }
+  grad_out par_$n 1 build/par_${n}_t1.out
+  grad_out par_$n 3 build/par_${n}_t3.out
+  grad_out par_${n}_seq 3 build/par_${n}_seq.out
+  [ -s build/par_${n}_t1.out ] && cmp -s build/par_${n}_t1.out build/par_${n}_seq.out \
+    && pass "parallel scan kernel $n: 1 thread is bit-identical to --no-parallel-kernel" \
+    || bad "parallel scan kernel $n: 1 thread differs from --no-parallel-kernel"
+  [ "$want" = par ] && close_grad build/par_${n}_t3.out build/par_${n}_t1.out "parallel scan kernel $n: 3 threads match 1 thread"
+}
+for m in nested mixed nested_sq colreuse twohosts layout_draws bernoulli datascan; do
+  want=par
+  case $m in bernoulli|datascan) want=serial ;; esac
+  for G in 7 13 20 61; do
+    sed "s/NG/$G/" tests/scan/$m.mint > build/par_$m.$G.mint
+    par_check ${m}_$G build/par_$m.$G.mint $want
+  done
+done
+if [ -f bench/dynpois/data_large/y.f64 ]; then
+  sed 's#bench/dynpois/data_small/y.f64#bench/dynpois/data_large/y.f64#' examples/dynamic_poisson.mint > build/par_dynpois_large.mint
+  par_check dynpois_large build/par_dynpois_large.mint par
+  par_check dynpois_small examples/dynamic_poisson.mint par
+  # The split really happened (the summation order shows in the last bits),
+  # it follows the team OpenMP runs (a team of one gives the serial result),
+  # and it is deterministic for a given team size.
+  if [ -x build/par_dynpois_large ]; then
+    grad_out par_dynpois_large 3 build/par_det_a.out
+    grad_out par_dynpois_large 3 build/par_det_b.out
+    OMP_THREAD_LIMIT=1 grad_out par_dynpois_large 3 build/par_det_lim.out
+    ! cmp -s build/par_det_a.out build/par_dynpois_large_t1.out \
+      && pass "parallel scan kernel: 3 threads change the summation order (the split ran)" || bad "parallel scan kernel: 3 threads gave the one-thread result"
+    [ -s build/par_det_a.out ] && cmp -s build/par_det_a.out build/par_det_b.out \
+      && pass "parallel scan kernel: identical gradients in two runs on 3 threads" || bad "parallel scan kernel is not deterministic"
+    cmp -s build/par_det_lim.out build/par_dynpois_large_t1.out \
+      && pass "parallel scan kernel follows a reduced OpenMP team" || bad "parallel scan kernel with a team of one differs from one thread"
+  fi
+  # inside the sampler (threads per chain set by run_chain): two short runs
+  # with 3 threads per chain give the same raw draws
+  sed 's/draws = 1000, warmup = 1000/draws = 20, warmup = 20/' build/par_dynpois_large.mint > build/par_dynpois_run.mint
+  if build build/par_dynpois_run.mint par_dynpois_run; then
+    MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/par_run_a.draws ./build/par_dynpois_run > /dev/null 2>&1
+    MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/par_run_b.draws ./build/par_dynpois_run > /dev/null 2>&1
+    [ -s build/par_run_a.draws ] && cmp -s build/par_run_a.draws build/par_run_b.draws \
+      && pass "parallel scan kernel in the sampler: identical raw draws in two runs" || bad "parallel scan kernel in the sampler: raw draws differ between runs"
+  fi
+fi
 
 # ---- the scan layout reaches the draws: a matrix parameter pinned to the
 # data by a tight prior must come back with each posterior mean on its own
