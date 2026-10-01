@@ -2,128 +2,329 @@
   "eight_schools": {
     "stan": [
       {
+        "max_rhat": 1.001,
+        "min_ess": 2889.0,
+        "gradients": 75849,
+        "seconds": 0.006821,
+        "divergences": 0,
+        "leapfrog_per_draw": 9.375,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2614.0,
+        "gradients": 81830,
+        "seconds": 0.007386,
+        "divergences": 0,
+        "leapfrog_per_draw": 10.475,
+        "rank": null
+      },
+      {
         "max_rhat": 1.0,
-        "min_ess": 2946.0,
-        "gradients": 72422,
-        "seconds": 0.007049,
+        "min_ess": 2985.0,
+        "gradients": 78705,
+        "seconds": 0.009323,
+        "divergences": 0,
+        "leapfrog_per_draw": 9.05,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 2844.0,
+        "gradients": 76820,
+        "seconds": 0.006658,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.8,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 3102.0,
+        "gradients": 83010,
+        "seconds": 0.01085,
         "divergences": 1,
-        "leapfrog_per_draw": 8.725
-      },
-      {
-        "max_rhat": 1.001,
-        "min_ess": 2936.0,
-        "gradients": 74499,
-        "seconds": 0.008766,
-        "divergences": 0,
-        "leapfrog_per_draw": 8.3
-      },
-      {
-        "max_rhat": 1.0,
-        "min_ess": 3527.0,
-        "gradients": 81880,
-        "seconds": 0.009816,
-        "divergences": 0,
-        "leapfrog_per_draw": 10.125
-      },
-      {
-        "max_rhat": 1.001,
-        "min_ess": 3201.0,
-        "gradients": 82352,
-        "seconds": 0.007615,
-        "divergences": 0,
-        "leapfrog_per_draw": 10.525
-      },
-      {
-        "max_rhat": 1.0,
-        "min_ess": 3031.0,
-        "gradients": 71604,
-        "seconds": 0.006288,
-        "divergences": 0,
-        "leapfrog_per_draw": 7.9
+        "leapfrog_per_draw": 10.25,
+        "rank": null
       }
     ],
     "grad": [
       {
         "max_rhat": 1.0,
-        "min_ess": 3083.0,
-        "gradients": 63886,
-        "seconds": 0.005947,
+        "min_ess": 3147.0,
+        "gradients": 62704,
+        "seconds": 0.009454,
         "divergences": 0,
-        "leapfrog_per_draw": 7.05
+        "leapfrog_per_draw": 6.975,
+        "rank": null
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 2495.0,
-        "gradients": 67122,
-        "seconds": 0.011158,
+        "min_ess": 3214.0,
+        "gradients": 65139,
+        "seconds": 0.008653,
         "divergences": 0,
-        "leapfrog_per_draw": 7.375
+        "leapfrog_per_draw": 6.95,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 3107.0,
-        "gradients": 63229,
-        "seconds": 0.005751,
-        "divergences": 1,
-        "leapfrog_per_draw": 7.0
-      },
-      {
-        "max_rhat": 1.0,
-        "min_ess": 2803.0,
-        "gradients": 66426,
-        "seconds": 0.008672,
+        "min_ess": 2835.0,
+        "gradients": 64449,
+        "seconds": 0.0069,
         "divergences": 0,
-        "leapfrog_per_draw": 6.9
+        "leapfrog_per_draw": 7.125,
+        "rank": null
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 2600.0,
-        "gradients": 66255,
-        "seconds": 0.006342,
+        "min_ess": 3166.0,
+        "gradients": 68326,
+        "seconds": 0.008593,
         "divergences": 0,
-        "leapfrog_per_draw": 6.9
+        "leapfrog_per_draw": 7.1,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3065.0,
+        "gradients": 65487,
+        "seconds": 0.006142,
+        "divergences": 0,
+        "leapfrog_per_draw": 6.975,
+        "rank": null
       }
     ],
     "grad-init0": [
       {
-        "max_rhat": 1.0,
-        "min_ess": 2976.0,
-        "gradients": 67180,
-        "seconds": 0.006282,
-        "divergences": 1,
-        "leapfrog_per_draw": 8.15
+        "max_rhat": 1.002,
+        "min_ess": 2527.0,
+        "gradients": 66790,
+        "seconds": 0.011766,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.15,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 2705.0,
-        "gradients": 63620,
-        "seconds": 0.008171,
-        "divergences": 2,
-        "leapfrog_per_draw": 7.175
+        "min_ess": 2894.0,
+        "gradients": 62730,
+        "seconds": 0.008296,
+        "divergences": 0,
+        "leapfrog_per_draw": 6.9,
+        "rank": null
       },
       {
         "max_rhat": 1.002,
-        "min_ess": 2549.0,
-        "gradients": 63884,
-        "seconds": 0.008659,
+        "min_ess": 2601.0,
+        "gradients": 67612,
+        "seconds": 0.005806,
         "divergences": 0,
-        "leapfrog_per_draw": 7.6
+        "leapfrog_per_draw": 8.05,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 2227.0,
+        "gradients": 62903,
+        "seconds": 0.008107,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.125,
+        "rank": null
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 2663.0,
-        "gradients": 63027,
-        "seconds": 0.005615,
+        "min_ess": 3004.0,
+        "gradients": 62225,
+        "seconds": 0.005795,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.025,
+        "rank": null
+      }
+    ],
+    "lowrank": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3210.0,
+        "gradients": 71623,
+        "seconds": 0.013104,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.8,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2433.0,
+        "gradients": 72297,
+        "seconds": 0.007496,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.775,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2863.0,
+        "gradients": 78941,
+        "seconds": 0.016169,
+        "divergences": 0,
+        "leapfrog_per_draw": 10.025,
+        "rank": [
+          0,
+          0
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3049.0,
+        "gradients": 72884,
+        "seconds": 0.00859,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.95,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2920.0,
+        "gradients": 72320,
+        "seconds": 0.008479,
         "divergences": 1,
-        "leapfrog_per_draw": 6.9
+        "leapfrog_per_draw": 8.925,
+        "rank": [
+          0,
+          1
+        ]
+      }
+    ],
+    "lowrank-k16": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3210.0,
+        "gradients": 71623,
+        "seconds": 0.010595,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.8,
+        "rank": [
+          0,
+          1
+        ]
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 3012.0,
-        "gradients": 62932,
-        "seconds": 0.009342,
+        "min_ess": 2433.0,
+        "gradients": 72297,
+        "seconds": 0.011071,
         "divergences": 0,
-        "leapfrog_per_draw": 7.1
+        "leapfrog_per_draw": 8.775,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2863.0,
+        "gradients": 78941,
+        "seconds": 0.011,
+        "divergences": 0,
+        "leapfrog_per_draw": 10.025,
+        "rank": [
+          0,
+          0
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3049.0,
+        "gradients": 72884,
+        "seconds": 0.008379,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.95,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2920.0,
+        "gradients": 72320,
+        "seconds": 0.008637,
+        "divergences": 1,
+        "leapfrog_per_draw": 8.925,
+        "rank": [
+          0,
+          1
+        ]
+      }
+    ],
+    "lowrank-k32": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3210.0,
+        "gradients": 71623,
+        "seconds": 0.00858,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.8,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2433.0,
+        "gradients": 72297,
+        "seconds": 0.010109,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.775,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2863.0,
+        "gradients": 78941,
+        "seconds": 0.011223,
+        "divergences": 0,
+        "leapfrog_per_draw": 10.025,
+        "rank": [
+          0,
+          0
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3049.0,
+        "gradients": 72884,
+        "seconds": 0.008562,
+        "divergences": 0,
+        "leapfrog_per_draw": 8.95,
+        "rank": [
+          0,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2920.0,
+        "gradients": 72320,
+        "seconds": 0.008184,
+        "divergences": 1,
+        "leapfrog_per_draw": 8.925,
+        "rank": [
+          0,
+          1
+        ]
       }
     ]
   },
@@ -131,127 +332,328 @@
     "stan": [
       {
         "max_rhat": 1.0,
-        "min_ess": 5887.0,
-        "gradients": 57261,
-        "seconds": 0.538124,
+        "min_ess": 4858.0,
+        "gradients": 57729,
+        "seconds": 0.521335,
         "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5465.0,
-        "gradients": 57766,
-        "seconds": 0.558874,
+        "min_ess": 5577.0,
+        "gradients": 57727,
+        "seconds": 0.5347,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 5000.0,
+        "gradients": 57934,
+        "seconds": 0.543072,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5182.0,
-        "gradients": 57772,
-        "seconds": 0.552778,
+        "min_ess": 5126.0,
+        "gradients": 57376,
+        "seconds": 0.521651,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
-        "max_rhat": 1.0,
-        "min_ess": 5659.0,
-        "gradients": 57433,
-        "seconds": 0.551611,
+        "max_rhat": 1.001,
+        "min_ess": 5170.0,
+        "gradients": 57580,
+        "seconds": 0.526036,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
-      },
-      {
-        "max_rhat": 1.0,
-        "min_ess": 4820.0,
-        "gradients": 57394,
-        "seconds": 0.556567,
-        "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 6.975,
+        "rank": null
       }
     ],
     "grad": [
       {
         "max_rhat": 1.0,
-        "min_ess": 4964.0,
-        "gradients": 59390,
-        "seconds": 0.562757,
+        "min_ess": 4621.0,
+        "gradients": 59471,
+        "seconds": 0.539623,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5584.0,
-        "gradients": 66074,
-        "seconds": 0.662294,
+        "min_ess": 5652.0,
+        "gradients": 66368,
+        "seconds": 0.619391,
         "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 6.975,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5258.0,
-        "gradients": 65305,
-        "seconds": 0.704895,
+        "min_ess": 5631.0,
+        "gradients": 65449,
+        "seconds": 0.652375,
         "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 6146.0,
-        "gradients": 61880,
-        "seconds": 0.653642,
+        "min_ess": 5946.0,
+        "gradients": 62106,
+        "seconds": 0.572197,
         "divergences": 0,
-        "leapfrog_per_draw": 6.95
+        "leapfrog_per_draw": 6.95,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5773.0,
-        "gradients": 65458,
-        "seconds": 0.729427,
+        "min_ess": 6142.0,
+        "gradients": 65019,
+        "seconds": 0.655996,
         "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       }
     ],
     "grad-init0": [
       {
         "max_rhat": 1.0,
-        "min_ess": 5278.0,
-        "gradients": 56457,
-        "seconds": 0.549971,
+        "min_ess": 5814.0,
+        "gradients": 56861,
+        "seconds": 0.517206,
         "divergences": 0,
-        "leapfrog_per_draw": 6.975
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5452.0,
-        "gradients": 56376,
-        "seconds": 0.547306,
+        "min_ess": 5501.0,
+        "gradients": 56655,
+        "seconds": 0.523107,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5155.0,
+        "min_ess": 5412.0,
+        "gradients": 56467,
+        "seconds": 0.508467,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 5472.0,
         "gradients": 56524,
-        "seconds": 0.541806,
+        "seconds": 0.507185,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5347.0,
-        "gradients": 56829,
-        "seconds": 0.539051,
+        "min_ess": 5129.0,
+        "gradients": 56678,
+        "seconds": 0.521244,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 7.0,
+        "rank": null
+      }
+    ],
+    "lowrank": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 8499.0,
+        "gradients": 56653,
+        "seconds": 0.524123,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
       },
       {
         "max_rhat": 1.0,
-        "min_ess": 5832.0,
-        "gradients": 56638,
-        "seconds": 0.554142,
+        "min_ess": 7652.0,
+        "gradients": 56799,
+        "seconds": 0.520928,
         "divergences": 0,
-        "leapfrog_per_draw": 7.0
+        "leapfrog_per_draw": 6.95,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7465.0,
+        "gradients": 56905,
+        "seconds": 0.526838,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7860.0,
+        "gradients": 57201,
+        "seconds": 0.524375,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7863.0,
+        "gradients": 56985,
+        "seconds": 0.514031,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      }
+    ],
+    "lowrank-k16": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 8499.0,
+        "gradients": 56653,
+        "seconds": 0.530397,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7652.0,
+        "gradients": 56799,
+        "seconds": 0.548217,
+        "divergences": 0,
+        "leapfrog_per_draw": 6.95,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7465.0,
+        "gradients": 56905,
+        "seconds": 0.520694,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7860.0,
+        "gradients": 57201,
+        "seconds": 0.547736,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7863.0,
+        "gradients": 56985,
+        "seconds": 0.522159,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      }
+    ],
+    "lowrank-k32": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 8499.0,
+        "gradients": 56653,
+        "seconds": 0.532876,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7652.0,
+        "gradients": 56799,
+        "seconds": 0.527809,
+        "divergences": 0,
+        "leapfrog_per_draw": 6.95,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7465.0,
+        "gradients": 56905,
+        "seconds": 0.519401,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7860.0,
+        "gradients": 57201,
+        "seconds": 0.518173,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "max_rhat": 1.0,
+        "min_ess": 7863.0,
+        "gradients": 56985,
+        "seconds": 0.537287,
+        "divergences": 0,
+        "leapfrog_per_draw": 7.0,
+        "rank": [
+          1,
+          1
+        ]
       }
     ]
   },
@@ -259,79 +661,391 @@
     "stan": [
       {
         "max_rhat": 1.001,
-        "min_ess": 2037.0,
-        "gradients": 2036115,
-        "seconds": 8.601924,
+        "min_ess": 2145.0,
+        "gradients": 2022459,
+        "seconds": 4.036777,
         "divergences": 0,
-        "leapfrog_per_draw": 255.0
+        "leapfrog_per_draw": 255.0,
+        "rank": null
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 2380.0,
-        "gradients": 2014586,
-        "seconds": 8.43338,
+        "min_ess": 2492.0,
+        "gradients": 2007100,
+        "seconds": 3.976548,
         "divergences": 0,
-        "leapfrog_per_draw": 255.0
+        "leapfrog_per_draw": 255.0,
+        "rank": null
       },
       {
         "max_rhat": 1.001,
-        "min_ess": 2077.0,
-        "gradients": 2026514,
-        "seconds": 8.346055,
+        "min_ess": 2676.0,
+        "gradients": 2036846,
+        "seconds": 4.032543,
         "divergences": 0,
-        "leapfrog_per_draw": 255.0
+        "leapfrog_per_draw": 255.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.003,
+        "min_ess": 2141.0,
+        "gradients": 2028043,
+        "seconds": 4.056696,
+        "divergences": 0,
+        "leapfrog_per_draw": 255.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2253.0,
+        "gradients": 2037342,
+        "seconds": 4.059274,
+        "divergences": 0,
+        "leapfrog_per_draw": 255.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2475.0,
+        "gradients": 1992431,
+        "seconds": 3.9696,
+        "divergences": 0,
+        "leapfrog_per_draw": 255.0,
+        "rank": null
       }
     ],
     "grad": [
       {
-        "max_rhat": 1.008,
-        "min_ess": 527.0,
-        "gradients": 1494799,
-        "seconds": 7.899821,
+        "max_rhat": 1.016,
+        "min_ess": 375.0,
+        "gradients": 1334830,
+        "seconds": 2.725139,
         "divergences": 0,
-        "leapfrog_per_draw": 167.425
+        "leapfrog_per_draw": 127.0,
+        "rank": null
       },
       {
-        "max_rhat": 1.009,
-        "min_ess": 380.0,
-        "gradients": 1326385,
-        "seconds": 5.73127,
+        "max_rhat": 1.01,
+        "min_ess": 450.0,
+        "gradients": 1339591,
+        "seconds": 2.729495,
         "divergences": 0,
-        "leapfrog_per_draw": 127.0
+        "leapfrog_per_draw": 132.025,
+        "rank": null
       },
       {
-        "max_rhat": 1.013,
-        "min_ess": 374.0,
-        "gradients": 1313272,
-        "seconds": 5.591269,
+        "max_rhat": 1.007,
+        "min_ess": 474.0,
+        "gradients": 1336571,
+        "seconds": 2.771231,
         "divergences": 0,
-        "leapfrog_per_draw": 127.0
+        "leapfrog_per_draw": 127.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.01,
+        "min_ess": 424.0,
+        "gradients": 1319712,
+        "seconds": 2.7203,
+        "divergences": 0,
+        "leapfrog_per_draw": 128.125,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.014,
+        "min_ess": 327.0,
+        "gradients": 1518315,
+        "seconds": 3.69526,
+        "divergences": 0,
+        "leapfrog_per_draw": 172.5,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.011,
+        "min_ess": 403.0,
+        "gradients": 1286066,
+        "seconds": 2.632518,
+        "divergences": 0,
+        "leapfrog_per_draw": 127.0,
+        "rank": null
       }
     ],
     "grad-init0": [
       {
-        "max_rhat": 1.01,
-        "min_ess": 435.0,
-        "gradients": 1215175,
-        "seconds": 5.22948,
+        "max_rhat": 1.018,
+        "min_ess": 371.0,
+        "gradients": 1203538,
+        "seconds": 2.439359,
         "divergences": 0,
-        "leapfrog_per_draw": 127.0
+        "leapfrog_per_draw": 127.025,
+        "rank": null
       },
       {
-        "max_rhat": 1.007,
-        "min_ess": 495.0,
-        "gradients": 1194243,
-        "seconds": 5.06898,
+        "max_rhat": 1.022,
+        "min_ess": 387.0,
+        "gradients": 1209851,
+        "seconds": 2.446623,
         "divergences": 0,
-        "leapfrog_per_draw": 127.0
+        "leapfrog_per_draw": 127.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.01,
+        "min_ess": 561.0,
+        "gradients": 1212765,
+        "seconds": 2.496513,
+        "divergences": 0,
+        "leapfrog_per_draw": 127.0,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.008,
+        "min_ess": 380.0,
+        "gradients": 1199167,
+        "seconds": 2.442251,
+        "divergences": 0,
+        "leapfrog_per_draw": 127.0,
+        "rank": null
       },
       {
         "max_rhat": 1.009,
-        "min_ess": 347.0,
-        "gradients": 1204156,
-        "seconds": 5.260926,
+        "min_ess": 391.0,
+        "gradients": 1262879,
+        "seconds": 2.806907,
         "divergences": 0,
-        "leapfrog_per_draw": 127.0
+        "leapfrog_per_draw": 139.75,
+        "rank": null
+      },
+      {
+        "max_rhat": 1.011,
+        "min_ess": 352.0,
+        "gradients": 1184985,
+        "seconds": 2.417315,
+        "divergences": 0,
+        "leapfrog_per_draw": 129.65,
+        "rank": null
+      }
+    ],
+    "lowrank": [
+      {
+        "max_rhat": 1.0,
+        "min_ess": 3196.0,
+        "gradients": 598420,
+        "seconds": 3.144695,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          24,
+          24
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 3011.0,
+        "gradients": 590308,
+        "seconds": 3.135968,
+        "divergences": 0,
+        "leapfrog_per_draw": 61.175,
+        "rank": [
+          24,
+          24
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 3163.0,
+        "gradients": 600674,
+        "seconds": 3.261927,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          24,
+          24
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 2209.0,
+        "gradients": 565744,
+        "seconds": 3.142902,
+        "divergences": 0,
+        "leapfrog_per_draw": 55.95,
+        "rank": [
+          24,
+          24
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 2205.0,
+        "gradients": 578489,
+        "seconds": 3.275214,
+        "divergences": 0,
+        "leapfrog_per_draw": 55.0,
+        "rank": [
+          24,
+          24
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 2203.0,
+        "gradients": 524915,
+        "seconds": 3.079824,
+        "divergences": 0,
+        "leapfrog_per_draw": 52.3,
+        "rank": [
+          24,
+          24
+        ]
+      }
+    ],
+    "lowrank-k16": [
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2273.0,
+        "gradients": 628718,
+        "seconds": 2.759638,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2154.0,
+        "gradients": 625572,
+        "seconds": 2.730419,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2215.0,
+        "gradients": 621238,
+        "seconds": 2.758345,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      },
+      {
+        "max_rhat": 1.001,
+        "min_ess": 2468.0,
+        "gradients": 616111,
+        "seconds": 2.727566,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      },
+      {
+        "max_rhat": 1.004,
+        "min_ess": 2240.0,
+        "gradients": 633887,
+        "seconds": 2.753014,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 2200.0,
+        "gradients": 595556,
+        "seconds": 2.74514,
+        "divergences": 0,
+        "leapfrog_per_draw": 63.0,
+        "rank": [
+          16,
+          16
+        ]
+      }
+    ],
+    "lowrank-k32": [
+      {
+        "max_rhat": 1.002,
+        "min_ess": 1420.0,
+        "gradients": 456581,
+        "seconds": 2.88973,
+        "divergences": 0,
+        "leapfrog_per_draw": 31.0,
+        "rank": [
+          32,
+          32
+        ]
+      },
+      {
+        "max_rhat": 1.003,
+        "min_ess": 1171.0,
+        "gradients": 456901,
+        "seconds": 2.943113,
+        "divergences": 0,
+        "leapfrog_per_draw": 31.0,
+        "rank": [
+          32,
+          32
+        ]
+      },
+      {
+        "max_rhat": 1.003,
+        "min_ess": 1474.0,
+        "gradients": 457674,
+        "seconds": 2.954213,
+        "divergences": 0,
+        "leapfrog_per_draw": 31.0,
+        "rank": [
+          32,
+          32
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 1663.0,
+        "gradients": 502333,
+        "seconds": 3.479269,
+        "divergences": 0,
+        "leapfrog_per_draw": 43.35,
+        "rank": [
+          32,
+          32
+        ]
+      },
+      {
+        "max_rhat": 1.002,
+        "min_ess": 1447.0,
+        "gradients": 502368,
+        "seconds": 3.654591,
+        "divergences": 0,
+        "leapfrog_per_draw": 39.0,
+        "rank": [
+          32,
+          32
+        ]
+      },
+      {
+        "max_rhat": 1.003,
+        "min_ess": 1308.0,
+        "gradients": 458595,
+        "seconds": 3.618908,
+        "divergences": 0,
+        "leapfrog_per_draw": 39.6,
+        "rank": [
+          32,
+          32
+        ]
       }
     ]
   }

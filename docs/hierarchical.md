@@ -103,7 +103,8 @@ runs clear it (pop has ESS 449 to 503), but an earlier pair with the same
 settings fell just short (ESS 363 to 370). Splitting the sampler's sums across
 threads changes rounding and therefore the chains' paths, so treat the large
 model as borderline. A longer run, or better mass-matrix adaptation, is the
-fix. Stan's shorter run does not meet the bar. rustmc is far from it: its four
+fix: the optional low-rank metric (below) halved the gradients per effective
+draw in one pair of runs. Stan's shorter run does not meet the bar. rustmc is far from it: its four
 chains disagree about pop (1.51, 1.31, 1.54, 1.44).
 
 **Agreement of posterior means** (max difference over pop, beta and terminal
@@ -178,17 +179,94 @@ differs by more than 3 MCSE in any pair where both runs mixed.
   across series, Mint's own `exp`, and statement absorption made the gradient
   1.7 to 1.8x faster, within 2 to 4% of the hand-written Rust. Whole small runs went
   from 8.4 to 6.7 s.
-- **Tried and not adopted: gradient-informed metric adaptation.** nutpie's
+- **Tried and not adopted: gradient-informed diagonal metric.** nutpie's
   `sqrt(var(draws) / var(gradients))` diagonal metric (`MINT_METRIC=grad`)
   halved the trajectory length on the small model (127 leapfrog steps per
-  draw instead of 255). But the lowest ESS fell from about 2,080 to about 380,
-  so the effective draws per gradient fell about 3.5x. Starting it from the
-  identity instead of the initial gradient (`MINT_METRIC_INIT=0`) did not
-  change that. On eight schools and logistic regression the two metrics'
-  ranges over 5 seeds overlap, so no difference was found there. Stan's
-  metric stays the default. Why the gradient metric does badly here was not
-  established. The full comparison is `bench/metric_experiment.py`, with
-  results in `bench/metric_results.json`.
+  draw instead of 255). But the lowest ESS fell from about 2,360 to about 410
+  (medians over 6 seeds), so the effective draws per gradient fell about 3.7x.
+  Starting it from the identity instead of the initial gradient
+  (`MINT_METRIC_INIT=0`) did not change that. On logistic regression the two
+  metrics' ranges over 5 seeds overlap. On eight schools it gave 44 to 50
+  effective draws per 1000 gradients against 32 to 38 for Stan's metric, a
+  measured but small-model-only gain. Stan's metric stays the default. Why
+  the gradient metric does badly on the time series is not established.
+- **An option, not the default: a low-rank metric (`MINT_METRIC=lowrank`).**
+  The time-series posterior is badly conditioned for Stan's diagonal metric.
+  In the coordinates that metric uses, the posterior precision (computed
+  exactly at the posterior mean of the small model, which is close to
+  Gaussian: its variances match the draws' to within 15%) has eigenvalues
+  from 0.2 to 3,227, so the narrowest direction is 126 times narrower than
+  the widest. Roughly, that ratio sets the number of leapfrog steps. Most of
+  it comes from a few directions: correcting the 20 narrowest would bring it
+  to 18, the 50 narrowest to 8. Tried on 500 draws from that Gaussian (the
+  size of the last warmup window), a dense metric from their sample
+  covariance, shrunk towards the diagonal, only brought 126 to about 102: in
+  3,171 dimensions 500 draws barely show the narrow directions. Directions
+  taken from the covariance of the draws' gradients, which for a Gaussian is
+  the precision, brought it to 14 to 19 with 24 to 32 directions.
+
+  The option adds to Stan's diagonal metric up to 24 directions estimated
+  from the gradients of each warmup window's draws, as nutpie's low-rank
+  adaptation does. The mechanism is described in
+  [architecture.md](architecture.md#runtime-runtimemint_rtc). Results from
+  `bench/metric_experiment.py` (4 chains, 1000 + 1000, serial sampler;
+  per-seed figures in `bench/metric_results.json`), and for the large model
+  one run of `examples/dynamic_poisson.mint` on the large data per metric:
+
+  | model | metric | seeds | lowest ESS per 1000 gradients, median (range) | leapfrog steps per draw, median | max R-hat |
+  |---|---|---|---|---|---|
+  | eight schools | Stan | 5 | 37 (32 to 38) | 9.4 | 1.001 |
+  | eight schools | low-rank | 5 | 40 (34 to 45) | 8.9 | 1.001 |
+  | logistic regression | Stan | 5 | 89 (84 to 97) | 7.0 | 1.001 |
+  | logistic regression | low-rank | 5 | 137 (131 to 150) | 7.0 | 1.000 |
+  | time series, D = 3,171 | Stan | 6 | 1.17 (1.06 to 1.31) | 255 | 1.003 |
+  | time series, D = 3,171 | low-rank | 6 | 4.65 (3.81 to 5.34) | 59 | 1.002 |
+  | time series, D = 37,901 | Stan | 1 | 0.11 | 511 | 1.002 |
+  | time series, D = 37,901 | low-rank | 1 | 0.21 | 255 | 1.008 |
+
+  - On the small time series every low-rank seed beats every Stan seed;
+    seed by seed the factor is 3.4 to 5.0.
+  - On logistic regression the low-rank metric keeps one direction in every
+    run; in the runs inspected its variance along that direction was 2.4 to
+    2.7 times what the diagonal metric assumes. The gain is 1.5x, and the
+    ranges do not overlap.
+  - On eight schools the low-rank metric ends warmup with 0 or 1 directions,
+    so it is nearly the diagonal metric, and the ranges overlap: no
+    difference was found.
+  - The large model ran once per metric (seed 11, 3 sampler threads per
+    chain), so its factor of 1.9 is a single pair of runs. It has 250 series
+    and probably many more narrow directions than 24, which would limit the
+    gain; that was not measured. By the runtime's own estimates both runs
+    had R-hat at most 1.01 and lowest ESS above 400 (410 and 418, both for
+    pop); these are not the ArviZ figures used for the mixing bar above.
+  - Per second the gain is smaller, because each leapfrog step makes two
+    more passes over 24 directions, which on the small model cost more than
+    the model's own gradient. On the small time series the low-rank metric
+    gave a median of 838 lowest-ESS per second (673 to 1,016) against 589
+    (528 to 664), with other jobs on the machine (load average 1 to 7 on 24
+    hardware threads during these runs). The large pair is not comparable
+    in wall time: the two runs met very different loads.
+  - More directions is not better: with 32 the small time series gave 3.00
+    (2.56 to 3.31), with a median of 35 leapfrog steps per draw instead of 59
+    and a lower lowest ESS (median 1,434 against 2,610). 16 gave 3.59 (3.44
+    to 4.01). The default of 24 was chosen on these runs, so it is tuned to
+    this model.
+  - Posterior means agree with the default metric's about as well as two
+    runs with the same metric agree with each other. Over all 3,171
+    parameters of the small model, with Monte Carlo standard errors from
+    batch means, three low-rank against Stan-metric pairs of runs had 6, 6
+    and 7 parameters beyond 3 MCSE and a largest difference of 3.6 to 3.9
+    MCSE; four pairs with the same metric had 6 to 9 beyond 3 MCSE and a
+    largest of 3.4 to 3.9. On the large model, of pop, beta and the terminal
+    states (501 quantities), one differs from the stored default run by more
+    than 3 MCSE (3.2). The posterior sd of pop over seeds 1 to 4 was 0.121
+    to 0.123 with the default metric and 0.121 to 0.126 with the low-rank
+    one; Stan gives 0.121. These comparisons were made with scripts that are
+    not part of the repository.
+
+  It is not the default: it was better per gradient where it found
+  directions, but four models are a small sample, its rank was tuned on one
+  of them, and it keeps up to 256 MB of warmup draws per chain.
 
 ## Caveats
 

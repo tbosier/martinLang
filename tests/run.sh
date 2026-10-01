@@ -320,6 +320,35 @@ PY
 check_eight serial MINT_THREADS_PER_CHAIN=1
 check_eight "3 threads per chain" MINT_THREADS_PER_CHAIN=3
 check_eight "gradient metric" MINT_METRIC=grad
+check_eight "low-rank metric" MINT_METRIC=lowrank
+# cutoff 1 keeps every direction: a dense metric (rank 10 here), threaded path
+check_eight "low-rank metric, full rank, 3 threads" MINT_METRIC=lowrank MINT_LOWRANK_CUTOFF=1 MINT_THREADS_PER_CHAIN=3
+
+# ---- a Gaussian posterior with known mean and covariance, much narrower
+# than the prior along 8 dense directions: every whitened first, second and
+# cross moment within its Monte Carlo error (tests/metric/check_gauss.py),
+# for the default metric and the low-rank one (which must find the 8
+# directions).
+
+python3 tests/metric/make_gauss.py
+if build tests/metric/gauss.mint gauss; then
+  check_gauss() {
+    local label=$1; shift
+    local out
+    rm -f build/gauss.draws
+    out=$(env "$@" MINT_DRAWS=build/gauss.draws ./build/gauss 2>&1) \
+      || { bad "Gaussian sampler run ($label)"; echo "$out"; return; }
+    python3 tests/metric/check_gauss.py build/gauss.draws && pass "Gaussian posterior moments ($label)" \
+      || bad "Gaussian posterior moments ($label)"
+    if [ "$label" != "default metric" ]; then
+      grep -qF "metric=lowrank (rank 8 to 8)" <<<"$out" && pass "low-rank metric finds the 8 narrow directions ($label)" \
+        || { bad "low-rank metric rank ($label)"; grep -F "metric=" <<<"$out"; }
+    fi
+  }
+  check_gauss "default metric" MINT_THREADS_PER_CHAIN=1
+  check_gauss "low-rank metric" MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=1
+  check_gauss "low-rank metric, 3 threads" MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=3
+fi
 
 # When OpenMP runs a smaller team than requested, the sampler must follow the
 # team it got: with a limit of one thread the draws equal the serial ones.
@@ -327,5 +356,9 @@ serial=$(MINT_THREADS_PER_CHAIN=1 ./build/eight_schools 2>/dev/null)
 limited=$(MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/eight_schools 2>/dev/null)
 [ -n "$serial" ] && [ "$serial" = "$limited" ] && pass "sampler follows a reduced OpenMP team" \
   || bad "reduced OpenMP team changed the draws"
+serial=$(MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=1 ./build/gauss 2>/dev/null)
+limited=$(MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/gauss 2>/dev/null)
+[ -n "$serial" ] && [ "$serial" = "$limited" ] && pass "low-rank sampler follows a reduced OpenMP team" \
+  || bad "reduced OpenMP team changed the low-rank draws"
 
 exit $fail

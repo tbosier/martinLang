@@ -356,9 +356,53 @@ is checked against the exact formula at both sizes.
 - **Metric adaptation.** The default is Stan's: the regularised variance of
   the warmup draws. `MINT_METRIC=grad` instead uses
   `sqrt(var(draws) / var(gradients))`, as nutpie does. It is not the default:
-  over several seeds it made no measurable difference on eight schools or
-  logistic regression, and gave about 3.5x fewer effective draws per gradient
-  on the dynamic Poisson model (`bench/metric_experiment.py`).
+  over several seeds it made no measurable difference on logistic
+  regression, gave somewhat more effective draws per gradient on eight
+  schools, and about 3.7x fewer on the dynamic Poisson model
+  (`bench/metric_experiment.py`).
+- **Low-rank metric (`MINT_METRIC=lowrank`).** The inverse metric is Stan's
+  diagonal `v` plus a correction along at most k directions (default 24,
+  `MINT_LOWRANK_K`): `diag(v) + S U diag(lam - 1) U' S`, with `S = diag(sqrt(v))`
+  and orthonormal columns `U`. It is re-estimated at the end of each warmup
+  window from the window's draws and their gradients (the most recent ones
+  that fit in `MINT_LOWRANK_MB`, default 256 MB per chain):
+  - In coordinates scaled by `S`, the gradient covariance of a Gaussian
+    posterior is its precision, so the leading eigenvectors of the sample
+    gradient covariance (2k candidates, from an n × n Gram matrix when there
+    are fewer draws than parameters) estimate the directions in which the
+    posterior is narrower than the diagonal assumes.
+  - Within their span the covariance is estimated by the SPD geometric mean
+    of the draws' covariance and the inverse of the gradients' covariance, as
+    in nutpie's low-rank adaptation. With the exact covariances of a Gaussian
+    and a span that the precision maps to itself, that mean is the exact
+    covariance; with sample covariances, a span chosen from them, a small
+    ridge (`MINT_LOWRANK_GAMMA`, default 1e-5) and the limits below, it is an
+    estimate. Its eigenvalues outside [1/2, 2] (`MINT_LOWRANK_CUTOFF`) are
+    kept, largest |log lam| first, each limited to [1e-4, 1e4]. A window whose
+    directions overflow single precision falls back to the diagonal.
+  - Cost: two O(D k) passes per leapfrog step. The first is the position
+    update; the second projects the new gradient (for the next position
+    update) and the new momentum. Every momentum and momentum sum carries its
+    k projections, so the kinetic energy and the no-U-turn checks need only
+    O(k) more work, and the kinetic energy is computed from the momentum
+    itself, not from projections carried along the trajectory. The
+    directions are stored in single precision in 8 × 8 tiles; projections are
+    accumulated in double. The position update sums in single precision. Any
+    map of the momentum that is odd keeps the leapfrog volume-preserving and
+    as reversible as any floating-point leapfrog, so this affects how well
+    energy is conserved, not the distribution sampled. Momenta are drawn
+    through a k × k matrix that makes their covariance the inverse of the
+    kinetic energy's matrix for the stored, rounded directions (checked to
+    about 1e-13 on random metrics).
+  - With the default metric nothing changes: its draws are bit-identical to
+    those before the option existed (checked on eight schools and the dynamic
+    Poisson model, serial and threaded).
+  - `tests/run.sh` checks it on eight schools and on a 70-dimensional
+    Gaussian whose posterior is 4 to 40 times narrower than the prior along 8
+    dense directions. There, every whitened first, second and cross moment
+    must be within 4 Monte Carlo standard errors of the exact value (5 for
+    the 2,415 cross moments). A deliberately wrong momentum covariance fails
+    that check, its second moments by 32 standard errors.
 - Chains run on separate threads. The generated `logp` functions only read the
   data, so they are safe to call concurrently.
 - The summary reports the mean, sd, quantiles, split R-hat and an

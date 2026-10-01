@@ -161,6 +161,11 @@ Useful environment variables for compiled programs:
   passes use. The default is 1 below 8,192 parameters.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+- `MINT_METRIC=lowrank` adds to Stan's diagonal metric up to 24 directions
+  (`MINT_LOWRANK_K`) estimated from the gradients of the warmup draws. On
+  the 3,171-parameter time-series model it needed 4x fewer gradients per
+  effective draw (median over 6 seeds); see
+  [hierarchical.md](docs/hierarchical.md).
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
