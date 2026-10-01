@@ -170,11 +170,10 @@ fn for_shape(g: &mut Mg, sh: &SShape, body: impl FnOnce(&mut Mg, &Ix)) {
             let cm = g.is_cm(r, c);
             let (r, c) = (g.dim(r), g.dim(c));
             if cm {
-                // column-major storage: element (row, col) is at col * rows + row
+                // the scan layout (see Mg::cm_row)
                 for_range(g, "0", &c, |g, col| {
-                    let base = g.f.imul(col, &r);
                     for_range(g, "0", &r, |g, row| {
-                        let flat = g.f.iadd(&base, row);
+                        let flat = g.cm_flat(row, col, &r, &c);
                         body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
                     });
                 });
@@ -602,6 +601,41 @@ impl<'a> Mg<'a> {
 
     fn is_cm(&self, r: &Dim, c: &Dim) -> bool {
         self.cm.iter().any(|(a, b)| a == r && b == c)
+    }
+
+    /// Where row `row` of a matrix in the scan layout lives: element (row,
+    /// col) is at base + col * stride. The rows are stored in blocks of
+    /// CM_BLOCK (a fused scan kernel's group of rows), each block column by
+    /// column, CM_BLOCK elements per column; the last rows mod CM_BLOCK rows
+    /// form a last block of their own, as many elements per column. So a
+    /// group's elements are one contiguous range, and so are a thread's
+    /// groups.
+    fn cm_row(&mut self, row: &str, rows: &str, cols: &str) -> (String, String) {
+        let b = CM_BLOCK.to_string();
+        let nfull = self.f.iop("sdiv", rows, &b);
+        let full = self.f.imul(&nfull, &b);
+        let infull = self.f.reg();
+        self.f.emit(format!("{infull} = icmp slt i64 {row}, {full}"));
+        let rb = self.f.iop("srem", row, &b);
+        let r0 = self.f.iop("sub nsw", row, &rb);
+        let fb = self.f.imul(&r0, cols);
+        let fb = self.f.iadd(&fb, &rb);
+        let tb = self.f.imul(&full, cols);
+        let to = self.f.iop("sub nsw", row, &full);
+        let tb = self.f.iadd(&tb, &to);
+        let ts = self.f.iop("sub nsw", rows, &full);
+        let base = self.f.reg();
+        self.f.emit(format!("{base} = select i1 {infull}, i64 {fb}, i64 {tb}"));
+        let stride = self.f.reg();
+        self.f.emit(format!("{stride} = select i1 {infull}, i64 {b}, i64 {ts}"));
+        (base, stride)
+    }
+
+    /// Index of element (row, col) of a matrix in the scan layout.
+    fn cm_flat(&mut self, row: &str, col: &str, rows: &str, cols: &str) -> String {
+        let (b, st) = self.cm_row(row, rows, cols);
+        let o = self.f.imul(col, &st);
+        self.f.iadd(&b, &o)
     }
 
     /// Emits `store(p[col], acc)` style flushes of column accumulators.
@@ -1250,27 +1284,29 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     g.finish(&header, &["ret void".into()]);
 }
 
-/// dst[col * rows + row] = src[row * cols + col]
+/// Row-major src into the scan layout (see Mg::cm_row) in dst.
 fn transpose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
     for_range(g, "0", rows, |g, row| {
         let base = g.f.imul(row, cols);
+        let (b, st) = g.cm_row(row, rows, cols);
         for_range(g, "0", cols, |g, col| {
             let i = g.f.iadd(&base, col);
             let x = g.f.load(src, &i);
-            let j = g.f.imul(col, rows);
-            let j = g.f.iadd(&j, row);
+            let j = g.f.imul(col, &st);
+            let j = g.f.iadd(&j, &b);
             g.f.store(&x, dst, &j);
         });
     });
 }
 
-/// dst[row * cols + col] = src[col * rows + row]
+/// The scan layout in src back to row-major in dst.
 fn untranspose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
     for_range(g, "0", rows, |g, row| {
         let base = g.f.imul(row, cols);
+        let (b, st) = g.cm_row(row, rows, cols);
         for_range(g, "0", cols, |g, col| {
-            let j = g.f.imul(col, rows);
-            let j = g.f.iadd(&j, row);
+            let j = g.f.imul(col, &st);
+            let j = g.f.iadd(&j, &b);
             let x = g.f.load(src, &j);
             let i = g.f.iadd(&base, col);
             g.f.store(&x, dst, &i);
@@ -1551,21 +1587,22 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                     rows_dot_blocked(&mut g, &mp, &vp, &c, "0", &n, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
                 }
                 M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
-                    // Column-major: column c of the running sum is column c-1
-                    // plus column c of the operand, a contiguous vector loop.
+                    // Scan layout: column c of the running sum is column c-1
+                    // plus column c of the operand.
                     let (rows, cols) = (g.dim(rd), g.dim(cd));
                     let fw2 = fw.clone();
                     let pass = |g: &mut Mg, lo: &str, hi: &str, first: bool| {
                         for_range(g, lo, hi, |g, col| {
-                            let base = g.f.imul(col, &rows);
                             for_range(g, "0", &rows, |g, row| {
-                                let flat = g.f.iadd(&base, row);
+                                let (b, st) = g.cm_row(row, &rows, &cols);
+                                let o = g.f.imul(col, &st);
+                                let flat = g.f.iadd(&b, &o);
                                 let ix = Ix { flat: flat.clone(), row: row.to_string(), col: col.to_string() };
                                 let v = g.fwd(inner, &ix, &mut HashMap::new());
                                 let s = if first {
                                     v
                                 } else {
-                                    let p = g.f.iop("sub nsw", &flat, &rows);
+                                    let p = g.f.iop("sub nsw", &flat, &st);
                                     let prev = g.f.load(&fw2, &p);
                                     g.f.fadd(&prev, &v)
                                 };
@@ -1649,7 +1686,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 for_range(&mut g, "0", &n, |g, i| body(g, &Ix::vec(i)));
             }
             SShape::Mat(r, c) if g.is_cm(r, c) => {
-                // Column-major: column outer, row inner (contiguous). Gradients of
+                // Scan layout: column outer, row inner. Gradients of
                 // column-indexed parameters are summed in registers per column.
                 let mut cp = Vec::new();
                 axis_params(lhs, Ax::Col, &mut cp);
@@ -1659,9 +1696,8 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 let (r, c) = (g.dim(r), g.dim(c));
                 for_range(&mut g, "0", &c, |g, col| {
                     g.col_accs_begin(&cp);
-                    let base = g.f.imul(col, &r);
                     for_range(g, "0", &r, |g, row| {
-                        let flat = g.f.iadd(&base, row);
+                        let flat = g.cm_flat(row, col, &r, &c);
                         body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
                     });
                     g.col_accs_flush(&cp, col);
@@ -1726,14 +1762,15 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                         for_range(g, lo, hi, |g, k| {
                             let col = g.f.iop("sub nsw", &last, k);
                             g.col_accs_begin(&cp);
-                            let base = g.f.imul(&col, &rows);
                             for_range(g, "0", &rows, |g, row| {
-                                let flat = g.f.iadd(&base, row);
+                                let (b, st) = g.cm_row(row, &rows, &cols);
+                                let o = g.f.imul(&col, &st);
+                                let flat = g.f.iadd(&b, &o);
                                 let a = g.f.load(&ad2, &flat);
                                 let sum = if first {
                                     a
                                 } else {
-                                    let nx = g.f.iadd(&flat, &rows);
+                                    let nx = g.f.iadd(&flat, &st);
                                     let b = g.f.load(&ad2, &nx);
                                     let s = g.f.fadd(&a, &b);
                                     g.f.store(&s, &ad2, &flat);
@@ -1864,26 +1901,20 @@ fn gen_leap_blocks(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)], 
     g.finish(&header, &[format!("ret i64 {k}")]);
 }
 
-/// The covered parameters among a kernel's `owned`: (offset, length) in
-/// theta.
-fn leap_blocks_of(g: &mut Mg, owned: &[String]) -> Vec<(String, String)> {
+/// The leap entry point: rows r0..r1 of the covered parameters among
+/// `owned` are final (r0 a multiple of CM_BLOCK, and r1 too unless it is
+/// the last row). In the scan layout (Mg::cm_row) those rows are one
+/// contiguous range of each parameter, which the hook takes, as `slot`.
+fn leap_hook_calls(g: &mut Mg, owned: &[String], slot: &str, r0: &str, r1: &str, hook: &str, hctx: &str) {
     let cov: Vec<(String, String)> = g.leap_cov.iter().filter(|(n, _)| owned.contains(n)).cloned().collect();
-    let mut out = Vec::new();
     for (n, off) in cov {
-        let Some((_, Ty::Matrix(r, c, _))) = g.leap_tm_params.iter().find(|(m, _)| *m == n).cloned() else { unreachable!() };
-        let (r, c) = (g.dim(&r), g.dim(&c));
-        let len = g.f.imul(&r, &c);
-        out.push((off, len));
-    }
-    out
-}
-
-/// The leap entry point, after a kernel run on the calling thread alone:
-/// all of the covered parameters among `owned` are final; the hook (as
-/// thread `slot` of `nthreads`) takes each.
-fn leap_hook_calls(g: &mut Mg, owned: &[String], slot: &str, nthreads: &str, hook: &str, hctx: &str) {
-    for (off, len) in leap_blocks_of(g, owned) {
-        g.f.emit(format!("call void {hook}(ptr {hctx}, i64 {slot}, i64 {nthreads}, i64 {off}, i64 {len})"));
+        let Some((_, Ty::Matrix(_, c, _))) = g.leap_tm_params.iter().find(|(m, _)| *m == n).cloned() else { unreachable!() };
+        let cols = g.dim(&c);
+        let a = g.f.imul(r0, &cols);
+        let a = g.f.iadd(&off, &a);
+        let n = g.f.iop("sub nsw", r1, r0);
+        let len = g.f.imul(&n, &cols);
+        g.f.emit(format!("call void {hook}(ptr {hctx}, i64 {slot}, i64 {a}, i64 {len})"));
     }
 }
 
@@ -2352,6 +2383,8 @@ fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
 /// Rows per group in a fused scan kernel: UNROLL vectors of 4 lanes.
 const KERNEL_UNROLL: u32 = 2;
 const KERNEL_WIDTH: u32 = 4 * KERNEL_UNROLL;
+/// Rows per block of the scan layout (see `Mg::cm_row`): a kernel's group.
+const CM_BLOCK: u32 = KERNEL_WIDTH;
 
 /// A sum of terms: its backward sweep needs no values of its parts.
 fn additive(e: &M) -> bool {
@@ -2595,7 +2628,7 @@ fn gen_fused_scan<'s>(
             reduce_vec(g);
             let lp1 = [lp.to_string()];
             for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
-            leap_hook_calls(g, owned, "0", "1", "%hook", "%hctx");
+            leap_hook_calls(g, owned, "0", "0", &rows, "%hook", "%hctx");
         };
         if let Some(nt) = &par {
             // With more than one thread requested, the outlined kernel (its
@@ -2607,7 +2640,7 @@ fn gen_fused_scan<'s>(
             g.f.emit(format!("{c} = icmp sgt i64 {nt}, 1"));
             g.f.emit(format!("br i1 {c}, label %{l_par}, label %{l_ser}"));
             g.f.start_block(&l_par);
-            let u = par_kernel_call(g, tm, &kn, &cp, owned, &scalars, &groups, nt, lp);
+            let u = par_kernel_call(g, tm, &kn, &cp, &scalars, &groups, nt, lp);
             g.f.emit(format!("store i64 {u}, ptr {used_at}"));
             g.f.br(&l_join);
             g.f.start_block(&l_ser);
@@ -2621,7 +2654,7 @@ fn gen_fused_scan<'s>(
     } else {
         let lp1 = [lp.to_string()];
         for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
-        leap_hook_calls(g, owned, "0", "1", "%hook", "%hctx");
+        leap_hook_calls(g, owned, "0", "0", &rows, "%hook", "%hctx");
     }
     let used = if par.is_some() {
         let r = g.f.reg();
@@ -2695,6 +2728,7 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
     let kn = format!("mint_model_{}_{}scan{k}", tm.name, if leap { "leap_" } else { "" });
     let pos = pos_vectors(tm);
     let ncp = sc.cp.len();
+    let leap_base = CTX_FIXED + ncp + 2 * pos.len() + scalars.len();
     let covered: Vec<String> = g.leap_cov.iter().map(|(n, _)| n.clone()).collect();
     // The same per-thread slots as the caller's buffers, requested at the
     // same sizes: on the calling thread they are the caller's own buffers,
@@ -2776,9 +2810,23 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let r0 = km.f.imul(b, &wide);
             scan_group(km, &sck, lanes, UNROLL, &r0, &lpv, &vps);
         });
+        // the leap entry point: this thread's rows are final, one contiguous
+        // range of each covered parameter (the scan layout)
+        let mut hp = Vec::new();
+        if leap {
+            for j in 0..2 {
+                let a = km.f.reg();
+                km.f.emit(format!("{a} = getelementptr inbounds i64, ptr %ctx, i64 {}", leap_base + j));
+                let v = km.f.reg();
+                km.f.emit(format!("{v} = load ptr, ptr {a}"));
+                hp.push(v);
+            }
+            let r0 = km.f.imul("%g0", &wide);
+            let r1 = km.f.imul("%g1", &wide);
+            leap_hook_calls(&mut km, sc.owned, "%tid", &r0, &r1, &hp[0], &hp[1]);
+        }
         // thread 0 (the calling thread) also runs the single vectors and the
-        // leftover rows, so that every row is done when the team's threads
-        // meet (the leap entry point's hook runs after that)
+        // leftover rows (and their leap hook)
         let lp1 = km.f.acc_new(&fconst(0.0));
         {
             let rows = sck.rows.clone();
@@ -2798,6 +2846,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
                 });
                 let lpa = [lp1.clone()];
                 for_range(km, &done, &rows, |km, r| scan_group(km, &sck, 1, 1, r, &lpa, &[]));
+                if leap {
+                    leap_hook_calls(km, sc.owned, "%tid", &done_wide, &rows, &hp[0], &hp[1]);
+                }
             });
         }
         km.f.lanes = lanes;
@@ -2876,9 +2927,11 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
 /// the register holding the number of threads that ran (the number of
 /// column partial-sum slices to reduce).
 #[allow(clippy::too_many_arguments)]
-fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], owned: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
+fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
     let pos = pos_vectors(tm);
-    let nslots = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let leap = !g.leap_cov.is_empty();
+    let leap_base = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let nslots = leap_base + if leap { 2 } else { 0 };
     let ctx = g.f.alloca(&format!("[{nslots} x i64]"));
     let out_lp = g.f.alloca(&format!("[{PAR_MAX_THREADS} x double]"));
     let out_sc = g.f.alloca(&format!("[{} x double]", PAR_MAX_THREADS * scalars.len().max(1)));
@@ -2905,29 +2958,14 @@ fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], owned: &[St
         let v = g.f.opnd(&v);
         put(g, CTX_FIXED + cp.len() + 2 * pos.len() + j, "double", &v);
     }
-    let blocks = leap_blocks_of(g, owned);
-    let used = g.f.reg();
-    if blocks.is_empty() {
-        g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
-        g.f.emit(format!("{used} = call i64 @mint_par_groups(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt})"));
-    } else {
-        // The leap entry point: once every thread of the team is done
-        // (all rows of the covered parameters are final), each runs the
-        // hook on its share of each covered block (mint_par_groups_leap).
-        let n = blocks.len();
-        let arr = g.f.alloca(&format!("[{} x i64]", 2 * n));
-        for (k, (off, len)) in blocks.iter().enumerate() {
-            for (j, v) in [off, len].iter().enumerate() {
-                let a = g.f.reg();
-                g.f.emit(format!("{a} = getelementptr inbounds i64, ptr {arr}, i64 {}", 2 * k + j));
-                g.f.emit(format!("store i64 {v}, ptr {a}"));
-            }
-        }
-        g.m.declare("declare i64 @mint_par_groups_leap(ptr, ptr, i64, i64, ptr, ptr, ptr, i64)");
-        g.f.emit(format!(
-            "{used} = call i64 @mint_par_groups_leap(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt}, ptr %hook, ptr %hctx, ptr {arr}, i64 {n})"
-        ));
+    if leap {
+        // the leap entry point's hook and its context
+        put(g, leap_base, "ptr", "%hook");
+        put(g, leap_base + 1, "ptr", "%hctx");
     }
+    g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
+    let used = g.f.reg();
+    g.f.emit(format!("{used} = call i64 @mint_par_groups(ptr @{kn}, ptr {ctx}, i64 {groups}, i64 {nt})"));
     let ns = scalars.len().to_string();
     for_range(g, "0", &used, |g, t| {
         let v = g.f.load(&out_lp, t);
@@ -2984,6 +3022,13 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
         }
     };
     let r0s: Vec<String> = (0..u).map(|k| g.f.iadd(r0, &(k * l).to_string())).collect();
+    // where each copy's rows live (the scan layout, Mg::cm_row): element
+    // (r0s[k] + lane, col) is at base + col * stride + lane
+    let rbs: Vec<(String, String)> = r0s.iter().map(|r| g.cm_row(r, &rows, &cols)).collect();
+    let flat_at = |g: &mut Mg, col: &str, k: usize| {
+        let o = g.f.imul(col, &rbs[k].1);
+        g.f.iadd(&rbs[k].0, &o)
+    };
     // The adjoints of this group's running sums live in a small contiguous
     // scratch, [col * (u * l) + k * l + lane], reused by every group: it
     // stays in L1, where the full-matrix index would scatter it.
@@ -3034,9 +3079,8 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     let ex_p = if lean { s_p[0].clone() } else { ex_p };
     if split {
         for_range(g, "0", &cols, |g, col| {
-            let base = g.f.imul(col, &rows);
             for k in 0..u as usize {
-                let flat = g.f.iadd(&base, &r0s[k]);
+                let flat = flat_at(g, col, k);
                 let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
                 let at = ad_at(g, col, k);
                 let mut vals = HashMap::new();
@@ -3066,11 +3110,10 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // C: the density and its derivatives at column col (each running
     // sum's adjoint stored); R: the reverse running sums at column col
     let c_col = |g: &mut Mg, col: &str| {
-        let base = g.f.imul(col, &rows);
     for k in 0..u as usize {
         use_row_accs(g, k);
         use_copy_accs(g, k);
-        let flat = g.f.iadd(&base, &r0s[k]);
+        let flat = flat_at(g, col, k);
         let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
         let at = ad_at(g, col, k);
         let mut vals = HashMap::new();
@@ -3125,11 +3168,10 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     }
     };
     let r_col = |g: &mut Mg, col: &str| {
-        let base = g.f.imul(col, &rows);
     for k in 0..u as usize {
         use_row_accs(g, k);
         use_copy_accs(g, k);
-        let flat = g.f.iadd(&base, &r0s[k]);
+        let flat = flat_at(g, col, k);
         let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
         let at = ad_at(g, col, k);
         g.ad_at = Some(at.clone());

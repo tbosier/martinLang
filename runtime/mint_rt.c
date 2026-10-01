@@ -241,18 +241,19 @@ typedef void (*mint_constrain_fn)(const double *unc, double *out);
 
 // The fused leapfrog (optional, generated for models with a fused scan
 // kernel; see gen_logp in compiler/src/model.rs). leap(theta, grad, hook,
-// hctx) is the model's logp, except that a fused scan kernel that owns
-// matrix parameters runs through mint_par_groups_leap: once every thread of
-// the team has finished its rows (so the gradient of those parameters is
-// final), each thread t of the T calls hook(hctx, t, T, off, len) for each
-// such parameter (theta[off .. off + len)), and the sampler does its leaf
-// work on thread t's share of it there (leaf_share), inside the kernel's
-// parallel region, instead of in a parallel region of its own. When the
-// kernel runs on the calling thread alone, the generated code calls
-// hook(hctx, 0, 1, off, len) itself. leap_blocks(out) writes (offset,
-// length) of each parameter the hooks cover and returns their number; the
-// sampler does the rest of theta itself.
-typedef void (*mint_leap_hook)(void *hctx, int64_t slot, int64_t nthreads, int64_t off, int64_t len);
+// hctx) is the model's logp, except that each thread of a fused scan kernel
+// that owns matrix parameters, once the gradient of its rows is final,
+// calls hook(hctx, slot, lo, len): in the scan layout a thread's rows are
+// one contiguous range theta[lo .. lo + len) of each such parameter. The
+// sampler does its leaf work on that range there (leaf_block): on the
+// thread that has just written its gradient and read its position, inside
+// the kernel's parallel region, instead of in a parallel region of its own
+// split differently. slot is the kernel's thread index (0 for the calling
+// thread, which also takes the rows left over after the groups).
+// leap_blocks(out) writes (offset, length) of each parameter the hooks
+// cover and returns their number; the sampler does the rest of theta
+// itself.
+typedef void (*mint_leap_hook)(void *hctx, int64_t slot, int64_t lo, int64_t len);
 typedef double (*mint_leap_fn)(const double *theta, double *grad, mint_leap_hook hook, void *hctx);
 typedef int64_t (*mint_leap_blocks_fn)(int64_t *out);
 #define MAX_LEAP_BLOCKS 64
@@ -371,30 +372,6 @@ int64_t mint_par_groups(mint_group_fn fn, void *ctx, int64_t ngroups, int64_t nt
     int t = omp_get_thread_num(), T = omp_get_num_threads();
     if (t == 0) used = T;
     fn(ctx, ngroups * t / T, ngroups * (t + 1) / T, t);
-  }
-  return used;
-}
-
-// mint_par_groups for the fused leapfrog's entry point (see mint_leap_fn):
-// once every thread of the team is done with its groups, each runs hook on
-// its share of each of the nb blocks (offset, length) of theta.
-int64_t mint_par_groups_leap(mint_group_fn fn, void *ctx, int64_t ngroups, int64_t nt, void (*hook)(void *, int64_t, int64_t, int64_t, int64_t),
-                             void *hctx, const int64_t *blocks, int64_t nb) {
-  if (nt > ngroups) nt = ngroups;
-  if (nt > MAX_NT) nt = MAX_NT;
-  if (nt <= 1) {
-    fn(ctx, 0, ngroups, 0);
-    for (int64_t b = 0; b < nb; b++) hook(hctx, 0, 1, blocks[2 * b], blocks[2 * b + 1]);
-    return 1;
-  }
-  int used = 1;
-#pragma omp parallel num_threads((int)nt)
-  {
-    int t = omp_get_thread_num(), T = omp_get_num_threads();
-    if (t == 0) used = T;
-    fn(ctx, ngroups * t / T, ngroups * (t + 1) / T, t);
-#pragma omp barrier
-    for (int64_t b = 0; b < nb; b++) hook(hctx, t, T, blocks[2 * b], blocks[2 * b + 1]);
   }
   return used;
 }
@@ -692,20 +669,16 @@ static void leaf_work(LeafJob *J, int t, int T) {
   leaf_part(J, J->s->part[t], k, acc, 0);
 }
 
-// The fused leapfrog's hook (see mint_leap_fn): leaf work on thread slot's
-// share of theta[off .. off + len) when nthreads threads split it, in
-// blocks of LN counted from off (as split_range does from 0); the lanes
-// start at the share's first element, and the totals are added to the
-// slot.
-static void leaf_share(void *ctx, int64_t slot, int64_t nthreads, int64_t off, int64_t len) {
+// The fused leapfrog's hook (see mint_leap_fn): leaf work on
+// theta[lo .. lo + len), with the lanes counted from lo; the totals are
+// added to the slot.
+static void leaf_block(void *ctx, int64_t slot, int64_t lo, int64_t len) {
   LeafJob *J = ctx;
-  int64_t lo, hi;
-  split_range(len, (int)slot, (int)nthreads, &lo, &hi);
-  if (hi <= lo) return;
+  if (len <= 0) return;
   double k[LN] = {0};
   double acc[MAX_DEPTH + 2][6][LN];
   memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
-  leaf_range(J, off + lo, off + hi, k, acc);
+  leaf_range(J, lo, lo + len, k, acc);
   leaf_part(J, J->s->part[slot], k, acc, 1);
 }
 
@@ -807,10 +780,11 @@ static double leaf_finish(Nuts *s, St *n, double eps) {
 
 // Leaf n with the model's fused leapfrog (see mint_leap_fn): its gradient,
 // with the leaf work on the covered parameters done by the kernel's threads
-// through the hook (leaf_share), and on the rest of theta here, after it.
+// through the hook (leaf_block), and on the rest of theta here, after it.
 // The partial sums are added in slot order: the kernel's threads (each its
-// share of each covered parameter in turn, lanes counted from the share's
-// first element), then the rest. That order differs from leaf_pass's, so
+// range of each covered parameter in turn, lanes counted from the range's
+// first element; thread 0's rows left over after the groups last), then
+// the rest. That order differs from leaf_pass's, so
 // the draws differ from the runtime's own leapfrog by rounding. With s->leap_exact the hooks and the rest take only the
 // half-steps, and a leaf pass then sums in leaf_pass's order, which gives
 // exactly the runtime's draws (for testing). Returns the Hamiltonian.
@@ -820,7 +794,7 @@ static void leaf_fused_run(Nuts *s, LeafJob *J) {
   int nsum = 1 + 6 * J->nlev;
   if (s->leap_exact) J->merges = 0;
   for (int t = 0; t < nt; t++) memset(s->part[t], 0, (size_t)nsum * sizeof(double));
-  n->lp = s->leap(n->q, n->g, leaf_share, J);
+  n->lp = s->leap(n->q, n->g, leaf_block, J);
   s->n_grad++;
   s->n_fused++;
   {
