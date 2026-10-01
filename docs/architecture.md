@@ -499,9 +499,11 @@ is checked against the exact formula at both sizes.
   made with an earlier sampler, are in `bench/metric_results_diagonal.json`).
 - **Low-rank metric (`MINT_METRIC=lowrank`, opt-in).** The inverse metric is
   Stan's diagonal `v` plus a correction along at most k directions
-  (`MINT_LOWRANK_K`; by default 8, 16 or 24, the most whose single-precision
-  share per thread fits in the L2 cache: 24 at 3,171 parameters with one
-  thread per chain, 8 at 37,901 with three): `diag(v) + S U diag(lam - 1) U' S`, with
+  (`MINT_LOWRANK_K`; by default 16 or 24 if each thread's single-precision
+  share of them fits in its L2 cache, otherwise 8: 24 at 3,171 parameters
+  with one thread per chain, 8 at 37,901 with three; the threads counted are
+  those OpenMP actually gives the chain):
+  `diag(v) + S U diag(lam - 1) U' S`, with
   `S = diag(sqrt(v))` and orthonormal columns `U`. With the default metric
   nothing changes: the raw draws are bit-identical to those of the sampler
   before the option existed (checked on eight schools, logistic and linear
@@ -519,11 +521,8 @@ is checked against the exact formula at both sizes.
     adaptation. Its eigenvalues outside [1/2, 2] (`MINT_LOWRANK_CUTOFF`) are
     kept, largest |log lam| first, each limited to [1e-4, 1e4]; a small ridge
     (`MINT_LOWRANK_GAMMA`, 1e-5) keeps the covariances definite. The leading
-    eigenvectors come from Lanczos iterations with full reorthogonalisation,
-    stopped when every wanted Ritz pair has a residual below 1e-10 of the
-    largest eigenvalue (a full eigendecomposition of the 500 × 500 Gram
-    matrix took 0.27 s per chain); the D-length products are blocked and
-    use the chain's threads. A window whose directions are not finite or not
+    eigenvectors come from a full eigendecomposition of the Gram matrix; the
+    D-length products are blocked and use the chain's threads. A window whose directions are not finite or not
     independent falls back to the diagonal.
   - *Per leapfrog step: one projection and one expansion.* Every momentum,
     momentum sum and gradient carries its k projections `c = V' x`
@@ -538,8 +537,9 @@ is checked against the exact formula at both sizes.
     a barrier the same parallel region adds it to the next leaf's position,
     which the pass had already started. (When the leaf ends the new subtree,
     `leaf_start` does it in its own pass, fused with the first half-step.)
-    That is two streams over the D × k directions per leapfrog and no extra
-    pass over the state vectors or extra fork of the thread team.
+    That is two streams over the D × k directions per leapfrog, one more
+    read-modify-write of the next position, and no extra fork of the thread
+    team.
   - *Precision.* The directions are stored in single precision in tiles of
     8 directions × 8 entries. Projections are accumulated in double (the
     products of the stored values with double vectors are exact before
@@ -555,24 +555,27 @@ is checked against the exact formula at both sizes.
     values to double (about a quarter of a cycle per direction and entry on
     the Zen 3 test machine), the expansion by the bandwidth of the cache that
     holds the directions. On the 3,171-parameter model, with 24 directions
-    and one thread per chain, two profiles put the two at 0.7 to 0.9 and 0.4
-    to 0.5 times the cost of the model's gradient (on a loaded machine). On
-    the 37,901-parameter model with 3 threads per chain, a leapfrog step cost
-    about 1.2 times as much as with Stan's metric with 8 directions and 1.5
-    times with 24 (profiles of a 300 + 100 run, relative to the gradient's
-    scan kernel). The estimation at the window ends took about 0.3 s per
-    chain on the small model and 0.9 s on the large one (24 directions), over the whole
-    warmup.
+    and one thread per chain, two `perf` profiles put the two at 0.7 to 0.9
+    and 0.4 to 0.5 times the cost of the model's gradient (on a loaded
+    machine). On the 37,901-parameter model with 3 threads per chain, a
+    leapfrog step cost about 1.2 times as much as with Stan's metric with 8
+    directions and 1.5 times with 24 (profiles of a 300 + 100 run, relative
+    to the gradient's scan kernel). The estimation at the window ends took
+    about 0.3 s per chain on the small model over the whole warmup, most of
+    it the eigendecomposition for the last window's 500 draws. These
+    profiles and timings are not recorded in the repository.
   - `tests/run.sh` checks it on eight schools (also with every direction
     kept, 3 threads per chain) and on a 70-dimensional Gaussian whose
     posterior is 4 to 40 times narrower than the prior along 8 dense
     directions; every whitened first, second and cross moment must be within
     4 Monte Carlo standard errors of the exact value (5 for the 2,415 cross
-    moments), with 1 and 3 threads, and the metric must find the 8
-    directions. Pooled over 24 seeds (96 chains of 1000 draws each, run
-    outside the test suite), the largest whitened first and second moment
-    errors were 2.2 and 2.6 standard errors with one thread and 2.7 and 2.4
-    with three, against 2.2 and 2.8 for Stan's metric.
+    moments), with 1 and 3 threads, and the metric must keep 8 directions
+    (the test checks their number, not their span). Pooled over 24 seeds
+    (96 chains of 1000 draws each; `tests/metric/pool_gauss.py` on the draws
+    of `tests/metric/gauss.mint` with seeds 1 to 4 and 6 to 25, run outside
+    the test suite), the largest whitened first and second moment errors
+    were 2.2 and 2.6 standard errors with one thread and 2.7 and 2.4 with
+    three, against 2.2 and 2.8 for Stan's metric.
 - Chains run on separate threads. The generated `logp` functions only read the
   data, so they are safe to call concurrently.
 - The summary reports the mean, sd, quantiles, split R-hat and an

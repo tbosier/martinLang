@@ -519,86 +519,19 @@ static void combine_rows(const double *W, int ldw, int n, int m, const double *B
 
 // The r largest eigenvalues (w, descending) and their unit eigenvectors
 // (columns of E, n x r with leading dimension lde) of the symmetric n x n
-// matrix K. Small matrices get the full decomposition. Larger ones use
-// Lanczos iterations with full reorthogonalisation from a fixed starting
-// vector, stopped when every wanted Ritz pair has residual norm
-// |K x - theta x| <= 1e-10 theta_max (checked every 16 steps; by n steps the
-// decomposition is exact). Returns the number of pairs found (at most r).
+// matrix K, from its full eigendecomposition (n is at most the number of
+// draws in a window). Returns r (clipped to n).
 static int top_eigs(const double *K, int n, int r, double *E, int lde, double *w) {
   if (r > n) r = n;
-  if (n <= 2 * r + 32) {
-    double *A = malloc(sizeof(double) * n * n), *ev = malloc(sizeof(double) * n);
-    memcpy(A, K, sizeof(double) * n * n);
-    sym_eig(A, n, ev);
-    for (int j = 0; j < r; j++) {
-      w[j] = ev[n - 1 - j];
-      for (int a = 0; a < n; a++) E[(int64_t)a * lde + j] = A[a * n + n - 1 - j];
-    }
-    free(A), free(ev);
-    return r;
+  double *A = malloc(sizeof(double) * n * n), *ev = malloc(sizeof(double) * n);
+  memcpy(A, K, sizeof(double) * n * n);
+  sym_eig(A, n, ev);
+  for (int j = 0; j < r; j++) {
+    w[j] = ev[n - 1 - j];
+    for (int a = 0; a < n; a++) E[(int64_t)a * lde + j] = A[a * n + n - 1 - j];
   }
-  double *V = malloc(sizeof(double) * (size_t)n * (size_t)(n + 1));
-  double *al = malloc(sizeof(double) * n), *be = malloc(sizeof(double) * n);
-  double *T = malloc(sizeof(double) * n * n), *th = malloc(sizeof(double) * n);
-  Rng g;
-  rng_seed(&g, 0x4c616e637a6f73ull);
-  double nrm = 0;
-  for (int a = 0; a < n; a++) V[a] = rng_normal(&g), nrm += V[a] * V[a];
-  for (int a = 0; a < n; a++) V[a] /= sqrt(nrm);
-  int found = 0;
-  for (int m = 0; m < n; m++) {
-    const double *v = V + (int64_t)m * n;
-    double *u = V + (int64_t)(m + 1) * n;
-    for (int a = 0; a < n; a++) {
-      const double *ka = K + (int64_t)a * n;
-      double s = 0;
-#pragma omp simd reduction(+ : s)
-      for (int b = 0; b < n; b++) s += ka[b] * v[b];
-      u[a] = s;
-    }
-    double s = 0;
-    for (int a = 0; a < n; a++) s += v[a] * u[a];
-    al[m] = s;
-    for (int pass = 0; pass < 2; pass++)
-      for (int i = 0; i <= m; i++) {
-        const double *vi = V + (int64_t)i * n;
-        double c = 0;
-#pragma omp simd reduction(+ : c)
-        for (int a = 0; a < n; a++) c += vi[a] * u[a];
-        for (int a = 0; a < n; a++) u[a] -= c * vi[a];
-      }
-    nrm = 0;
-    for (int a = 0; a < n; a++) nrm += u[a] * u[a];
-    be[m] = sqrt(nrm);
-    int M = m + 1;
-    int last = M == n || !(be[m] > 1e-14 * fabs(al[0]));  // the end, or an invariant subspace
-    if (last || (M >= r + 8 && (M - r - 8) % 16 == 0)) {
-      memset(T, 0, sizeof(double) * M * M);
-      for (int i = 0; i < M; i++) {
-        T[i * M + i] = al[i];
-        if (i + 1 < M) T[i * M + i + 1] = T[(i + 1) * M + i] = be[i];
-      }
-      sym_eig(T, M, th);
-      int want = r < M ? r : M, conv = 1;
-      for (int j = 0; j < want && conv; j++)
-        conv = be[m] * fabs(T[(M - 1) * M + (M - 1 - j)]) <= 1e-10 * fabs(th[M - 1]);
-      if (conv || last) {
-        for (int j = 0; j < want; j++) {
-          w[j] = th[M - 1 - j];
-          for (int a = 0; a < n; a++) {
-            double x = 0;
-            for (int i = 0; i < M; i++) x += V[(int64_t)i * n + a] * T[i * M + (M - 1 - j)];
-            E[(int64_t)a * lde + j] = x;
-          }
-        }
-        found = want;
-        break;
-      }
-    }
-    for (int a = 0; a < n; a++) u[a] /= be[m];
-  }
-  free(V), free(al), free(be), free(T), free(th);
-  return found;
+  free(A), free(ev);
+  return r;
 }
 
 // Symmetric (Loewdin) orthonormalisation of the m rows of U in place:
@@ -1570,13 +1503,15 @@ done:
   free(Gm), free(R), free(B), free(Ri), free(T), free(beta);
 }
 
-// Most directions of the low-rank metric: MINT_LOWRANK_K, or by default 8,
-// 16 or 24, the most for which each thread's share of the directions (single
-// precision, D / nt entries each) fits in its L2 cache (512 KiB if the size is
-// not reported). Each leapfrog step streams the directions twice. On the
-// 37,901-parameter time series (3 threads per chain) 8 directions gave about
-// as many effective draws per gradient as 24, at a lower cost per step; on the
-// 3,171-parameter one 24 gave the most (bench/metric_experiment.py).
+// Most directions of the low-rank metric: MINT_LOWRANK_K, or by default 16
+// or 24 if each thread's share of that many directions (single precision,
+// D / nt entries each) fits in its L2 cache (512 KiB if the size is not
+// reported), and otherwise 8, whether or not those fit. Each leapfrog step
+// streams the directions twice. On the 37,901-parameter time series (3
+// threads per chain) 24 directions gave more effective draws per gradient
+// than 8 but about as many per second, each step costing more; on the
+// 3,171-parameter one 24 gave the most per gradient and per second
+// (bench/metric_experiment.py).
 static int lowrank_k(int64_t D, int nt) {
   const char *e = getenv("MINT_LOWRANK_K");
   int k;
@@ -2084,7 +2019,14 @@ static void *run_chain(void *arg) {
   double *lr_q = NULL, *lr_g = NULL, *lr_u = NULL, lr_lam[LR_KMAX];
   if (lowrank) {
     const char *e;
-    lr_kmax = lowrank_k(D, s->nt);
+    int team = 1;  // the team OpenMP actually gives this chain, which may be smaller than asked for
+    if (s->nt > 1) {
+#pragma omp parallel num_threads(s->nt)
+      {
+        if (omp_get_thread_num() == 0) team = omp_get_num_threads();
+      }
+    }
+    lr_kmax = lowrank_k(D, team);
     if (lr_kmax > D) lr_kmax = (int)D;
     if ((e = getenv("MINT_LOWRANK_CUTOFF"))) lr_cutoff = atof(e);
     if (!(lr_cutoff >= 1.0)) lr_cutoff = 2.0;
