@@ -745,6 +745,154 @@
     11.68,
     13.62
    ]
+  },
+  {
+   "sampling_seconds": 737.281977,
+   "prep_seconds": 0.020189,
+   "chains": 4,
+   "draws": 1000,
+   "gradients": 3689381,
+   "divergences": 0,
+   "step_size": [
+    0.00948,
+    0.012,
+    0.011,
+    0.00942
+   ],
+   "leapfrog_per_draw": [
+    511.0,
+    511.0,
+    511.0,
+    511.0
+   ],
+   "max_rhat": 1.002,
+   "max_rhat_param": "pop",
+   "min_ess": 505.0,
+   "min_ess_param": "pop",
+   "warmup_gradients": 1645381,
+   "warmup_kind": "stan",
+   "warmup_iters": 1000,
+   "threads_per_chain": 3,
+   "smallest_team": 3,
+   "problem": "dynpois_large",
+   "impl": "stan",
+   "seed": 2,
+   "process_wall_seconds": 738.1586017540249,
+   "us_per_gradient_per_chain": 799.3557477528074,
+   "min_ess_per_second": 0.6849482501319845,
+   "min_ess_per_1k_gradients": 0.13687933016405734,
+   "before": {
+    "loadavg": [
+     10.52,
+     11.17,
+     13.43
+    ],
+    "cpu_busy_percent": {
+     "0": 10,
+     "1": 7,
+     "2": 2,
+     "3": 3,
+     "4": 2,
+     "5": 6,
+     "6": 2,
+     "7": 2,
+     "8": 4,
+     "9": 0,
+     "10": 0,
+     "11": 4,
+     "12": 7,
+     "13": 53,
+     "14": 4,
+     "15": 0,
+     "16": 1,
+     "17": 1,
+     "18": 0,
+     "19": 0,
+     "20": 1,
+     "21": 1,
+     "22": 0,
+     "23": 2
+    }
+   },
+   "loadavg_after": [
+    11.98,
+    12.59,
+    13.08
+   ]
+  },
+  {
+   "sampling_seconds": 740.793857,
+   "prep_seconds": 0.019684,
+   "chains": 4,
+   "draws": 1000,
+   "gradients": 3655712,
+   "divergences": 0,
+   "step_size": [
+    0.0109,
+    0.00988,
+    0.0107,
+    0.0106
+   ],
+   "leapfrog_per_draw": [
+    511.0,
+    511.0,
+    511.0,
+    511.0
+   ],
+   "max_rhat": 1.006,
+   "max_rhat_param": "pop",
+   "min_ess": 470.0,
+   "min_ess_param": "pop",
+   "warmup_gradients": 1611712,
+   "warmup_kind": "stan",
+   "warmup_iters": 1000,
+   "threads_per_chain": 3,
+   "smallest_team": 3,
+   "problem": "dynpois_large",
+   "impl": "stan",
+   "seed": 3,
+   "process_wall_seconds": 741.7245090639917,
+   "us_per_gradient_per_chain": 810.5604128552797,
+   "min_ess_per_second": 0.6344545052025181,
+   "min_ess_per_1k_gradients": 0.1285659264187113,
+   "before": {
+    "loadavg": [
+     11.1,
+     12.4,
+     13.01
+    ],
+    "cpu_busy_percent": {
+     "0": 14,
+     "1": 2,
+     "2": 2,
+     "3": 2,
+     "4": 1,
+     "5": 5,
+     "6": 1,
+     "7": 2,
+     "8": 2,
+     "9": 1,
+     "10": 2,
+     "11": 1,
+     "12": 2,
+     "13": 2,
+     "14": 5,
+     "15": 2,
+     "16": 1,
+     "17": 0,
+     "18": 2,
+     "19": 1,
+     "20": 0,
+     "21": 0,
+     "22": 0,
+     "23": 0
+    }
+   },
+   "loadavg_after": [
+    10.93,
+    12.33,
+    12.74
+   ]
   }
  ]
 }

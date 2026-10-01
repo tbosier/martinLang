@@ -86,14 +86,14 @@ Per run (seed: sampling seconds, gradients, lowest ESS, 1-minute load average be
 | dynpois_large | Mint | 3 | 62.39 (61.85 to 62.70) | 3,675,420 | 67.62 (66.99 to 68.23) | 419 to 519 | 0.128 | 1.010 | 0 |
 | dynpois_large | Rust, max effort (dynpois_max.rs / logistic_bayes_max.rs) | 3 | 98.63 (96.57 to 105.11) | 3,655,682 | 107.60 (105.66 to 115.21) | 383 to 442 | 0.12 | 1.016 | 0 |
 | dynpois_large | Rust, max effort v2 (dynpois_par.rs: table exp, threaded) | 3 | 65.18 (64.28 to 69.33) | 3,668,536 | 70.69 (70.65 to 75.60) | 414 to 477 | 0.126 | 1.018 | 0 |
-| dynpois_large | Stan 2.40 via BridgeStan (stanc --O1) | 1 | 3886.83 (3886.83 to 3886.83) | 3,671,716 | 4234.35 (4234.35 to 4234.35) | 475 to 475 | 0.129 | 1.005 | 0 |
+| dynpois_large | Stan 2.40 via BridgeStan (stanc --O1) | 3 | 740.79 (737.28 to 3886.83) | 3,671,716 | 810.56 (799.36 to 4234.35) | 470 to 505 | 0.129 | 1.006 | 0 |
 
 Per run (seed: sampling seconds, gradients, lowest ESS, 1-minute load average before, hardware threads busy with other work before):
 
 - dynpois_large, mint: 1: 62.70 s, 3,675,420, 419, 13.3, 0.2; 2: 62.39 s, 3,725,517, 519, 3.9, 0.5; 3: 61.85 s, 3,658,549, 469, 12.2, 0.1
 - dynpois_large, rust_max: 1: 105.11 s, 3,649,568, 383, 13.4, 1.6; 2: 98.63 s, 3,666,283, 442, 9.5, 0.4; 3: 96.57 s, 3,655,682, 439, 13.1, 0.3
 - dynpois_large, rust_par: 1: 69.33 s, 3,668,536, 414, 8.9, 1.4; 2: 65.18 s, 3,688,391, 477, 12.2, 0.2; 3: 64.28 s, 3,639,525, 459, 12.5, 0.4
-- dynpois_large, stan: 1: 3886.83 s, 3,671,716, 475, 2.4, 15.7
+- dynpois_large, stan: 1: 3886.83 s, 3,671,716, 475, 2.4, 15.7; 2: 737.28 s, 3,689,381, 505, 10.5, 1.1; 3: 740.79 s, 3,655,712, 470, 11.1, 0.5
 
 ## The same small runs on a loaded machine (an earlier pass)
 
@@ -131,25 +131,50 @@ Per run (seed: sampling seconds, gradients, lowest ESS, 1-minute load average be
 
 ## Sampler check: Mint's NUTS against nutpie, same Stan gradient, 4 chains
 
-nutpie 0.16.11, BridgeStan 2.9.0; both run the same compiled Stan model, 4 chains in threads, 1000 warmup + 1000 draws. Bulk and tail ESS and R-hat come from the same ArviZ code over every parameter's constrained draws. nutpie's adaptation differs from Mint's (Stan's), so this compares samplers, not languages. 1-minute load average before the runs: 7.2 to 24.1.
+nutpie 0.16.11, BridgeStan 2.9.0; both run the same compiled Stan model, 4 chains in threads, 1000 warmup + 1000 draws. Bulk and tail ESS and R-hat come from the same ArviZ code over every parameter's constrained draws. nutpie's adaptation differs from Mint's (Stan's), so this compares samplers, not languages. 1-minute load average before the runs: 2.6 to 8.6.
 
 | problem | sampler | seed | wall s | gradients | µs per gradient per chain | minus the gradient alone | lowest bulk ESS | lowest tail ESS | highest R-hat | bulk ESS per 1000 gradients | divergences |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| dynpois_small | mint | 1 | 57.45 | 2,023,572 | 113.57 | 62.14 | 1909 | 2078 | 1.009 | 0.943 | 0 |
-| dynpois_small | mint | 2 | 29.90 | 2,031,278 | 58.87 | 7.45 | 1848 | 1948 | 1.008 | 0.91 | 0 |
-| dynpois_small | mint | 3 | 60.14 | 2,014,427 | 119.42 | 68.00 | 2186 | 2140 | 1.008 | 1.09 | 0 |
-| dynpois_small | nutpie | 1 | 40.84 | 999,256 | 163.48 | 112.06 | 728 | 1310 | 1.010 | 0.728 | 0 |
-| dynpois_small | nutpie | 2 | 54.06 | 1,144,471 | 188.96 | 137.53 | 864 | 1394 | 1.007 | 0.755 | 0 |
-| dynpois_small | nutpie | 3 | 188.95 | 2,865,190 | 263.79 | 212.36 | 7 | 4 | 1.548 | 0.00249 | 0 |
-| eight_schools | mint | 1 | 0.04 | 74,634 | 1.95 | 1.45 | 2229 | 1804 | 1.002 | 29.9 | 1 |
-| eight_schools | mint | 2 | 0.02 | 89,067 | 0.87 | 0.36 | 2501 | 2074 | 1.001 | 28.1 | 0 |
-| eight_schools | mint | 3 | 0.02 | 72,019 | 0.90 | 0.40 | 2059 | 1597 | 1.004 | 28.6 | 0 |
-| eight_schools | nutpie | 1 | 0.25 | 55,786 | 17.89 | 17.39 | 2333 | 1744 | 1.003 | 41.8 | 1 |
-| eight_schools | nutpie | 2 | 0.06 | 55,139 | 4.03 | 3.53 | 2025 | 1719 | 1.002 | 36.7 | 2 |
-| eight_schools | nutpie | 3 | 0.05 | 55,549 | 3.49 | 2.98 | 2237 | 1408 | 1.005 | 40.3 | 1 |
-| logistic | mint | 1 | 1.71 | 57,672 | 118.84 | 75.79 | 5359 | 2628 | 1.005 | 92.9 | 0 |
-| logistic | mint | 2 | 2.12 | 57,658 | 147.29 | 104.24 | 5603 | 2388 | 1.003 | 97.2 | 0 |
-| logistic | mint | 3 | 0.70 | 57,825 | 48.38 | 5.33 | 5264 | 2742 | 1.003 | 91 | 0 |
-| logistic | nutpie | 1 | 1.53 | 54,038 | 113.61 | 70.56 | 5608 | 2386 | 1.008 | 104 | 0 |
-| logistic | nutpie | 2 | 1.70 | 53,015 | 128.64 | 85.59 | 5889 | 2740 | 1.003 | 111 | 0 |
-| logistic | nutpie | 3 | 0.98 | 53,632 | 73.17 | 30.12 | 6126 | 2635 | 1.003 | 114 | 0 |
+| dynpois_small | mint | 1 | 28.13 | 2,023,572 | 55.61 | 5.14 | 1909 | 2078 | 1.009 | 0.943 | 0 |
+| dynpois_small | mint | 2 | 28.59 | 2,031,278 | 56.30 | 5.82 | 1848 | 1948 | 1.008 | 0.91 | 0 |
+| dynpois_small | mint | 3 | 28.40 | 2,014,427 | 56.40 | 5.93 | 2186 | 2140 | 1.008 | 1.09 | 0 |
+| dynpois_small | nutpie | 1 | 15.64 | 999,256 | 62.61 | 12.14 | 728 | 1310 | 1.010 | 0.728 | 0 |
+| dynpois_small | nutpie | 2 | 20.35 | 1,144,471 | 71.13 | 20.65 | 864 | 1394 | 1.007 | 0.755 | 0 |
+| dynpois_small | nutpie | 3 | 115.46 | 2,865,190 | 161.20 | 110.72 | 7 | 4 | 1.548 | 0.00249 | 0 |
+| eight_schools | mint | 1 | 0.02 | 74,634 | 0.83 | 0.33 | 2229 | 1804 | 1.002 | 29.9 | 1 |
+| eight_schools | mint | 2 | 0.02 | 89,067 | 0.83 | 0.34 | 2501 | 2074 | 1.001 | 28.1 | 0 |
+| eight_schools | mint | 3 | 0.02 | 72,019 | 0.91 | 0.41 | 2059 | 1597 | 1.004 | 28.6 | 0 |
+| eight_schools | nutpie | 1 | 0.05 | 55,786 | 3.79 | 3.30 | 2333 | 1744 | 1.003 | 41.8 | 1 |
+| eight_schools | nutpie | 2 | 0.05 | 55,139 | 3.54 | 3.05 | 2025 | 1719 | 1.002 | 36.7 | 2 |
+| eight_schools | nutpie | 3 | 0.04 | 55,549 | 3.22 | 2.73 | 2237 | 1408 | 1.005 | 40.3 | 1 |
+| logistic | mint | 1 | 0.65 | 57,672 | 45.09 | 2.46 | 5359 | 2628 | 1.005 | 92.9 | 0 |
+| logistic | mint | 2 | 0.63 | 57,658 | 43.75 | 1.12 | 5603 | 2388 | 1.003 | 97.2 | 0 |
+| logistic | mint | 3 | 0.65 | 57,825 | 45.19 | 2.55 | 5264 | 2742 | 1.003 | 91 | 0 |
+| logistic | nutpie | 1 | 0.64 | 54,038 | 47.49 | 4.86 | 5608 | 2386 | 1.008 | 104 | 0 |
+| logistic | nutpie | 2 | 0.61 | 53,015 | 45.91 | 3.28 | 5889 | 2740 | 1.003 | 111 | 0 |
+| logistic | nutpie | 3 | 0.63 | 53,632 | 47.04 | 4.41 | 6126 | 2635 | 1.003 | 114 | 0 |
+
+## Sampler overhead: one pinned chain, Mint's NUTS against nutpie, same Stan gradient
+
+nutpie 0.16.11, BridgeStan 2.9.0; both run the same compiled Stan model, 1 chain, pinned to the least busy core before each run, 1000 warmup + 1000 draws. Bulk and tail ESS and R-hat come from the same ArviZ code over every parameter's constrained draws. nutpie's adaptation differs from Mint's (Stan's), so this compares samplers, not languages. 1-minute load average before the runs: 1.4 to 2.0.
+
+| problem | sampler | seed | wall s | gradients | µs per gradient per chain | minus the gradient alone | lowest bulk ESS | lowest tail ESS | highest R-hat | bulk ESS per 1000 gradients | divergences |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| dynpois_small | mint | 1 | 28.43 | 509,881 | 55.75 | 5.28 | 466 | 348 | nan | 0.915 | 0 |
+| dynpois_small | mint | 2 | 27.25 | 498,465 | 54.67 | 4.20 | 430 | 335 | nan | 0.862 | 0 |
+| dynpois_small | mint | 3 | 27.96 | 511,102 | 54.70 | 4.23 | 649 | 373 | nan | 1.27 | 0 |
+| dynpois_small | nutpie | 1 | 15.08 | 251,831 | 59.89 | 9.41 | 165 | 267 | nan | 0.655 | 0 |
+| dynpois_small | nutpie | 2 | 15.90 | 274,259 | 57.99 | 7.51 | 129 | 297 | nan | 0.471 | 0 |
+| dynpois_small | nutpie | 3 | 14.03 | 238,089 | 58.94 | 8.47 | 136 | 299 | nan | 0.57 | 0 |
+| eight_schools | mint | 1 | 0.01 | 19,132 | 0.70 | 0.21 | 717 | 503 | nan | 37.5 | 0 |
+| eight_schools | mint | 2 | 0.01 | 16,913 | 0.72 | 0.23 | 309 | 240 | nan | 18.3 | 0 |
+| eight_schools | mint | 3 | 0.02 | 22,654 | 0.71 | 0.22 | 615 | 550 | nan | 27.1 | 0 |
+| eight_schools | nutpie | 1 | 0.04 | 13,514 | 3.03 | 2.54 | 504 | 450 | nan | 37.3 | 1 |
+| eight_schools | nutpie | 2 | 0.04 | 13,677 | 2.63 | 2.14 | 637 | 501 | nan | 46.6 | 0 |
+| eight_schools | nutpie | 3 | 0.03 | 13,934 | 2.48 | 1.99 | 606 | 411 | nan | 43.5 | 0 |
+| logistic | mint | 1 | 0.61 | 14,313 | 42.42 | -0.22 | 1102 | 609 | nan | 77 | 0 |
+| logistic | mint | 2 | 0.63 | 14,585 | 43.30 | 0.67 | 1624 | 574 | nan | 111 | 0 |
+| logistic | mint | 3 | 0.62 | 14,532 | 42.95 | 0.32 | 1057 | 571 | nan | 72.7 | 0 |
+| logistic | nutpie | 1 | 0.60 | 13,494 | 44.13 | 1.50 | 1446 | 623 | nan | 107 | 0 |
+| logistic | nutpie | 2 | 0.60 | 13,212 | 45.68 | 3.05 | 1361 | 560 | nan | 103 | 0 |
+| logistic | nutpie | 3 | 0.60 | 13,293 | 44.84 | 2.20 | 1453 | 578 | nan | 109 | 0 |
