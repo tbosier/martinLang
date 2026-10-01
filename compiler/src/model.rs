@@ -1073,6 +1073,7 @@ impl<'a> Mg<'a> {
 }
 
 pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
+    let tm_full = tm;
     m.declare("declare noalias ptr @mint_ws_slot(i64, i64)");
     let name = &tm.name;
     for d in &tm.dims {
@@ -1110,6 +1111,50 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
             }
         }
     }
+    // The Kalman collapse: integrate latent random walks out; NUTS then runs
+    // over the reduced model `red` (the same model without them and without
+    // their two statements).
+    let (kal, notes) = if opts.collapse { detect_kalman(tm, &stmts) } else { (Vec::new(), Vec::new()) };
+    for n in &notes {
+        eprintln!("mintc: model {name}: {n}");
+    }
+    let red_owned;
+    let tm: &TModel = if kal.is_empty() {
+        tm
+    } else {
+        let full = tm;
+        let gone: Vec<usize> = kal.iter().flat_map(|k| [k.prior, k.obs]).collect();
+        let mut k = 0;
+        stmts.retain(|_| {
+            k += 1;
+            !gone.contains(&(k - 1))
+        });
+        let mut red = full.clone();
+        red.params.retain(|(n, _)| !kal.iter().any(|k| &k.param == n));
+        // one line per collapse; the last also says what NUTS samples
+        for (j, k) in kal.iter().enumerate() {
+            let rest = if j + 1 < kal.len() {
+                String::new()
+            } else {
+                let names: Vec<String> = red.params.iter().map(|(n, t)| match t {
+                    Ty::Vector(d, _) => format!("{n}[{d}]"),
+                    Ty::Matrix(r, c, _) => format!("{n}[{r}, {c}]"),
+                    _ => n.clone(),
+                }).collect();
+                let n = param_count(&red);
+                format!("; NUTS samples {} ({n} parameter{})", names.join(", "), if n == "1" { "" } else { "s" })
+            };
+            eprintln!(
+                "mintc: model {name}: collapsed {} ({} latent scalars) by a Kalman filter{}{rest}",
+                k.param,
+                if k.vec { k.cols.to_string() } else { format!("{} x {}", k.rows, k.cols) },
+                if k.shared { " (variances shared by every series: one recursion per time step)" } else { "" },
+            );
+        }
+        red_owned = red;
+        &red_owned
+    };
+    let full = tm_full;
     let n_ss = stmts.iter().filter(|s| matches!(s, Stmt::Tilde { ss: Some(_), .. })).count();
     if n_ss > 0 {
         eprintln!("mintc: model {name}: {n_ss} likelihood term(s) rewritten to sufficient statistics");
@@ -1147,12 +1192,15 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     if nv > 1 {
         m.globals.push(format!("@mint_model_{name}_variant = internal global i64 0"));
     }
-    gen_init(m, tm, &stmts, opts, &cm, &cands);
-    gen_logp(m, tm, &stmts, opts, &cm, false);
+    for j in 0..kal.len() {
+        m.globals.push(format!("{} = internal global ptr null", kal_y_global(name, j)));
+    }
+    gen_init(m, tm, &stmts, &kal, opts, &cm, &cands);
+    gen_logp(m, tm, &stmts, &kal, opts, &cm, false);
     for v in 1..nv {
         m.narrow_data = narrow_variant(&cands, v).into_iter().collect();
         m.variant = format!("_n{v}");
-        gen_logp(m, tm, &stmts, opts, &cm, false);
+        gen_logp(m, tm, &stmts, &kal, opts, &cm, false);
     }
     m.narrow_data.clear();
     m.variant.clear();
@@ -1161,10 +1209,13 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
         m.globals.push(format!("@mint_model_{name}_logp_table = internal constant [{nv} x ptr] [{}]", fns.join(", ")));
     }
     // the fused leapfrog's copy reads the wide data (variant 0)
-    let leap = opts.fused_leapfrog && gen_logp(m, tm, &stmts, opts, &cm, true);
+    let leap = opts.fused_leapfrog && gen_logp(m, tm, &stmts, &kal, opts, &cm, true);
     gen_constrain(m, tm, opts, &cm);
+    if !kal.is_empty() {
+        gen_collapse_fn(m, full, tm, &kal, opts, &cm);
+    }
     let permute = gen_permute(m, tm, opts, &cm);
-    gen_sample_fn(m, tm, opts, permute, nv, leap);
+    gen_sample_fn(m, full, tm, &kal, opts, permute, nv, leap);
 }
 
 /// Most variants of `logp` generated for narrow data. Each is a full copy
@@ -1305,7 +1356,7 @@ fn ss_q(g: &mut Mg, plan: &SsPlan) -> String {
     q
 }
 
-fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], cands: &[(String, Vec<Narrow>)]) {
+fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], kal: &[Kalman], opts: &Opts, cm: &[(Dim, Dim)], cands: &[(String, Vec<Narrow>)]) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
     // Column-major data matrices: a transposed copy, made once per sample().
@@ -1328,6 +1379,27 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         transpose(&mut g, &src, &dst, &rd, &cd);
         g.f.emit(format!("store ptr {dst}, ptr {}", data_global(&tm.name, n)));
         g.data_p.insert(n.clone(), dst);
+    }
+    // The observations of each Kalman collapse, time-major, for the filter.
+    for (j, k) in kal.iter().enumerate() {
+        let gl = kal_y_global(&tm.name, j);
+        let old = g.f.load_ptr(&gl);
+        g.f.emit(format!("call void @mint_free(ptr {old})"));
+        let (gd, td) = (g.dim(&k.rows), g.dim(&k.cols));
+        let n = g.f.imul(&gd, &td);
+        let yb = g.f.reg();
+        g.f.emit(format!("{yb} = call ptr @mint_alloc(i64 {n})"));
+        g.f.emit(format!("store ptr {yb}, ptr {gl}"));
+        for_range(&mut g, "0", &td, |g, t| {
+            let o = g.f.imul(t, &gd);
+            for_range(g, "0", &gd, |g, s| {
+                let flat = kal_flat(g, k, s, t);
+                let ix = Ix { flat, row: s.to_string(), col: t.to_string() };
+                let i = g.f.iadd(&o, s);
+                let y = g.fwd(&k.y, &ix, &mut HashMap::new());
+                g.f.store(&y, &yb, &i);
+            });
+        });
     }
     // BernoulliLogit and PoissonLog outcomes are data; check their support once.
     for s in stmts {
@@ -1541,7 +1613,7 @@ fn first_of(g: &mut Mg, n: &str) -> String {
 /// parameter and returns their number, so the runtime can do the rest of
 /// theta itself. Returns false, emitting nothing, when nothing would be
 /// covered.
-fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], leap: bool) -> bool {
+fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], kal: &[Kalman], opts: &Opts, cm: &[(Dim, Dim)], leap: bool) -> bool {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
     let (layout, _total) = g.layout(tm);
@@ -1585,7 +1657,9 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                     !m || t == h || absorbed[t] == Some(h)
                 });
                 let in_scans_only = !mentions_outside_scans(lhs, n) && !args.iter().any(|a| mentions_outside_scans(a, n));
-                if only_here && in_scans_only {
+                // a Kalman collapse adds to the gradient after every kernel
+                let in_kalman = kal.iter().any(|k| k.mentions(n));
+                if only_here && in_scans_only && !in_kalman {
                     owned.entry(h).or_default().push(n.clone());
                 }
             }
@@ -1676,6 +1750,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         }
     }
     let mut pos_bufs: HashMap<String, (String, String, String)> = HashMap::new(); // param -> (value, adjoint, len)
+    let mut kal_b: Vec<KalBufs> = Vec::new();
     {
         // Each scratch buffer is a separate per-thread allocation returned
         // `noalias`, so LLVM knows they never overlap.
@@ -1704,6 +1779,9 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         for (k, n) in kscr_slots {
             let b = buf(&mut g, &n);
             g.kscratch.insert(k, b);
+        }
+        for (j, k) in kal.iter().enumerate() {
+            kal_b.push(kal_bufs(&mut g, &tm.name, j, k, &mut slot));
         }
     }
 
@@ -2032,6 +2110,9 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             }
             g.split.insert(key, (fw, Some(ad)));
         }
+    }
+    for (k, b) in kal.iter().zip(&kal_b) {
+        gen_kalman_logp(&mut g, k, b, &lp);
     }
 
     for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
@@ -3679,8 +3760,24 @@ fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> b
     true
 }
 
-fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, variants: usize, leap: bool) {
+/// `full` is the model as written, `tm` the one NUTS samples (without the
+/// parameters `kal` collapses; otherwise the same).
+#[allow(clippy::too_many_arguments)]
+fn gen_sample_fn(m: &mut Module, full: &TModel, tm: &TModel, kal: &[Kalman], opts: &Opts, permute: bool, variants: usize, leap: bool) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.m.declare("declare void @mint_set_collapsed(i64, ptr, i64)");
+    if kal.is_empty() {
+        g.f.emit("call void @mint_set_collapsed(i64 0, ptr null, i64 0)");
+    } else {
+        let (_, d_out) = g.layout(full);
+        let mut latent = "0".to_string();
+        for k in kal {
+            let (r, c) = (g.dim(&k.rows), g.dim(&k.cols));
+            let n = g.f.imul(&r, &c);
+            latent = g.f.iadd(&latent, &n);
+        }
+        g.f.emit(format!("call void @mint_set_collapsed(i64 {d_out}, ptr @mint_model_{}_collapse, i64 {latent})", full.name));
+    }
     g.m.declare("declare void @mint_set_layout(ptr, ptr)");
     g.m.declare("declare void @mint_set_leap(ptr, ptr)");
     if leap {
@@ -3695,8 +3792,10 @@ fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, varian
     } else {
         g.f.emit("call void @mint_set_layout(ptr null, ptr null)");
     }
-    let (layout, total) = g.layout(tm);
-    let k = tm.params.len();
+    // the draws have every parameter of the model as written
+    let (_, total) = g.layout(tm);
+    let (layout, _) = g.layout(full);
+    let k = full.params.len();
     let names = g.f.alloca(&format!("[{k} x ptr]"));
     let sizes = g.f.alloca(&format!("[{k} x i64]"));
     for (j, (n, _, size)) in layout.iter().enumerate() {
@@ -3725,4 +3824,647 @@ fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, varian
     ));
     let header = format!("define ptr @mint_model_{name}_sample(i64 %draws, i64 %warmup, i64 %chains, i64 %seed)");
     g.finish(&header, &[format!("ret ptr {r}")]);
+}
+
+// ---------------------------------------------------------------- Kalman collapse
+//
+// A matrix parameter X: Matrix[G, T] is integrated out exactly when the model
+// is, for some expressions that do not mention X,
+//
+//   X ~ Normal(m_w, s_w)                                       (prior)
+//   y ~ Normal(a + c * cumsum(B + k * X, T), s_y)              (observation)
+//
+// with y data (no parameter, no running sum), c a nonzero literal, and X in
+// no other statement. Then, given every other parameter, each series g is a
+// local-level state-space model: the state x[t] = x[t-1] + e[t] with
+// independent increments e[t] = B + k X[t] ~ N(B + k m_w, (k s_w)^2), and
+// y[t] ~ N(a + c x[t], s_y^2), independent across series. The marginal
+// density of y is computed by a scalar Kalman filter per series in O(T)
+// (mint_kalman_ll in the runtime, vectorised across series), and its
+// gradient by the filter's adjoint, which the generated code then pushes
+// through the expressions a, B, k, m_w, s_w and s_y with the ordinary
+// per-element reverse sweep. NUTS samples the remaining parameters only;
+// for each kept draw X is drawn from its conditional posterior by forward
+// filtering, backward sampling (mint_kalman_ffbs), so the draws have the
+// same columns as without the collapse.
+//
+// The expressions may depend on any remaining parameter or data, indexed by
+// element, series (Vector[G]) or time (Vector[T]); a time-indexed parameter
+// shared by all series (the `shared` of examples/dynamic_poisson.mint) keeps
+// the series dependent a priori, but given it they are independent, so it
+// stays a NUTS parameter and is not integrated out. Not handled (the model
+// is then sampled as written): another running sum in those expressions,
+// X inside a function (exp, ...) or multiplied by itself or by an
+// expression that mentions it, and non-Normal observations (that needs the
+// Laplace collapse).
+
+struct Kalman {
+    param: String,
+    rows: Dim,
+    cols: Dim,
+    /// statement indices of the prior and the observation
+    prior: usize,
+    obs: usize,
+    y: M,
+    a: Option<M>,
+    c: f64,
+    drift: Option<M>,
+    /// coefficient of X inside the running sum (None: 1)
+    k: Option<M>,
+    mw: M,
+    sw: M,
+    sy: M,
+    /// q = (k s_w)^2 and r = s_y^2 are the same for every series (no
+    /// element- or series-indexed leaf): the filter's variances are then
+    /// computed once per time step (mint_kalman_ll_shared)
+    shared: bool,
+    /// X is a Vector[T] (one series; rows is 1)
+    vec: bool,
+}
+
+impl Kalman {
+    /// The expressions that remain in the model (all but the observation).
+    fn parts(&self) -> [Option<&M>; 6] {
+        [self.a.as_ref(), self.drift.as_ref(), self.k.as_ref(), Some(&self.mw), Some(&self.sw), Some(&self.sy)]
+    }
+    fn mentions(&self, n: &str) -> bool {
+        self.parts().into_iter().flatten().any(|e| mentions(e, n))
+    }
+}
+
+/// Whether `e` has the same value in every row of a matrix statement.
+fn row_invariant(e: &M) -> bool {
+    match e {
+        M::Const(_) | M::DimV(_) | M::DataS(_) | M::ParamS(_) => true,
+        M::DataV(_, ax) | M::ParamV(_, ax) => *ax == Ax::Col,
+        M::Bin(_, a, b) => row_invariant(a) && row_invariant(b),
+        M::Neg(a) | M::Func(_, a) => row_invariant(a),
+        _ => false,
+    }
+}
+
+fn opt_bin(op: BinOp, a: Option<M>, b: Option<M>) -> Option<M> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(if op == BinOp::Sub { M::Neg(Box::new(b)) } else { b }),
+        (Some(a), Some(b)) => Some(M::Bin(op, Box::new(a), Box::new(b))),
+    }
+}
+
+/// e = rest + coef * S, where S is the one running sum (along the
+/// statement's own shape) that mentions p. Returns (rest, coef, S).
+/// A literal number: 0.5, or -0.5 (which parses as a negated literal).
+fn kal_lit(e: &M) -> Option<f64> {
+    match e {
+        M::Const(k) => Some(*k),
+        M::Neg(x) => kal_lit(x).map(|k| -k),
+        _ => None,
+    }
+}
+
+fn kal_split_mean<'a>(e: &'a M, p: &str) -> Option<(Option<M>, f64, Option<&'a M>)> {
+    if !mentions(e, p) {
+        return Some((Some(e.clone()), 0.0, None));
+    }
+    match e {
+        M::Cumsum { ax: Ax::Flat, .. } => Some((None, 1.0, Some(e))),
+        M::Bin(op @ (BinOp::Add | BinOp::Sub), x, y) => {
+            let (rx, cx, sx) = kal_split_mean(x, p)?;
+            let (ry, cy, sy) = kal_split_mean(y, p)?;
+            if sx.is_some() && sy.is_some() {
+                return None;
+            }
+            let cy = if *op == BinOp::Sub { -cy } else { cy };
+            Some((opt_bin(*op, rx, ry), cx + cy, sx.or(sy)))
+        }
+        M::Neg(x) => {
+            let (r, c, s) = kal_split_mean(x, p)?;
+            Some((r.map(|r| M::Neg(Box::new(r))), -c, s))
+        }
+        M::Bin(BinOp::Mul, x, y) => {
+            let (k, z) = match (kal_lit(x), kal_lit(y)) {
+                (Some(k), _) => (k, y),
+                (_, Some(k)) => (k, x),
+                _ => return None,
+            };
+            let (r, c, s) = kal_split_mean(z, p)?;
+            Some((r.map(|r| M::Bin(BinOp::Mul, Box::new(M::Const(k)), Box::new(r))), c * k, s))
+        }
+        M::Bin(BinOp::Div, x, y) => {
+            let k = kal_lit(y)?;
+            let (r, c, s) = kal_split_mean(x, p)?;
+            Some((r.map(|r| M::Bin(BinOp::Div, Box::new(r), Box::new(M::Const(k)))), c / k, s))
+        }
+        _ => None,
+    }
+}
+
+/// e = rest + coef * p (p a matrix parameter, by element). Returns
+/// (rest, coef), coef None when e does not mention p.
+fn kal_split_inner(e: &M, p: &str) -> Option<(Option<M>, Option<M>)> {
+    if !mentions(e, p) {
+        return Some((Some(e.clone()), None));
+    }
+    let mul = |a: M, b: &M| M::Bin(BinOp::Mul, Box::new(a), Box::new(b.clone()));
+    let lmul = |a: &M, b: M| M::Bin(BinOp::Mul, Box::new(a.clone()), Box::new(b));
+    let div = |a: M, b: &M| M::Bin(BinOp::Div, Box::new(a), Box::new(b.clone()));
+    match e {
+        M::ParamM(n) | M::ParamV(n, Ax::Flat) if n == p => Some((None, Some(M::Const(1.0)))),
+        M::Bin(op @ (BinOp::Add | BinOp::Sub), x, y) => {
+            let (rx, kx) = kal_split_inner(x, p)?;
+            let (ry, ky) = kal_split_inner(y, p)?;
+            Some((opt_bin(*op, rx, ry), opt_bin(*op, kx, ky)))
+        }
+        M::Neg(x) => {
+            let (r, k) = kal_split_inner(x, p)?;
+            Some((r.map(|r| M::Neg(Box::new(r))), k.map(|k| M::Neg(Box::new(k)))))
+        }
+        M::Bin(BinOp::Mul, x, y) if !mentions(y, p) => {
+            let (r, k) = kal_split_inner(x, p)?;
+            Some((r.map(|r| mul(r, y)), k.map(|k| mul(k, y))))
+        }
+        M::Bin(BinOp::Mul, x, y) if !mentions(x, p) => {
+            let (r, k) = kal_split_inner(y, p)?;
+            Some((r.map(|r| lmul(x, r)), k.map(|k| lmul(x, k))))
+        }
+        M::Bin(BinOp::Div, x, y) if !mentions(y, p) => {
+            let (r, k) = kal_split_inner(x, p)?;
+            Some((r.map(|r| div(r, y)), k.map(|k| div(k, y))))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a running sum inside `e` mentions `p`.
+fn scan_mentions(e: &M, p: &str) -> bool {
+    match e {
+        M::Cumsum { inner, .. } => mentions(inner, p),
+        M::MatVec { vec, .. } => scan_mentions(vec, p),
+        M::Bin(_, a, b) => scan_mentions(a, p) || scan_mentions(b, p),
+        M::Neg(a) | M::Func(_, a) => scan_mentions(a, p),
+        _ => false,
+    }
+}
+
+/// `k` without the multiplications by 1 the splitting leaves.
+fn kal_simplify(e: M) -> M {
+    match e {
+        M::Bin(BinOp::Mul, a, b) => match (kal_simplify(*a), kal_simplify(*b)) {
+            (M::Const(x), y) | (y, M::Const(x)) if x == 1.0 => y,
+            (a, b) => M::Bin(BinOp::Mul, Box::new(a), Box::new(b)),
+        },
+        M::Bin(op, a, b) => M::Bin(op, Box::new(kal_simplify(*a)), Box::new(kal_simplify(*b))),
+        M::Neg(a) => M::Neg(Box::new(kal_simplify(*a))),
+        e => e,
+    }
+}
+
+/// Finds the matrix parameters that can be integrated out (see above).
+/// Also returns, for the user, why a candidate (a matrix parameter inside a
+/// running sum) was not.
+fn detect_kalman(tm: &TModel, stmts: &[Stmt]) -> (Vec<Kalman>, Vec<String>) {
+    let mut out: Vec<Kalman> = Vec::new();
+    let mut notes = Vec::new();
+    let mentioned = |s: &Stmt, n: &str| {
+        let Stmt::Tilde { lhs, args, .. } = s;
+        mentions(lhs, n) || args.iter().any(|a| mentions(a, n))
+    };
+    for (p, ty) in &tm.params {
+        // a matrix, one walk per row, or a vector: a single walk
+        let one = Dim::Const(1);
+        let (rows, cols, shape, vec) = match ty {
+            Ty::Matrix(r, c, _) => (r, c, SShape::Mat(r.clone(), c.clone()), false),
+            Ty::Vector(n, Dom::Real) => (&one, n, SShape::Vec(n.clone()), true),
+            _ => continue,
+        };
+        let users: Vec<usize> = (0..stmts.len()).filter(|&k| mentioned(&stmts[k], p)).collect();
+        // the observation: a statement with p inside a running sum, other
+        // than p's own prior
+        let obs = users.iter().copied().find(|&k| {
+            let Stmt::Tilde { lhs, args, .. } = &stmts[k];
+            let own = matches!(lhs, M::ParamM(n) | M::ParamV(n, Ax::Flat) if n == p);
+            !own && std::iter::once(lhs).chain(args).any(|e| scan_mentions(e, p))
+        });
+        let Some(obs) = obs else { continue };
+        let plan = (|| -> Result<Kalman, String> {
+            let Stmt::Tilde { dist: od, .. } = &stmts[obs];
+            if *od != Dist::Normal {
+                return Err(format!("its observation is {od:?}, not Normal (that needs a Laplace approximation, which is not implemented)"));
+            }
+            if users.len() != 2 {
+                return Err(format!("it appears in {} statements; it must appear only in its own prior and in one observation", users.len()));
+            }
+            let prior = users.iter().copied().find(|&k| k != obs).unwrap();
+            let Stmt::Tilde { dist: pd, lhs: pl, args: pa, shape: ps, .. } = &stmts[prior];
+            let own = matches!(pl, M::ParamM(n) | M::ParamV(n, Ax::Flat) if n == p);
+            if *pd != Dist::Normal || !own || pa.iter().any(|a| mentions(a, p)) || ps != &shape {
+                return Err(format!("its prior must be `{p} ~ Normal(mean, scale)` with a mean and scale that do not depend on {p}"));
+            }
+            let Stmt::Tilde { lhs: ol, args: oa, shape: os, .. } = &stmts[obs];
+            if os != &shape {
+                return Err("it enters an observation of another shape (a walk shared by several series needs one filter over all of them, not implemented)".into());
+            }
+            if ol.active() || ol.has_cumsum() {
+                return Err("the observed quantity must be data".into());
+            }
+            if mentions(&oa[1], p) {
+                return Err("the observation's scale depends on it".into());
+            }
+            let (a, c, cs) = kal_split_mean(&oa[0], p).ok_or("the observation's mean must be (terms without it) + c * cumsum(...) with c a literal number")?;
+            let Some(M::Cumsum { inner, shape: cshape, .. }) = cs else { return Err("no running sum of it in the mean".into()) };
+            if cshape != &shape || c == 0.0 || !c.is_finite() {
+                return Err("the running sum must be over the parameter's own shape, with a nonzero coefficient".into());
+            }
+            let (drift, k) = kal_split_inner(inner, p).ok_or("inside the running sum it must enter linearly: (terms without it) + (factor without it) * it")?;
+            let k = k.map(kal_simplify).ok_or("the running sum does not contain it")?;
+            let k = if matches!(k, M::Const(x) if x == 1.0) { None } else { Some(k) };
+            let parts: Vec<&M> = [a.as_ref(), drift.as_ref(), k.as_ref(), Some(&pa[0]), Some(&pa[1]), Some(&oa[1])].into_iter().flatten().collect();
+            if parts.iter().any(|e| e.has_cumsum()) {
+                return Err("the other terms contain a running sum (not supported yet)".into());
+            }
+            // (one series: trivially the same for every series)
+            let shared = vec || (row_invariant(&pa[1]) && row_invariant(&oa[1]) && k.as_ref().is_none_or(row_invariant));
+            Ok(Kalman {
+                shared,
+                vec,
+                param: p.clone(),
+                rows: rows.clone(),
+                cols: cols.clone(),
+                prior,
+                obs,
+                y: ol.clone(),
+                a,
+                c,
+                drift,
+                k,
+                mw: pa[0].clone(),
+                sw: pa[1].clone(),
+                sy: oa[1].clone(),
+            })
+        })();
+        match plan {
+            Ok(k) => out.push(k),
+            Err(w) => notes.push(format!("{p} was not integrated out: {w}")),
+        }
+    }
+    // A plan's expressions must not mention a parameter another plan removes.
+    loop {
+        let names: Vec<String> = out.iter().map(|k| k.param.clone()).collect();
+        let bad = out.iter().position(|k| names.iter().any(|n| k.mentions(n) || mentions(&k.y, n)));
+        match bad {
+            Some(i) => {
+                let k = out.remove(i);
+                notes.push(format!("{} was not integrated out: its model depends on another integrated-out parameter", k.param));
+            }
+            None => break,
+        }
+    }
+    // NUTS needs something to sample
+    if !out.is_empty() && out.len() == tm.params.len() {
+        for k in out.drain(..) {
+            notes.push(format!("{} was not integrated out: no other parameter would be left for NUTS to sample", k.param));
+        }
+    }
+    (out, notes)
+}
+
+/// "G + 3"-style count of the parameters of `tm`.
+fn param_count(tm: &TModel) -> String {
+    let mut scalars = 0;
+    let mut terms: Vec<String> = Vec::new();
+    for (_, t) in &tm.params {
+        match t {
+            Ty::Vector(d, _) => terms.push(d.to_string()),
+            Ty::Matrix(r, c, _) => terms.push(format!("{r} x {c}")),
+            _ => scalars += 1,
+        }
+    }
+    if scalars > 0 || terms.is_empty() {
+        terms.push(scalars.to_string());
+    }
+    terms.join(" + ")
+}
+
+/// Storage index of element (row, col) of a collapse's [rows, cols]
+/// quantities (col for a vector).
+fn kal_flat(g: &mut Mg, k: &Kalman, row: &str, col: &str) -> String {
+    if k.vec {
+        return col.to_string();
+    }
+    let (rd, cd) = (&k.rows, &k.cols);
+    let (r, c) = (g.dim(rd), g.dim(cd));
+    if g.is_cm(rd, cd) {
+        g.cm_flat(row, col, &r, &c)
+    } else {
+        let a = g.f.imul(row, &c);
+        g.f.iadd(&a, col)
+    }
+}
+
+/// Buffers of one collapse, time-major (element (g, t) at t G + g): the
+/// filter's inputs y (made once by `init`), a, d, q, r and its workspace
+/// (3 G T + 6 G).
+struct KalBufs {
+    y: String,
+    a: String,
+    d: String,
+    q: String,
+    r: String,
+    ws: String,
+}
+
+/// The time-major copy of collapse j's observations, made by `init`.
+fn kal_y_global(model: &str, j: usize) -> String {
+    format!("@mint_model_{model}_kal{j}_y")
+}
+
+fn kal_bufs(g: &mut Mg, model: &str, j: usize, k: &Kalman, slot: &mut usize) -> KalBufs {
+    let (gd, td) = (g.dim(&k.rows), g.dim(&k.cols));
+    let n = g.f.imul(&gd, &td);
+    // enough for either kernel (3 G T + 6 G, or G T + 2 G + 3 T)
+    let w = g.f.imul(&n, "3");
+    let g6 = g.f.imul(&gd, "6");
+    let w = g.f.iadd(&w, &g6);
+    let t3 = g.f.imul(&td, "3");
+    let w = g.f.iadd(&w, &t3);
+    let mut buf = |g: &mut Mg, len: &str| {
+        let r = g.f.reg();
+        g.f.emit(format!("{r} = call noalias ptr @mint_ws_slot(i64 {slot}, i64 {len})"));
+        g.ws_slot_of.insert(r.clone(), *slot);
+        *slot += 1;
+        r
+    };
+    let y = g.f.load_ptr(&kal_y_global(model, j));
+    KalBufs { y, a: buf(g, &n), d: buf(g, &n), q: buf(g, &n), r: buf(g, &n), ws: buf(g, &w) }
+}
+
+/// For every element: the filter's inputs a, d = B + k m_w, q = (k s_w)^2
+/// and r = s_y^2 (y is made once by `init`). With `k.shared`, q and r are
+/// the same for every series, and only one per time step is computed.
+fn kal_inputs(g: &mut Mg, k: &Kalman, b: &KalBufs) {
+    let (gd, td) = (g.dim(&k.rows), g.dim(&k.cols));
+    let qr = |g: &mut Mg, ix: &Ix, vals: &mut HashMap<usize, String>, i: &str| {
+        let kv = match &k.k {
+            Some(e) => g.fwd(e, ix, vals),
+            None => fconst(1.0),
+        };
+        let sw = g.fwd(&k.sw, ix, vals);
+        let ks = g.f.fmul(&kv, &sw);
+        let q = g.f.fmul(&ks, &ks);
+        g.f.store(&q, &b.q, i);
+        let sy = g.fwd(&k.sy, ix, vals);
+        let r = g.f.fmul(&sy, &sy);
+        g.f.store(&r, &b.r, i);
+    };
+    for_range(g, "0", &td, |g, t| {
+        if k.shared {
+            let flat = kal_flat(g, k, "0", t);
+            let ix = Ix { flat, row: "0".into(), col: t.to_string() };
+            qr(g, &ix, &mut HashMap::new(), t);
+        }
+        let o = g.f.imul(t, &gd);
+        for_range(g, "0", &gd, |g, s| {
+            let flat = kal_flat(g, k, s, t);
+            let ix = Ix { flat, row: s.to_string(), col: t.to_string() };
+            let i = g.f.iadd(&o, s);
+            let mut vals = HashMap::new();
+            let a = match &k.a {
+                Some(e) => g.fwd(e, &ix, &mut vals),
+                None => fconst(0.0),
+            };
+            g.f.store(&a, &b.a, &i);
+            let kv = match &k.k {
+                Some(e) => g.fwd(e, &ix, &mut vals),
+                None => fconst(1.0),
+            };
+            let mw = g.fwd(&k.mw, &ix, &mut vals);
+            let mut d = g.f.fmul(&kv, &mw);
+            if let Some(e) = &k.drift {
+                let bv = g.fwd(e, &ix, &mut vals);
+                d = g.f.fadd(&bv, &d);
+            }
+            g.f.store(&d, &b.d, &i);
+            if !k.shared {
+                qr(g, &ix, &mut vals, &i);
+            }
+        });
+    });
+}
+
+/// In `logp`: the collapsed log density of `k`'s observation and prior,
+/// and its gradient pushed through their expressions.
+fn gen_kalman_logp(g: &mut Mg, k: &Kalman, b: &KalBufs, lp: &str) {
+    let kern = if k.shared { "mint_kalman_ll_shared" } else { "mint_kalman_ll" };
+    g.m.declare(&format!("declare double @{kern}(i64, i64, double, ptr, ptr, ptr, ptr, ptr, ptr)"));
+    kal_inputs(g, k, b);
+    let (gd, td) = (g.dim(&k.rows), g.dim(&k.cols));
+    let ll = g.f.reg();
+    g.f.emit(format!(
+        "{ll} = call double @{kern}(i64 {gd}, i64 {td}, double {}, ptr {}, ptr {}, ptr {}, ptr {}, ptr {}, ptr {})",
+        fconst(k.c),
+        b.y,
+        b.a,
+        b.d,
+        b.q,
+        b.r,
+        b.ws
+    ));
+    g.f.acc_add(lp, &ll);
+    // The filter left the adjoints of a, d, q and r in their buffers. With
+    // d = B + k m_w, q = k^2 s_w^2 and r = s_y^2: k gets d' m_w + 2 q' k s_w^2,
+    // m_w gets d' k, s_w gets 2 q' k^2 s_w and s_y gets 2 r' s_y.
+    let any = [k.a.as_ref(), k.drift.as_ref(), k.k.as_ref(), Some(&k.mw), Some(&k.sw), Some(&k.sy)].into_iter().flatten().any(|e| e.active());
+    if !any {
+        return;
+    }
+    let qr_bwd = |g: &mut Mg, ix: &Ix, vals: &mut HashMap<usize, String>, i: &str| {
+        let qb = g.f.load(&b.q, i);
+        let rb = g.f.load(&b.r, i);
+        let kv = match &k.k {
+            Some(e) => g.fwd(e, ix, vals),
+            None => fconst(1.0),
+        };
+        let sw = g.fwd(&k.sw, ix, vals);
+        if let Some(e) = &k.k {
+            if e.active() {
+                let ks2 = g.f.fmul(&kv, &sw);
+                let ks2 = g.f.fmul(&ks2, &sw);
+                let t2 = g.f.fmul(&qb, &ks2);
+                let t2 = g.f.fmul(&fconst(2.0), &t2);
+                g.bwd(e, &t2, ix, vals);
+            }
+        }
+        if k.sw.active() {
+            let k2 = g.f.fmul(&kv, &kv);
+            let k2s = g.f.fmul(&k2, &sw);
+            let t1 = g.f.fmul(&qb, &k2s);
+            let t1 = g.f.fmul(&fconst(2.0), &t1);
+            g.bwd(&k.sw, &t1, ix, vals);
+        }
+        if k.sy.active() {
+            let sy = g.fwd(&k.sy, ix, vals);
+            let t1 = g.f.fmul(&rb, &sy);
+            let t1 = g.f.fmul(&fconst(2.0), &t1);
+            g.bwd(&k.sy, &t1, ix, vals);
+        }
+    };
+    for_range(g, "0", &td, |g, t| {
+        if k.shared {
+            let flat = kal_flat(g, k, "0", t);
+            let ix = Ix { flat, row: "0".into(), col: t.to_string() };
+            qr_bwd(g, &ix, &mut HashMap::new(), t);
+        }
+        let o = g.f.imul(t, &gd);
+        for_range(g, "0", &gd, |g, s| {
+            let flat = kal_flat(g, k, s, t);
+            let ix = Ix { flat, row: s.to_string(), col: t.to_string() };
+            let i = g.f.iadd(&o, s);
+            let mut vals = HashMap::new();
+            let ab = g.f.load(&b.a, &i);
+            let db = g.f.load(&b.d, &i);
+            if let Some(e) = &k.a {
+                if e.active() {
+                    g.fwd(e, &ix, &mut vals);
+                    g.bwd(e, &ab, &ix, &vals);
+                }
+            }
+            if let Some(e) = &k.drift {
+                if e.active() {
+                    g.fwd(e, &ix, &mut vals);
+                    g.bwd(e, &db, &ix, &vals);
+                }
+            }
+            let kv = match &k.k {
+                Some(e) => g.fwd(e, &ix, &mut vals),
+                None => fconst(1.0),
+            };
+            let mw = g.fwd(&k.mw, &ix, &mut vals);
+            if let Some(e) = &k.k {
+                if e.active() {
+                    let t1 = g.f.fmul(&db, &mw);
+                    g.bwd(e, &t1, &ix, &vals);
+                }
+            }
+            if k.mw.active() {
+                let t1 = g.f.fmul(&db, &kv);
+                g.bwd(&k.mw, &t1, &ix, &vals);
+            }
+            if !k.shared {
+                qr_bwd(g, &ix, &mut vals, &i);
+            }
+        });
+    });
+}
+
+/// `collapse(unc, out, rng)`: the whole constrained draw in the user's
+/// order (`full`'s parameters) from NUTS's position over `red`'s, with each
+/// collapsed parameter drawn by forward filtering, backward sampling.
+fn gen_collapse_fn(m: &mut Module, full: &TModel, red: &TModel, kal: &[Kalman], opts: &Opts, cm: &[(Dim, Dim)]) {
+    m.declare("declare void @mint_kalman_ffbs(i64, i64, double, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr)");
+    m.declare("declare double @mint_kalman_normal(ptr)");
+    let mut g = Mg::new(m, red, opts.strict_fp);
+    g.cm = cm.to_vec();
+    let (lr, _) = g.layout(red);
+    let (lf, _) = g.layout(full);
+    let off_full = |n: &str| lf.iter().find(|(x, _, _)| x == n).unwrap().1.clone();
+    for ((n, t), (_, ro, size)) in red.params.iter().zip(&lr) {
+        let fo = off_full(n);
+        match t {
+            Ty::Scalar(d) => {
+                let u = g.f.load("%unc", ro);
+                let v = if *d == Dom::Positive { g.f.intrinsic1(g.m, "llvm.exp.f64", &u) } else { u };
+                g.f.store(&v, "%out", &fo);
+                g.pval.insert(n.clone(), v);
+            }
+            Ty::Vector(_, d) => {
+                let src = g.f.gep("%unc", ro);
+                let dst = g.f.gep("%out", &fo);
+                let len = size.clone().unwrap();
+                if *d == Dom::Positive {
+                    for_range(&mut g, "0", &len, |g, i| {
+                        let u = g.f.load(&src, i);
+                        let v = g.f.intrinsic1(g.m, "llvm.exp.f64", &u);
+                        g.f.store(&v, &dst, i);
+                    });
+                } else {
+                    g.f.memcpy(g.m, &dst, &src, &len);
+                }
+                g.pptr.insert(n.clone(), dst);
+            }
+            Ty::Matrix(r, c, _) => {
+                let src = g.f.gep("%unc", ro);
+                let dst = g.f.gep("%out", &fo);
+                if g.is_cm(r, c) {
+                    let (rd, cd) = (g.dim(r), g.dim(c));
+                    untranspose(&mut g, &src, &dst, &rd, &cd);
+                    g.pptr.insert(n.clone(), src); // the internal layout, as in logp
+                } else {
+                    g.f.memcpy(g.m, &dst, &src, size.as_ref().unwrap());
+                    g.pptr.insert(n.clone(), dst);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    let mut slot = 0usize;
+    for (j, k) in kal.iter().enumerate() {
+        let b = kal_bufs(&mut g, &full.name, j, k, &mut slot);
+        let (gd, td) = (g.dim(&k.rows), g.dim(&k.cols));
+        let n = g.f.imul(&gd, &td);
+        let e = g.f.reg();
+        g.f.emit(format!("{e} = call noalias ptr @mint_ws_slot(i64 {slot}, i64 {n})"));
+        slot += 1;
+        kal_inputs(&mut g, k, &b);
+        g.f.emit(format!(
+            "call void @mint_kalman_ffbs(i64 {gd}, i64 {td}, double {}, ptr {}, ptr {}, ptr {}, ptr {}, ptr {}, i64 {}, ptr {}, ptr %rng, ptr {e})",
+            fconst(k.c),
+            b.y,
+            b.a,
+            b.d,
+            b.q,
+            b.r,
+            k.shared as i64,
+            b.ws
+        ));
+        // X = (increment - B) / k, written row-major at its place in the draw
+        let xo = off_full(&k.param);
+        let xp = g.f.gep("%out", &xo);
+        for_range(&mut g, "0", &td, |g, t| {
+            let o = g.f.imul(t, &gd);
+            for_range(g, "0", &gd, |g, s| {
+                let flat = kal_flat(g, k, s, t);
+                let ix = Ix { flat, row: s.to_string(), col: t.to_string() };
+                let i = g.f.iadd(&o, s);
+                let mut vals = HashMap::new();
+                let mut v = g.f.load(&e, &i);
+                if let Some(d) = &k.drift {
+                    let bv = g.fwd(d, &ix, &mut vals);
+                    v = g.f.fsub(&v, &bv);
+                }
+                let at = g.f.imul(s, &td);
+                let at = g.f.iadd(&at, t);
+                if let Some(kk) = &k.k {
+                    let kv = g.fwd(kk, &ix, &mut vals);
+                    v = g.f.fdiv(&v, &kv);
+                    g.f.store(&v, &xp, &at);
+                    // where k is 0 the element does not reach y: its prior
+                    let zero = g.f.fcmp("oeq", &kv, &fconst(0.0));
+                    if_then(g, &zero, |g| {
+                        let z = g.f.reg();
+                        g.f.emit(format!("{z} = call double @mint_kalman_normal(ptr %rng)"));
+                        let mw = g.fwd(&k.mw, &ix, &mut HashMap::new());
+                        let sw = g.fwd(&k.sw, &ix, &mut HashMap::new());
+                        let t1 = g.f.fmul(&sw, &z);
+                        let pv = g.f.fadd(&mw, &t1);
+                        g.f.store(&pv, &xp, &at);
+                    });
+                } else {
+                    g.f.store(&v, &xp, &at);
+                }
+            });
+        });
+    }
+    let header = format!("define void @mint_model_{}_collapse(ptr noalias %unc, ptr noalias %out, ptr %rng)", full.name);
+    g.finish(&header, &["ret void".into()]);
 }

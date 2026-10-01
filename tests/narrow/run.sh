@@ -152,11 +152,11 @@ narrow_case many build/nw_many.mint 1 "X: float" "z: float"
   && pass "narrow data: at most 4 variants of logp" || bad "narrow data: variant limit exceeded"
 
 # random models and data: narrow against wide, including raw draws
-python3 tests/narrow/fuzz.py $M 12 7 && pass "narrow data: randomised models and data" || bad "narrow data: randomised check"
+python3 tests/narrow/fuzz.py $M 12 7 --no-collapse && pass "narrow data: randomised models and data" || bad "narrow data: randomised check"
 # and with every type available to every buffer (integer design matrices)
-MINTC_NARROW_VARIANTS=64 python3 tests/narrow/fuzz.py $M 12 8 && pass "narrow data: randomised models and data, all types" || bad "narrow data: randomised check, all types"
+MINTC_NARROW_VARIANTS=64 python3 tests/narrow/fuzz.py $M 12 8 --no-collapse && pass "narrow data: randomised models and data, all types" || bad "narrow data: randomised check, all types"
 # and with the adjoint sums starting at 0.0
-python3 tests/narrow/fuzz.py $M 8 9 --no-negzero-sums && pass "narrow data: randomised models and data, --no-negzero-sums" || bad "narrow data: randomised check, --no-negzero-sums"
+python3 tests/narrow/fuzz.py $M 8 9 --no-negzero-sums --no-collapse && pass "narrow data: randomised models and data, --no-negzero-sums" || bad "narrow data: randomised check, --no-negzero-sums"
 
 # the switch: no copies and no variants in the IR (with --no-negzero-sums
 # too, the IR of the benchmark models was checked by hand to equal that of

@@ -51,6 +51,9 @@ pub struct Opts {
     /// also emit the fused leapfrog entry point (`leap`, see model.rs
     /// gen_logp), which the sampler then uses; off by default
     pub fused_leapfrog: bool,
+    /// integrate latent Gaussian random walks observed with Gaussian noise
+    /// out of a model with a Kalman filter (model.rs, detect_kalman)
+    pub collapse: bool,
 }
 
 #[derive(Clone)]

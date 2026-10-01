@@ -41,9 +41,14 @@ and [results/seed_runs_d51f859.md](../bench/dynpois/results/seed_runs_d51f859.md
   65 s (three runs) against 93 s for a hand-written AVX2 Rust gradient on the
   same sampler runtime (one run). Run-to-run spread on this machine is about
   20%, so the Rust side needs repeats before this is a result.
-- Every parameter is still sampled by NUTS. Nothing is collapsed yet, and
-  the existing benchmark fixes the scales, so it says little about the harder
-  model below.
+- The first collapse exists ([kalman.md](kalman.md)): in an unmodified
+  model, a latent Gaussian random walk per series observed with Gaussian
+  noise, with unknown scales, is detected and integrated out by a scalar
+  Kalman filter, NUTS samples the rest, and the walk is drawn back by
+  forward filtering, backward sampling. That is the local-level special
+  case of the flagship model below (one state per series, not eight), and
+  only for Gaussian observations. The Poisson benchmark above is not
+  collapsed (it needs the Laplace plan).
 
 ## The flagship model
 
@@ -242,6 +247,11 @@ Each has a completion test fixed in advance.
    pass; on S = 100, the posterior of the scales and the held-out forecasts
    agree with the reference within the stated rule; simulation-based
    calibration passes.
+   *Status:* not met. For the local-level model only (one scalar state per
+   series) the first part holds: exact checks against a dense Gaussian
+   computation, and posterior agreement with full NUTS on small instances
+   ([kalman.md](kalman.md)). Not done: the level, slope and seasonal states,
+   the S = 100 reference run, forecasts, and simulation-based calibration.
 2. **`mint explain`.** Output checked against hand counts on three models.
 3. **Laplace collapse with correction** for Poisson and Student-t
    observations: mode-solver and determinant checks, gradient checks of the

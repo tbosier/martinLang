@@ -1,0 +1,1221 @@
+{
+ "sizes": [
+  {
+   "G": 20,
+   "T": 150,
+   "data_seed": 1,
+   "runs": [
+    {
+     "wall_s": 0.6723010540008545,
+     "sampling_s": 0.491787,
+     "gradients": 75301,
+     "warmup_gradients": 47337,
+     "sampling_gradients": 27964,
+     "divergences": 0,
+     "step_size": [
+      0.538,
+      0.607,
+      0.587,
+      0.645
+     ],
+     "leapfrog_per_draw": [
+      7.0,
+      7.0,
+      7.0,
+      7.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 23,
+     "all_params": 3023,
+     "highest_rhat_all": 1.003,
+     "highest_rhat_at": "innov[1010]",
+     "lowest_ess_all": 3084.0,
+     "lowest_ess_at": "innov[777]",
+     "load_before": [
+      23.4853515625,
+      9.28125,
+      3.7939453125
+     ],
+     "load_after": [
+      23.4853515625,
+      9.28125,
+      3.7939453125
+     ],
+     "pop": {
+      "mean": 0.36233,
+      "sd": 0.097975,
+      "ess": 7033.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.097175,
+      "sd": 0.0046808,
+      "ess": 7319.0,
+      "rhat": 0.999
+     },
+     "sigma_y": {
+      "mean": 0.3033,
+      "sd": 0.0046605,
+      "ess": 6857.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 7495.0,
+     "remaining_min_ess": 6857.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 1,
+     "build_s": 0.4855461120605469,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 6.855943202972412,
+     "sampling_s": 6.644814,
+     "gradients": 1794065,
+     "warmup_gradients": 846641,
+     "sampling_gradients": 947424,
+     "divergences": 0,
+     "step_size": [
+      0.0258,
+      0.0227,
+      0.0223,
+      0.0246
+     ],
+     "leapfrog_per_draw": [
+      202.8,
+      254.6,
+      254.5,
+      235.5
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.026,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 207.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      23.4853515625,
+      9.28125,
+      3.7939453125
+     ],
+     "load_after": [
+      24.56103515625,
+      9.98046875,
+      4.08056640625
+     ],
+     "pop": {
+      "mean": 0.35938,
+      "sd": 0.097505,
+      "ess": 5883.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.096627,
+      "sd": 0.004516,
+      "ess": 207.0,
+      "rhat": 1.026
+     },
+     "sigma_y": {
+      "mean": 0.30346,
+      "sd": 0.0047055,
+      "ess": 1843.0,
+      "rhat": 1.003
+     },
+     "beta_min_ess": 5223.0,
+     "remaining_min_ess": 207.0,
+     "remaining_rhat_max": 1.026,
+     "variant": "full",
+     "seed": 1,
+     "build_s": 1.9089431762695312,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 5.9932591915130615,
+     "sampling_s": 5.766793,
+     "gradients": 2018936,
+     "warmup_gradients": 998936,
+     "sampling_gradients": 1020000,
+     "divergences": 0,
+     "step_size": [
+      0.0231,
+      0.0225,
+      0.0234,
+      0.0235
+     ],
+     "leapfrog_per_draw": [
+      255.0,
+      255.0,
+      255.0,
+      255.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.002,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 1293.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      24.56103515625,
+      9.98046875,
+      4.08056640625
+     ],
+     "load_after": [
+      25.15673828125,
+      10.34619140625,
+      4.23095703125
+     ],
+     "pop": {
+      "mean": 0.35935,
+      "sd": 0.099898,
+      "ess": 7809.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.097091,
+      "sd": 0.0047541,
+      "ess": 1293.0,
+      "rhat": 1.002
+     },
+     "sigma_y": {
+      "mean": 0.30335,
+      "sd": 0.0047545,
+      "ess": 2813.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 7345.0,
+     "remaining_min_ess": 1293.0,
+     "remaining_rhat_max": 1.002,
+     "variant": "full_nc",
+     "seed": 1,
+     "build_s": 2.260699510574341,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 0.6025698184967041,
+     "sampling_s": 0.409409,
+     "gradients": 74635,
+     "warmup_gradients": 46643,
+     "sampling_gradients": 27992,
+     "divergences": 0,
+     "step_size": [
+      0.571,
+      0.562,
+      0.548,
+      0.553
+     ],
+     "leapfrog_per_draw": [
+      7.0,
+      7.0,
+      7.0,
+      7.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 23,
+     "all_params": 3023,
+     "highest_rhat_all": 1.003,
+     "highest_rhat_at": "innov[2756]",
+     "lowest_ess_all": 2999.0,
+     "lowest_ess_at": "innov[34]",
+     "load_before": [
+      25.544921875,
+      10.6728515625,
+      4.36962890625
+     ],
+     "load_after": [
+      25.544921875,
+      10.6728515625,
+      4.36962890625
+     ],
+     "pop": {
+      "mean": 0.36194,
+      "sd": 0.096972,
+      "ess": 6386.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.097078,
+      "sd": 0.004754,
+      "ess": 7217.0,
+      "rhat": 1.0
+     },
+     "sigma_y": {
+      "mean": 0.30339,
+      "sd": 0.0047184,
+      "ess": 7922.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 7357.0,
+     "remaining_min_ess": 6386.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 2,
+     "build_s": 0.45836615562438965,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 4.931977987289429,
+     "sampling_s": 4.615901,
+     "gradients": 1664026,
+     "warmup_gradients": 832826,
+     "sampling_gradients": 831200,
+     "divergences": 0,
+     "step_size": [
+      0.026,
+      0.0238,
+      0.0225,
+      0.0259
+     ],
+     "leapfrog_per_draw": [
+      164.6,
+      244.2,
+      254.1,
+      168.2
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.034,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 201.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      25.544921875,
+      10.6728515625,
+      4.36962890625
+     ],
+     "load_after": [
+      25.82177734375,
+      10.9775390625,
+      4.501953125
+     ],
+     "pop": {
+      "mean": 0.36145,
+      "sd": 0.098425,
+      "ess": 4216.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.096858,
+      "sd": 0.0050468,
+      "ess": 201.0,
+      "rhat": 1.034
+     },
+     "sigma_y": {
+      "mean": 0.30348,
+      "sd": 0.0046045,
+      "ess": 1332.0,
+      "rhat": 1.006
+     },
+     "beta_min_ess": 3377.0,
+     "remaining_min_ess": 201.0,
+     "remaining_rhat_max": 1.034,
+     "variant": "full",
+     "seed": 2,
+     "build_s": 2.865633249282837,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 5.492299795150757,
+     "sampling_s": 5.198864,
+     "gradients": 2038103,
+     "warmup_gradients": 1018103,
+     "sampling_gradients": 1020000,
+     "divergences": 0,
+     "step_size": [
+      0.0219,
+      0.0216,
+      0.0223,
+      0.0243
+     ],
+     "leapfrog_per_draw": [
+      255.0,
+      255.0,
+      255.0,
+      255.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.002,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 1261.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      25.83642578125,
+      11.22705078125,
+      4.61767578125
+     ],
+     "load_after": [
+      26.25,
+      11.5556640625,
+      4.759765625
+     ],
+     "pop": {
+      "mean": 0.36304,
+      "sd": 0.09753,
+      "ess": 7143.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.097057,
+      "sd": 0.0046606,
+      "ess": 1261.0,
+      "rhat": 1.002
+     },
+     "sigma_y": {
+      "mean": 0.30341,
+      "sd": 0.0047047,
+      "ess": 2702.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 5221.0,
+     "remaining_min_ess": 1261.0,
+     "remaining_rhat_max": 1.002,
+     "variant": "full_nc",
+     "seed": 2,
+     "build_s": 1.9400827884674072,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 0.6347362995147705,
+     "sampling_s": 0.440179,
+     "gradients": 74722,
+     "warmup_gradients": 46722,
+     "sampling_gradients": 28000,
+     "divergences": 0,
+     "step_size": [
+      0.576,
+      0.573,
+      0.533,
+      0.497
+     ],
+     "leapfrog_per_draw": [
+      7.0,
+      7.0,
+      7.0,
+      7.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 23,
+     "all_params": 3023,
+     "highest_rhat_all": 1.003,
+     "highest_rhat_at": "innov[2138]",
+     "lowest_ess_all": 3064.0,
+     "lowest_ess_at": "innov[2213]",
+     "load_before": [
+      26.25,
+      11.5556640625,
+      4.759765625
+     ],
+     "load_after": [
+      26.25,
+      11.5556640625,
+      4.759765625
+     ],
+     "pop": {
+      "mean": 0.36002,
+      "sd": 0.098382,
+      "ess": 5503.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.097197,
+      "sd": 0.0046477,
+      "ess": 5924.0,
+      "rhat": 0.999
+     },
+     "sigma_y": {
+      "mean": 0.30339,
+      "sd": 0.0048449,
+      "ess": 6851.0,
+      "rhat": 0.999
+     },
+     "beta_min_ess": 6502.0,
+     "remaining_min_ess": 5503.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 3,
+     "build_s": 0.751347541809082,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 5.347081661224365,
+     "sampling_s": 5.166686,
+     "gradients": 1864062,
+     "warmup_gradients": 845982,
+     "sampling_gradients": 1018080,
+     "divergences": 0,
+     "step_size": [
+      0.0235,
+      0.0217,
+      0.0224,
+      0.0232
+     ],
+     "leapfrog_per_draw": [
+      254.5,
+      255.0,
+      255.0,
+      253.6
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.007,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 214.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      26.39013671875,
+      11.8291015625,
+      4.884765625
+     ],
+     "load_after": [
+      26.6796875,
+      12.130859375,
+      5.02001953125
+     ],
+     "pop": {
+      "mean": 0.36223,
+      "sd": 0.099671,
+      "ess": 7576.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.096898,
+      "sd": 0.0047876,
+      "ess": 214.0,
+      "rhat": 1.007
+     },
+     "sigma_y": {
+      "mean": 0.30346,
+      "sd": 0.0047528,
+      "ess": 2638.0,
+      "rhat": 0.999
+     },
+     "beta_min_ess": 6581.0,
+     "remaining_min_ess": 214.0,
+     "remaining_rhat_max": 1.007,
+     "variant": "full",
+     "seed": 3,
+     "build_s": 2.4154293537139893,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 7.240884780883789,
+     "sampling_s": 6.962199,
+     "gradients": 2019611,
+     "warmup_gradients": 999611,
+     "sampling_gradients": 1020000,
+     "divergences": 0,
+     "step_size": [
+      0.0232,
+      0.0229,
+      0.0244,
+      0.0231
+     ],
+     "leapfrog_per_draw": [
+      255.0,
+      255.0,
+      255.0,
+      255.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 3023,
+     "all_params": 3023,
+     "highest_rhat_all": 1.001,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 1463.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      26.6796875,
+      12.130859375,
+      5.02001953125
+     ],
+     "load_after": [
+      26.943359375,
+      12.66943359375,
+      5.27197265625
+     ],
+     "pop": {
+      "mean": 0.36281,
+      "sd": 0.096055,
+      "ess": 6704.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.097115,
+      "sd": 0.0047503,
+      "ess": 1463.0,
+      "rhat": 1.001
+     },
+     "sigma_y": {
+      "mean": 0.30333,
+      "sd": 0.0046988,
+      "ess": 3009.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 6666.0,
+     "remaining_min_ess": 1463.0,
+     "remaining_rhat_max": 1.001,
+     "variant": "full_nc",
+     "seed": 3,
+     "build_s": 2.627060651779175,
+     "mintc_says": ""
+    }
+   ],
+   "gradient_ns": {
+    "collapsed": [
+     13583.0,
+     19738.9,
+     11245.4,
+     8785.8,
+     12139.7,
+     16099.8,
+     8676.2
+    ],
+    "full": [
+     4369.5,
+     2469.4,
+     4712.5,
+     2662.7,
+     2982.0,
+     4501.4,
+     4055.6
+    ],
+    "full_nc": [
+     4704.9,
+     3761.6,
+     3881.7,
+     2615.4,
+     3989.8,
+     2422.3,
+     6295.9
+    ]
+   },
+   "gradient_load": [
+    26.943359375,
+    12.66943359375,
+    5.27197265625
+   ]
+  },
+  {
+   "G": 250,
+   "T": 150,
+   "data_seed": 2,
+   "runs": [
+    {
+     "wall_s": 9.409038305282593,
+     "sampling_s": 7.252371,
+     "gradients": 179600,
+     "warmup_gradients": 119664,
+     "sampling_gradients": 59936,
+     "divergences": 0,
+     "step_size": [
+      0.344,
+      0.353,
+      0.401,
+      0.399
+     ],
+     "leapfrog_per_draw": [
+      15.0,
+      15.0,
+      15.0,
+      15.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 253,
+     "all_params": 37753,
+     "highest_rhat_all": 1.004,
+     "highest_rhat_at": "innov[5093]",
+     "lowest_ess_all": 2915.0,
+     "lowest_ess_at": "innov[29747]",
+     "load_before": [
+      26.943359375,
+      12.66943359375,
+      5.27197265625
+     ],
+     "load_after": [
+      27.56103515625,
+      13.2734375,
+      5.54833984375
+     ],
+     "pop": {
+      "mean": 0.18933,
+      "sd": 0.028339,
+      "ess": 7437.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.10139,
+      "sd": 0.0013172,
+      "ess": 8865.0,
+      "rhat": 0.999
+     },
+     "sigma_y": {
+      "mean": 0.29713,
+      "sd": 0.001311,
+      "ess": 6459.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 6962.0,
+     "remaining_min_ess": 6459.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 1,
+     "build_s": 0.5885636806488037,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 458.1353352069855,
+     "sampling_s": 456.439577,
+     "gradients": 3261245,
+     "warmup_gradients": 1569757,
+     "sampling_gradients": 1691488,
+     "divergences": 0,
+     "step_size": [
+      0.0119,
+      0.0127,
+      0.0128,
+      0.0132
+     ],
+     "leapfrog_per_draw": [
+      511.0,
+      468.2,
+      456.2,
+      256.0
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.013,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 278.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      27.435546875,
+      13.48486328125,
+      5.658203125
+     ],
+     "load_after": [
+      31.9716796875,
+      30.580078125,
+      17.42919921875
+     ],
+     "pop": {
+      "mean": 0.19024,
+      "sd": 0.028969,
+      "ess": 5377.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.10162,
+      "sd": 0.0012788,
+      "ess": 278.0,
+      "rhat": 1.013
+     },
+     "sigma_y": {
+      "mean": 0.29704,
+      "sd": 0.0013121,
+      "ess": 2074.0,
+      "rhat": 1.002
+     },
+     "beta_min_ess": 3439.0,
+     "remaining_min_ess": 278.0,
+     "remaining_rhat_max": 1.013,
+     "variant": "full",
+     "seed": 1,
+     "build_s": 2.6285243034362793,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 502.56941509246826,
+     "sampling_s": 500.478776,
+     "gradients": 3359085,
+     "warmup_gradients": 1827085,
+     "sampling_gradients": 1532000,
+     "divergences": 0,
+     "step_size": [
+      0.0136,
+      0.0126,
+      0.0135,
+      0.0116
+     ],
+     "leapfrog_per_draw": [
+      255.0,
+      511.0,
+      255.0,
+      511.0
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.004,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 983.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      31.5732421875,
+      30.5205078125,
+      17.48095703125
+     ],
+     "load_after": [
+      31.4150390625,
+      32.31982421875,
+      24.22265625
+     ],
+     "pop": {
+      "mean": 0.18907,
+      "sd": 0.027519,
+      "ess": 4150.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.10145,
+      "sd": 0.0013586,
+      "ess": 983.0,
+      "rhat": 1.004
+     },
+     "sigma_y": {
+      "mean": 0.29713,
+      "sd": 0.0013685,
+      "ess": 1918.0,
+      "rhat": 1.001
+     },
+     "beta_min_ess": 3144.0,
+     "remaining_min_ess": 983.0,
+     "remaining_rhat_max": 1.004,
+     "variant": "full_nc",
+     "seed": 1,
+     "build_s": 2.8790037631988525,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 8.843573093414307,
+     "sampling_s": 7.149654,
+     "gradients": 179326,
+     "warmup_gradients": 119326,
+     "sampling_gradients": 60000,
+     "divergences": 0,
+     "step_size": [
+      0.354,
+      0.37,
+      0.354,
+      0.363
+     ],
+     "leapfrog_per_draw": [
+      15.0,
+      15.0,
+      15.0,
+      15.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 253,
+     "all_params": 37753,
+     "highest_rhat_all": 1.004,
+     "highest_rhat_at": "innov[11467]",
+     "lowest_ess_all": 2834.0,
+     "lowest_ess_at": "innov[25630]",
+     "load_before": [
+      31.4150390625,
+      32.31982421875,
+      24.22265625
+     ],
+     "load_after": [
+      30.88916015625,
+      32.17724609375,
+      24.263671875
+     ],
+     "pop": {
+      "mean": 0.18978,
+      "sd": 0.02754,
+      "ess": 7498.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.10141,
+      "sd": 0.0013387,
+      "ess": 8680.0,
+      "rhat": 0.999
+     },
+     "sigma_y": {
+      "mean": 0.29713,
+      "sd": 0.0013316,
+      "ess": 7498.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 8324.0,
+     "remaining_min_ess": 7498.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 2,
+     "build_s": 0.5491137504577637,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 471.7718234062195,
+     "sampling_s": 470.214461,
+     "gradients": 3352263,
+     "warmup_gradients": 1564263,
+     "sampling_gradients": 1788000,
+     "divergences": 0,
+     "step_size": [
+      0.0111,
+      0.0136,
+      0.0122,
+      0.0114
+     ],
+     "leapfrog_per_draw": [
+      511.0,
+      255.0,
+      511.0,
+      511.0
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.008,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 210.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      30.65771484375,
+      32.107421875,
+      24.2841796875
+     ],
+     "load_after": [
+      30.48779296875,
+      32.7431640625,
+      28.18505859375
+     ],
+     "pop": {
+      "mean": 0.18977,
+      "sd": 0.028218,
+      "ess": 5327.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.10153,
+      "sd": 0.0013259,
+      "ess": 210.0,
+      "rhat": 1.008
+     },
+     "sigma_y": {
+      "mean": 0.29711,
+      "sd": 0.0012995,
+      "ess": 1939.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 4038.0,
+     "remaining_min_ess": 210.0,
+     "remaining_rhat_max": 1.008,
+     "variant": "full",
+     "seed": 2,
+     "build_s": 2.0892140865325928,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 349.2929217815399,
+     "sampling_s": 348.113983,
+     "gradients": 3536564,
+     "warmup_gradients": 1762644,
+     "sampling_gradients": 1773920,
+     "divergences": 0,
+     "step_size": [
+      0.0122,
+      0.014,
+      0.0116,
+      0.0128
+     ],
+     "leapfrog_per_draw": [
+      511.0,
+      255.0,
+      511.0,
+      496.9
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.002,
+     "highest_rhat_at": "innov[29485]",
+     "lowest_ess_all": 1307.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      30.48779296875,
+      32.7431640625,
+      28.18505859375
+     ],
+     "load_after": [
+      27.66943359375,
+      33.0615234375,
+      30.13232421875
+     ],
+     "pop": {
+      "mean": 0.18988,
+      "sd": 0.027601,
+      "ess": 4912.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.1014,
+      "sd": 0.0013604,
+      "ess": 1307.0,
+      "rhat": 1.0
+     },
+     "sigma_y": {
+      "mean": 0.29713,
+      "sd": 0.0013216,
+      "ess": 2489.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 4214.0,
+     "remaining_min_ess": 1307.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "full_nc",
+     "seed": 2,
+     "build_s": 1.9635186195373535,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 5.223993539810181,
+     "sampling_s": 3.987185,
+     "gradients": 185486,
+     "warmup_gradients": 125710,
+     "sampling_gradients": 59776,
+     "divergences": 0,
+     "step_size": [
+      0.339,
+      0.313,
+      0.404,
+      0.4
+     ],
+     "leapfrog_per_draw": [
+      15.0,
+      15.0,
+      14.8,
+      15.0
+     ],
+     "threads_per_chain": 1,
+     "draws": 4000,
+     "nuts_dim": 253,
+     "all_params": 37753,
+     "highest_rhat_all": 1.004,
+     "highest_rhat_at": "innov[7946]",
+     "lowest_ess_all": 2810.0,
+     "lowest_ess_at": "innov[21387]",
+     "load_before": [
+      27.66943359375,
+      33.0615234375,
+      30.13232421875
+     ],
+     "load_after": [
+      27.21533203125,
+      32.87744140625,
+      30.08837890625
+     ],
+     "pop": {
+      "mean": 0.18991,
+      "sd": 0.027456,
+      "ess": 7897.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.10136,
+      "sd": 0.0013644,
+      "ess": 8814.0,
+      "rhat": 1.0
+     },
+     "sigma_y": {
+      "mean": 0.29716,
+      "sd": 0.001307,
+      "ess": 6536.0,
+      "rhat": 0.999
+     },
+     "beta_min_ess": 7569.0,
+     "remaining_min_ess": 6536.0,
+     "remaining_rhat_max": 1.0,
+     "variant": "collapsed",
+     "seed": 3,
+     "build_s": 0.14996695518493652,
+     "mintc_says": "mintc: model RandomWalkPanel: collapsed innov (G x T latent scalars) by a Kalman filter (variances shared by every series: one recursion per time step); NUTS samples pop, beta[G], sigma_w, sigma_y (G + 3 parameters)"
+    },
+    {
+     "wall_s": 174.07379055023193,
+     "sampling_s": 172.905301,
+     "gradients": 3298950,
+     "warmup_gradients": 1582886,
+     "sampling_gradients": 1716064,
+     "divergences": 0,
+     "step_size": [
+      0.0137,
+      0.0127,
+      0.0119,
+      0.0127
+     ],
+     "leapfrog_per_draw": [
+      255.0,
+      484.9,
+      511.0,
+      465.2
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.008,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 292.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      27.21533203125,
+      32.87744140625,
+      30.08837890625
+     ],
+     "load_after": [
+      25.6474609375,
+      30.13671875,
+      29.53076171875
+     ],
+     "pop": {
+      "mean": 0.18947,
+      "sd": 0.027518,
+      "ess": 5156.0,
+      "rhat": 1.0
+     },
+     "sigma_w": {
+      "mean": 0.10136,
+      "sd": 0.0013263,
+      "ess": 292.0,
+      "rhat": 1.008
+     },
+     "sigma_y": {
+      "mean": 0.29715,
+      "sd": 0.0013144,
+      "ess": 2398.0,
+      "rhat": 1.0
+     },
+     "beta_min_ess": 3315.0,
+     "remaining_min_ess": 292.0,
+     "remaining_rhat_max": 1.008,
+     "variant": "full",
+     "seed": 3,
+     "build_s": 0.8751692771911621,
+     "mintc_says": ""
+    },
+    {
+     "wall_s": 210.06561398506165,
+     "sampling_s": 208.917757,
+     "gradients": 3864760,
+     "warmup_gradients": 1982552,
+     "sampling_gradients": 1882208,
+     "divergences": 0,
+     "step_size": [
+      0.0111,
+      0.0113,
+      0.0129,
+      0.012
+     ],
+     "leapfrog_per_draw": [
+      511.0,
+      511.0,
+      349.2,
+      511.0
+     ],
+     "threads_per_chain": 3,
+     "draws": 4000,
+     "nuts_dim": 37753,
+     "all_params": 37753,
+     "highest_rhat_all": 1.005,
+     "highest_rhat_at": "sigma_w",
+     "lowest_ess_all": 931.0,
+     "lowest_ess_at": "sigma_w",
+     "load_before": [
+      25.6474609375,
+      30.13671875,
+      29.53076171875
+     ],
+     "load_after": [
+      28.60205078125,
+      29.6787109375,
+      29.462890625
+     ],
+     "pop": {
+      "mean": 0.18936,
+      "sd": 0.026952,
+      "ess": 5663.0,
+      "rhat": 0.999
+     },
+     "sigma_w": {
+      "mean": 0.10146,
+      "sd": 0.0013323,
+      "ess": 931.0,
+      "rhat": 1.005
+     },
+     "sigma_y": {
+      "mean": 0.29712,
+      "sd": 0.0013151,
+      "ess": 2478.0,
+      "rhat": 1.001
+     },
+     "beta_min_ess": 4277.0,
+     "remaining_min_ess": 931.0,
+     "remaining_rhat_max": 1.005,
+     "variant": "full_nc",
+     "seed": 3,
+     "build_s": 1.2267844676971436,
+     "mintc_says": ""
+    }
+   ],
+   "gradient_ns": {
+    "collapsed": [
+     49449.0,
+     49290.1,
+     60224.3,
+     49711.0,
+     50365.4,
+     60336.3,
+     49711.3
+    ],
+    "full": [
+     30076.8,
+     35911.4,
+     31900.5,
+     29286.5,
+     30216.4,
+     27732.9,
+     28041.3
+    ],
+    "full_nc": [
+     29834.6,
+     27511.6,
+     27204.9,
+     27254.1,
+     27889.1,
+     28130.0,
+     28314.1
+    ]
+   },
+   "gradient_load": [
+    27.5927734375,
+    29.451171875,
+    29.39013671875
+   ]
+  }
+ ],
+ "cpus": 24
+}

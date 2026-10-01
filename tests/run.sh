@@ -14,11 +14,17 @@ bad()  { echo "FAIL  $1"; fail=1; }
 mkdir -p build
 clang -O3 -march=native -fopenmp -c runtime/mint_rt.c -o build/mint_rt.o || { echo "FAIL  runtime build"; exit 1; }
 
-# build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary
+# build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary.
+# Every build gets $DEFAULT_FLAGS first. Until the Kalman section at the end
+# that is --no-collapse: several scan-kernel, parallel-kernel, fused-leapfrog
+# and narrow-data test models are Gaussian random walks, which the Kalman
+# collapse would otherwise integrate out, and they are there to test the
+# code that samples them as written.
+DEFAULT_FLAGS=--no-collapse
 build() {
   local src=$1 out=$2; shift 2
   rm -f "build/$out"
-  $M build "$src" -o "build/$out" "$@" 2>build/$out.log || { bad "build $src $*"; cat build/$out.log; return 1; }
+  $M build "$src" -o "build/$out" $DEFAULT_FLAGS "$@" 2>build/$out.log || { bad "build $src $*"; cat build/$out.log; return 1; }
 }
 build_rust() {
   rm -f "build/rs_$1"
@@ -735,13 +741,14 @@ MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 MINT_DRAWS=buil
 # draw-level ESS, and with 8 lags kept (some parameters then take it) its
 # ESS must stay near the draw-level one. These parameters mix fast; the
 # fallback's accuracy on slowly mixing ones is not tested here.
-# stream_dump_check DUMP MAXFALLBACK [exact]: compares the two sets of statistics
+# stream_dump_check DUMP MAXFALLBACK [exact] [N]: compares the two sets of
+# statistics of N parameters (3171 by default)
 stream_dump_check() {
-  python3 - "$1" "$2" "${3:-}" <<'PY'
+  python3 - "$1" "$2" "${3:-}" "${4:-3171}" <<'PY'
 import math, sys
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1])][1:]
 maxfb, exact = int(sys.argv[2]), sys.argv[3] == "exact"
-ok = len(rows) == 3171 and all(r[1] == "1" for r in rows)
+ok = len(rows) == int(sys.argv[4]) and all(r[1] == "1" for r in rows)
 dm = dr = de = 0.0
 fb = []
 for r in rows:
@@ -860,5 +867,182 @@ PY
 else
   bad "streaming summary: build/dynpois missing"
 fi
+
+
+# ---- Kalman collapse. A latent Gaussian random walk observed with Gaussian
+# noise is integrated out; NUTS samples the rest, and the walk is drawn back
+# by forward filtering, backward sampling (FFBS). Exact: on small panels
+# (2 x 5, 3 x 7, 9 x 4) the compiled log density and gradient equal a dense
+# Gaussian computation (the walk integrated out analytically in numpy) and
+# pass finite differences, for eight models (check_marginal.py). The FFBS
+# draws match the walk's exact Gaussian posterior, means and every
+# covariance entry, for three models with fixed scales (check_ffbs.py), and
+# the normal generator they use passes moment and binned-probability checks
+# on 2e7 variates (zig_test.c). Statistical: the draws of every quantity
+# (remaining parameters and every innovation) agree with full NUTS
+# (--no-collapse) within Monte Carlo error, three seeds each, on four models
+# (compare_posterior.py).
+DEFAULT_FLAGS=
+kal_py() { python3 "$@" $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'; [ ${PIPESTATUS[0]} -eq 0 ] || fail=1; }
+kal_py tests/kalman/check_marginal.py
+kal_py tests/kalman/check_ffbs.py
+kal_py tests/kalman/compare_posterior.py
+if clang -O3 -march=native -fopenmp tests/kalman/zig_test.c -o build/zig_test -lm 2>/dev/null; then
+  out=$(./build/zig_test) && pass "$out" || { bad "ziggurat normal generator"; echo "$out"; }
+else
+  bad "build tests/kalman/zig_test.c"
+fi
+
+# What is not collapsed, and why: the model must build, say why, and still
+# sample as written (it runs to the end).
+not_collapsed_src() { # label why source
+  printf '%s\n' "$3" > build/kal_not_$1.mint
+  out=$($M build build/kal_not_$1.mint -o build/kal_not_$1 2>&1) || { bad "kalman eligibility $1: build failed"; echo "$out"; return; }
+  if grep -qF "collapsed innov" <<<"$out" || ! grep -qF -- "innov was not integrated out: $2" <<<"$out"; then
+    bad "kalman eligibility $1"; echo "$out"; return
+  fi
+  run=$(./build/kal_not_$1 2>&1) && grep -q "^all .* parameters" <<<"$run" \
+    && pass "kalman eligibility: $1 is sampled as written ($2)" || { bad "kalman eligibility $1: run failed"; echo "$run" | tail -3; }
+}
+not_collapsed() { # label why model-body
+  not_collapsed_src "$1" "$2" "$(printf 'model W {\n    data y: Matrix[G, T]\n    param s: Positive\n    param innov: Matrix[G, T]\n    s ~ Normal(0, 1)\n%s\n}\nfn main() {\n    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")\n    print(sample(W(y), draws = 10, warmup = 10, chains = 1))\n}' "$3")"
+}
+not_collapsed nonlinear "the observation's mean must be" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(exp(cumsum(innov, T)), s)'
+not_collapsed squared "inside the running sum it must enter linearly" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov .* innov, T), s)'
+not_collapsed reused "it appears in 3 statements" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov, T), s)
+    y ~ Normal(innov, 1)'
+not_collapsed_src poisson "its observation is PoissonLog, not Normal" 'model P {
+    data y: Matrix[G, T]
+    param b: Real
+    param innov: Matrix[G, T]
+    b ~ Normal(0, 1)
+    innov ~ Normal(0, 0.1)
+    y ~ PoissonLog(b + cumsum(innov, T))
+}
+fn main() {
+    let y: Matrix[G, T] = read("build/scan_count_13.f64")
+    print(sample(P(y), draws = 10, warmup = 10, chains = 1))
+}'
+not_collapsed prior_depends "its prior must be" '    innov ~ Normal(0.1 * cumsum(innov, T), 0.1)
+    y ~ Normal(cumsum(innov, T), s)'
+not_collapsed other_scan "the other terms contain a running sum" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov, T) + cumsum(y, T), s)'
+not_collapsed param_coef "the observation's mean must be (terms without it) + c * cumsum(...) with c a literal number" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(s * cumsum(innov, T), 1)'
+# nothing would be left for NUTS (fixed scales): sampled as written
+not_collapsed_src nothing_left "no other parameter would be left for NUTS to sample" 'model Z {
+    data y: Matrix[G, T]
+    param innov: Matrix[G, T]
+    innov ~ Normal(0, 0.3)
+    y ~ Normal(cumsum(innov, T), 0.5)
+}
+fn main() {
+    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")
+    print(sample(Z(y), draws = 10, warmup = 10, chains = 1))
+}'
+# a scale that depends on the walk: only a vector can say so, since the
+# checker proves exp(...) Positive for vectors, not matrices
+not_collapsed_src scale "the observation's scale depends on it" 'model V {
+    data y: Vector[T]
+    param innov: Vector[T]
+    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov), exp(innov))
+}
+fn main() {
+    let y: Vector[T] = read("data/linear_y.f64")
+    print(sample(V(y), draws = 10, warmup = 10, chains = 1))
+}'
+
+# A collapse next to a fused scan kernel (tests/scan/twoowned.mint: w is
+# integrated out; u, which shares its running sum, stays a NUTS parameter and
+# now also gets gradient from the filter, after every kernel, so no kernel
+# may own it): with the fused leapfrog, one fused leaf must match the
+# runtime's, and the gradient must pass finite differences.
+sed "s/NG/13/" tests/scan/twoowned.mint > build/kal_twoowned.mint
+if build build/kal_twoowned.mint kal_twoowned --fused-leapfrog; then
+  grep -qF "collapsed w (G x T latent scalars)" build/kal_twoowned.log && grep -qF "u was not integrated out" build/kal_twoowned.log \
+    && pass "kalman next to a fused scan kernel: w collapsed, u kept" || { bad "kalman twoowned: collapse report"; cat build/kal_twoowned.log; }
+  for t in 1 3; do
+    out=$(MINT_KERNEL_THREADS=$t MINT_LEAP_TEST=1 ./build/kal_twoowned 2>&1)
+    grep -q "leap-test: ok" <<<"$out" && pass "kalman next to a fused scan kernel: fused leaf matches ($t kernel threads)" \
+      || { bad "kalman twoowned leap test ($t kernel threads)"; echo "$out" | tail -3; }
+  done
+  gradcheck kal_twoowned "kalman next to a fused scan kernel"
+fi
+build examples/random_walk_panel.mint rwp_full --no-collapse && ! grep -q "collapsed" build/rwp_full.log \
+  && MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp_full | python3 -c "
+import sys; g = sys.stdin.read().split('grad:')[1].split(); sys.exit(0 if len(g) == 20 + 3 + 20 * 150 else 1)" \
+  && pass "--no-collapse: no collapse, NUTS sees all 3,023 parameters" || bad "--no-collapse"
+build examples/random_walk_panel.mint rwp && grep -qF "collapsed innov (G x T latent scalars)" build/rwp.log \
+  && out=$(./build/rwp 2>&1) && grep -qF "NUTS sampled 23 of the 3023 parameters; 3000 latent scalars" <<<"$out" \
+  && grep -qE "^innov +2997 more entries" <<<"$out" \
+  && pass "random_walk_panel: NUTS samples 23 parameters, the 3,000 innovations come back as draws" \
+  || { bad "random_walk_panel collapse"; cat build/rwp.log; echo "$out" | tail -5; }
+# --strict-fp: the same log density and gradient to rounding; and the
+# collapsed model sampled with 3 threads per chain gives finite draws of
+# every quantity and the same posterior summary of sigma_w to 2 digits
+build examples/random_walk_panel.mint rwp_strict --strict-fp \
+  && a=$(MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp | sed -n 's/^exact log density: //p; s/^grad://p' | tr '\n' ' ') \
+  && b=$(MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp_strict | sed -n 's/^exact log density: //p; s/^grad://p' | tr '\n' ' ') \
+  && python3 -c "
+import sys
+a = [float(x) for x in sys.argv[1].split()]; b = [float(x) for x in sys.argv[2].split()]
+m = max(abs(x) for x in b)
+sys.exit(0 if len(a) == len(b) == 24 and all(abs(x - y) <= 1e-12 * max(m, 1) for x, y in zip(a, b)) else 1)" "$a" "$b" \
+  && pass "random_walk_panel: --strict-fp gives the same log density and gradient to 1e-12" || bad "random_walk_panel --strict-fp"
+out=$(MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/rwp_t3.draws ./build/rwp 2>&1) && python3 -c "
+import struct, sys
+import numpy as np
+f = open('build/rwp_t3.draws', 'rb'); c, n, d = struct.unpack('<QQQ', f.read(24))
+x = np.frombuffer(f.read(), dtype='<f8').reshape(c * n, d)
+sw = [l.split() for l in sys.argv[1].splitlines() if l.startswith('sigma_w ')][0]
+sys.exit(0 if d == 3023 and np.all(np.isfinite(x)) and abs(float(sw[1]) - 0.0972) < 0.0015 else 1)" "$out" \
+  && pass "random_walk_panel: 3 threads per chain, finite draws, same sigma_w" || { bad "random_walk_panel, 3 threads per chain"; echo "$out" | grep sigma_w; }
+
+# Streaming summaries with the collapse: a draw holds the 23 values NUTS
+# samples and the 3,000 innovations FFBS draws for it, and all of them are
+# kept, summarised and written like any other parameter's. With 1 and 3
+# threads per chain: draws are kept only for the printed rows (pop, the first
+# 3 of beta, sigma_w, sigma_y, the first 3 of innov); the summary is the one
+# computed with every draw kept; MINT_DRAWS writes the same 3,023 values per
+# draw both ways (and into a pipe), the summarised ones; per value, the
+# streaming statistics equal the draw-level ones; MINT_KEEP_DRAWS=innov keeps
+# every innovation.
+for t in 1 3; do
+  rm -f build/kal_stream_a.draws build/kal_stream_b.draws
+  MINT_THREADS_PER_CHAIN=$t MINT_DRAWS=build/kal_stream_a.draws ./build/rwp > build/kal_stream_a.out 2> build/kal_stream_a.err
+  MINT_THREADS_PER_CHAIN=$t MINT_KEEP_DRAWS=all MINT_DRAWS=build/kal_stream_b.draws MINT_STATS_DUMP=build/kal_stream_b.tsv \
+    ./build/rwp > build/kal_stream_b.out 2> /dev/null
+  grep -q "summary: draws kept for 9 of 3023 parameters" build/kal_stream_a.err \
+    && pass "kalman + streaming ($t threads per chain): draws kept only for the 9 printed rows" \
+    || { bad "kalman + streaming ($t threads per chain): kept draws"; grep summary: build/kal_stream_a.err; }
+  same_summary build/kal_stream_a.out build/kal_stream_b.out \
+    && pass "kalman + streaming ($t threads per chain): same summary as with every draw kept" \
+    || { bad "kalman + streaming ($t threads per chain): summary differs from MINT_KEEP_DRAWS=all"; diff build/kal_stream_a.out build/kal_stream_b.out; }
+  [ "$(stat -c %s build/kal_stream_a.draws 2>/dev/null)" = $((24 + 4 * 1000 * 3023 * 8)) ] \
+    && cmp -s build/kal_stream_a.draws build/kal_stream_b.draws \
+    && pass "kalman + streaming ($t threads per chain): MINT_DRAWS writes all 3,023 values per draw, as with every draw kept" \
+    || bad "kalman + streaming ($t threads per chain): MINT_DRAWS files"
+  draws_match build/kal_stream_a.draws build/kal_stream_b.tsv \
+    && pass "kalman + streaming ($t threads per chain): the MINT_DRAWS file holds the summarised draws" \
+    || bad "kalman + streaming ($t threads per chain): the MINT_DRAWS file does not match the summary"
+  stream_dump_check build/kal_stream_b.tsv 3023 "" 3023 \
+    && pass "kalman + streaming ($t threads per chain): streaming statistics of every value, innovations included, equal the draw-level ones" \
+    || bad "kalman + streaming ($t threads per chain): streaming statistics"
+done
+rm -f build/kal_stream_fifo build/kal_stream_p.draws
+mkfifo build/kal_stream_fifo && { cat build/kal_stream_fifo > build/kal_stream_p.draws & }
+MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/kal_stream_fifo ./build/rwp > /dev/null 2>&1
+wait
+cmp -s build/kal_stream_p.draws build/kal_stream_a.draws \
+  && pass "kalman + streaming: MINT_DRAWS into a pipe writes the same draws" || bad "kalman + streaming: MINT_DRAWS into a pipe"
+out=$(MINT_KEEP_DRAWS=innov ./build/rwp 2>&1 >/dev/null)
+grep -q "draws kept for 3006 of 3023" <<<"$out" \
+  && pass "kalman + streaming: MINT_KEEP_DRAWS=innov keeps every draw of the collapsed parameter" \
+  || { bad "kalman + streaming: MINT_KEEP_DRAWS=innov"; grep summary: <<<"$out"; }
+rm -f build/kal_stream_fifo build/kal_stream_p.draws build/kal_stream_a.draws build/kal_stream_b.draws
 
 exit $fail
