@@ -324,8 +324,22 @@ if [ -f bench/dynpois/data_large/y.f64 ]; then
       && pass "parallel scan kernel: 3 threads change the summation order (the split ran)" || bad "parallel scan kernel: 3 threads gave the one-thread result"
     [ -s build/par_det_a.out ] && cmp -s build/par_det_a.out build/par_det_b.out \
       && pass "parallel scan kernel: identical gradients in two runs on 3 threads" || bad "parallel scan kernel is not deterministic"
-    cmp -s build/par_det_lim.out build/par_dynpois_large_t1.out \
+    # A team of one runs the parallel path, which adds the log density's
+    # partial sums in a different association from the serial loop (single
+    # vectors and leftover rows are in thread 0's share), so the log density
+    # may differ in the last bits; the gradient must be identical.
+    python3 - build/par_det_lim.out build/par_dynpois_large_t1.out <<'PY' \
       && pass "parallel scan kernel follows a reduced OpenMP team" || bad "parallel scan kernel with a team of one differs from one thread"
+import sys
+def rd(p):
+    o = open(p).read()
+    g = o.split("grad:")[1].split()
+    lp = [l for l in o.splitlines() if l.startswith("exact log density:")]
+    return g, float(lp[0].split(":")[1]) if lp else None
+(ga, la), (gb, lb) = rd(sys.argv[1]), rd(sys.argv[2])
+ok = ga == gb and (la == lb or (la is not None and lb is not None and abs(la - lb) <= 4e-16 * abs(lb)))
+sys.exit(0 if ok else 1)
+PY
   fi
   # inside the sampler (threads per chain set by run_chain): two short runs
   # with 3 threads per chain give the same raw draws
@@ -538,6 +552,10 @@ $M emit examples/logistic_bayes.mint -o build/log1p_check.ll 2>/dev/null \
 # ---- fission kernel paths against the three-pass fission and the unsplit loop
 
 . tests/fission/run.sh
+
+# ---- narrow data copies: results byte-identical to the build without them
+
+. tests/narrow/run.sh
 
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.

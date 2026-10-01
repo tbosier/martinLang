@@ -7,7 +7,8 @@ allocation, loop vectorisation and unrolling. A small C runtime (about 1,160
 lines) provides I/O, printing, a Cholesky solve and the NUTS sampler. The
 runtime is compiled once and cached, so building a program takes 60 to 140 ms:
 `mintc` itself takes 1 to 2 ms, clang about 30 to 120 ms, and linking about
-30 ms.
+30 ms. (Measured before narrow data, see below; a model whose kernels get
+narrow-data variants now takes 0.37 to 0.56 s, the rest are unchanged.)
 
 ```
  .mint source
@@ -369,6 +370,94 @@ these models' log densities are near -1e16 and finite differences fail for
 every build). The measurements are in
 [compiler-round.md](compiler-round.md).
 
+### Narrow data
+
+Data reaches a model through `sample()`, and the generated `init` already
+copies some of it (the scan layout's transposed matrices). It also looks at
+the values. For each data vector or matrix that Mint's own vector kernels
+load (the vectorised scan kernel and the statements it absorbs, and the
+fission kernel), up to a limit described below, the runtime's `mint_narrow`
+tries the types allowed for that buffer, narrowest first, and makes a copy
+in the first one that holds every value exactly, bit for bit: an integer
+type rejects -0.0, and float rejects NaN and keeps infinities, -0.0 and
+float subnormals. The kernels then load the copy and convert in registers
+(`vpmovsxbd` + `vcvtdq2pd`, or `vcvtps2pd`). `--no-narrow-data` turns this
+off; it is also off under `--strict-fp` and on hosts without AVX2.
+
+The choice depends on the data, so it is made at run time. `logp` is
+generated in up to four variants (variant 0 reads only doubles), `init`
+records which one this call's data allows, and `sample` hands that variant's
+function pointer to the sampler, so a gradient pays nothing for the choice.
+A BernoulliLogit outcome is checked to be 0 or 1, so it is allowed int8
+only; anything else is allowed int8, int16 and float. More than four
+variants would be too many copies for clang to compile, so the less likely
+types go first (small integers in data that is not a count or 0/1 outcome,
+then float and int16 for counts), and then whole buffers. The logistic
+model's X and y get {double, float} and {double, int8}, the dynamic Poisson
+model's y all four. Each variant is a full copy of `logp`: the dynamic
+Poisson model now takes 0.56 s to build instead of 0.22 s, and the logistic
+model 0.37 s instead of 0.14 s (medians of 7, this machine). For a test,
+`MINTC_NARROW_VARIANTS=N` in mintc's environment raises the limit.
+
+**Why the results do not change, and how far that is established.** The
+converted values are exactly the doubles the kernel would have loaded, but
+that alone was not enough. LLVM also learns facts from a conversion that it
+does not have for a loaded double (an integer converted to double is never
+-0.0, for example), and the code it emits can then differ: on
+`y ~ Normal(a * X * beta + b * y, exp(X * beta))` with float data, the
+backend fused a different multiply into an add and a gradient component
+changed in the last bit (found by the independent review). So each
+converted value passes through an empty inline asm, which emits no
+instruction but makes the value as opaque to the optimiser as a load
+(`llvm.arithmetic.fence` did not prevent the difference). And only vector
+code (lanes > 1), which is Mint's own, reads the copy: scalar loops
+(leftover rows, the fission kernel's last n mod 4 rows, statements that are
+not vector kernels) keep reading doubles, because LLVM vectorises those and
+its choice of vector width and interleaving, and so the order of a
+reassociated sum, could depend on the type loaded. This makes identical
+results the expected outcome; it is not a proof about LLVM. The evidence is
+the tests: `tests/run.sh` builds 38 cases with and without the rewrite (the
+fission and scan kernel test models with the original data, with every
+value rounded to float, and at the boundary of each type; integer design
+matrices; a model with 34 data buffers; the dynamic Poisson and logistic
+models) and requires byte-identical exact log densities and gradients under
+every `MINT_NARROW` setting, on one and three kernel threads, plus
+identical raw draws of four short sampling runs, and checks that each case
+picked the type it is meant to exercise. A randomised check
+(`tests/narrow/fuzz.py`: 7 models, 12 data sets each, twice) compares the
+gradient and the raw draws of a short run with and without the copies; the
+draws amplify a difference in the last bit anywhere along the trajectory.
+Without the asm it fails on 28 of 30 data sets of the model above.
+
+The same round changed one thing for every build: register sums of
+adjoints in the vector kernels (one element's running-sum or product
+adjoint, one column's gradient) start at -0.0 instead of 0.0
+(`--no-negzero-sums` turns it off). -0.0 + x is x for every x, so LLVM drops
+the first add, which it cannot do for 0.0 + x. That is not the same
+arithmetic once multiplies are fused into adds: with the add gone, the
+product that was its operand can be fused into the next add without being
+rounded, which can change a result in the last bits (it does on
+`x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`, found by the
+second review). Mint's floating-point rules allow that (every add and
+multiply carries `contract`, below). On the benchmark models the log
+densities, gradients and draws are byte-identical to the previous
+compiler's, and with `--no-narrow-data --no-negzero-sums` their IR is the
+previous compiler's, byte for byte. The narrow and wide variants of one
+build share the change, so it does not affect their identity. On its own it
+is worth about 1 to 2% on the time-series gradient, but combined with the
+narrow copy about 5 to 7% (see compiler-round.md).
+
+`MINT_NARROW=0` makes the runtime pick variant 0, `MINT_NARROW=int16` or
+`float` skips the narrower types, and `MINT_NARROW_REPORT=1` prints each
+choice.
+
+In the benchmark data the counts of the dynamic Poisson model (0 to 76) and
+the 0/1 outcomes of the logistic model narrow to int8; the real-valued
+matrices of the logistic model and Newton's method are not exact in float
+(0 of 10^5 and 0 of 10^7 values). Newton's method is a function, not a
+model, and has no such step. The measurements are in
+[compiler-round.md](compiler-round.md#follow-up-narrow-data).
+
 ### What was tried and removed
 
 Three restructurings of scan statements were implemented and measured, and all
@@ -436,6 +525,11 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   e q otherwise, one rounding more than e/(1 + e).
 - There are no `nnan` or `ninf` assumptions: NaN and infinity behave as in
   IEEE.
+- Narrow data copies are exact, and the kernels' results with them are
+  byte-identical to those without them in every test (see "Narrow data").
+- Register sums of adjoints in the vector kernels start at -0.0, so their
+  first add disappears; through contraction that can change results in the
+  last bits (`--no-negzero-sums`).
 - `--strict-fp` turns all of this off, including the `log1p` substitution.
   `bench/results.json` includes those runs.
 

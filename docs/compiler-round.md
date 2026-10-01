@@ -362,3 +362,102 @@ pass.
   not taken under the benchmark's conditions.
 - The leaf benchmark covers steady-state leaves only (no merges, eps = 0);
   the whole runs are the measurement that counts.
+
+## Follow-up: narrow data
+
+When `sample()` starts, the generated code now checks the data that the
+model's vector kernels read and, where every value is exactly an int8, int16
+or float, has the kernels read a copy in that type (see "Narrow data" in
+[architecture.md](architecture.md#narrow-data)). Switch: `--no-narrow-data`;
+at run time `MINT_NARROW=0` picks the double variant of the same binary.
+In the benchmark data only the outcomes narrow: the time-series counts
+(0 to 76) and the logistic 0/1 outcomes to int8. The logistic X and Newton's
+X are not exact in float (0 of 10^5 and 0 of 10^7 values), and Newton's
+method is a function, which has no such step.
+
+The same change starts the vector kernels' register sums of adjoints at -0.0
+instead of 0.0, so LLVM drops their first add (`--no-negzero-sums` turns it
+off). That applies to every build ("no narrow" below includes it, "base"
+does not), and through FMA contraction it can change results in the last
+bits; on the benchmark models it does not.
+
+Measurement: `MINT_BENCH_GRAD`, one process pinned to one core (core 10,
+chosen when it and its SMT sibling were idle; core 12's sibling was busy
+with other jobs), all variants interleaved in an order shuffled per round,
+11 rounds; load average 3 to 9 from other jobs. Base is commit d51f859.
+Medians, with the range:
+
+| gradient, µs | base | no narrow | narrow (int8) | int16 copy | float copy |
+|---|---|---|---|---|---|
+| time series, 3,171 parameters | 4.19 (4.18 to 4.22) | 4.14 (4.13 to 4.16) | **3.96** (3.94 to 4.14) | 3.99 | 4.04 |
+| time series, 37,901 parameters | 53.95 (53.7 to 57.4) | 52.90 (52.3 to 53.3) | **50.79** (50.4 to 55.0) | 51.79 | 51.63 |
+| logistic (n=5000, p=20) | 24.38 (23.8 to 25.1) | 23.96 (23.4 to 25.6) | 24.05 (24.0 to 27.3) | | |
+| logistic, X rounded to float (not the benchmark data) | 24.69 (24.2 to 27.9) | 23.89 (23.6 to 27.3) | **22.67** (22.0 to 24.8) | | |
+
+The int16 and float columns are the same binary with `MINT_NARROW=int16`
+or `float`; with `MINT_NARROW=0` it took 4.17 and 52.79 µs, the same as the
+no-narrow build.
+
+The two parts separately, after the second review (core 6, 11 rounds, load
+average 6 to 12; "neither" is `--no-narrow-data --no-negzero-sums`, whose
+IR equals the base's):
+
+| gradient, µs | base | neither | narrow only | -0.0 sums only | both (default) |
+|---|---|---|---|---|---|
+| time series, 3,171 parameters | 4.07 | 4.07 | 4.03 | 4.02 | **3.86** |
+| time series, 37,901 parameters | 52.49 | 52.28 | 51.54 | 51.34 | **49.01** |
+
+Each alone is worth 1 to 2%; together 5 to 7%. Part of what the narrow
+copy gains needs the -0.0 start (see the first item under "What did not
+help" below). On the logistic model y
+is 40 KB of the 840 KB read per gradient, and narrowing it changed nothing
+measurable; with X exact in float (an artificial case, made by rounding the
+benchmark X) the float copy took 5% off.
+
+Four copies at once, one per core on cores 6 to 9 (one L3), 7 rounds, mean
+over the four: the large time-series gradient took 53.9 (base), 52.7 (no
+narrow) and 50.0 µs (narrow), and the float-X logistic gradient 24.4 (base)
+and 22.4 µs (narrow). The relative gain is the same as with one copy, so
+at four processes these kernels were not limited by shared memory
+bandwidth; the copies help through the per-core caches.
+
+Whole sampling runs, 4 chains, interleaved, sampling time, medians of 8:
+
+| | base | narrow | no narrow (`--no-narrow-data`) |
+|---|---|---|---|
+| small time series, 1000 + 1000, set 1 | 3.62 s (3.59 to 3.69) | **3.50 s** (3.44 to 3.55) | 3.62 s (3.59 to 3.68) |
+| small time series, 1000 + 1000, set 2 | 3.65 s (3.61 to 3.70) | **3.49 s** (3.46 to 3.52) | 3.64 s (3.61 to 3.66) |
+| large time series, 150 + 150 (6 rounds each) | 12.7 s / 14.1 s | 13.0 s / 13.9 s | 12.8 s / 14.7 s (`MINT_NARROW=0`) |
+
+In both sets of small runs every narrow run was faster than every base run.
+The large runs show no difference above the noise (two sets, other jobs
+running, ranges of 1 to 4 s); they spend most of their time in the sampler
+(about 78 µs per gradient per chain, of which the kernel is about 21 on
+three threads), so a gain of 1 to 3 µs would be 1 to 4%. All runs of a model
+produced the same raw draws (MINT_DRAWS) in all three builds.
+
+Build time, medians of 7: the time-series model 0.22 s before, 0.56 s now;
+logistic 0.14 s before, 0.37 s now (four variants of the model code each).
+Models without vector kernels build as before.
+
+What did not help or was not kept:
+
+- The first version let LLVM see the conversion. It was not exact: the
+  independent review found a model and float data where a gradient
+  component differed in the last bit, because the backend fused a
+  different multiply into an add. The converted value now passes through
+  an empty inline asm (`llvm.arithmetic.fence` instead did not prevent the
+  difference). Hiding the conversion cost speed until the -0.0 sums came
+  in: on the small model (core 12, 9 rounds) base took 4.15 µs, the
+  narrow build with the asm 4.10, and with the asm and the -0.0 sums 3.90,
+  against 3.88 for the unprotected version (with 0.0 sums). Part of what
+  the unprotected version had gained was LLVM dropping a 0.0 + x it could prove exact
+  (x = count - exp(eta) is never -0.0 when the count is an integer); the
+  -0.0 start removes that add in every build.
+- int16 and float copies of the counts: both slower than int8 (table).
+- Up to 8 or 16 variants (an int8, int16 and float choice for every
+  buffer): the logistic model took 0.73 s to build with 8, for no gain on
+  this data. The limit is 4.
+- An earlier whole-run measurement of the large model under heavy load
+  (load average up to 27) ranged from 12 to 196 s per run and is not
+  reported.

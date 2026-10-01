@@ -41,6 +41,13 @@ pub struct Opts {
     pub inline_log: bool,
     /// split a fused scan kernel's groups of rows across the chain's threads
     pub parallel_kernel: bool,
+    /// let a model's vector kernels read a narrow copy (int8, int16 or
+    /// float) of data whose values it holds exactly, chosen when sample()
+    /// starts
+    pub narrow_data: bool,
+    /// start the vector kernels' register sums of adjoints at -0.0, so that
+    /// LLVM drops their first add
+    pub negzero_sums: bool,
     /// also emit the fused leapfrog entry point (`leap`, see model.rs
     /// gen_logp), which the sampler then uses; off by default
     pub fused_leapfrog: bool,
@@ -305,6 +312,7 @@ pub fn compile(p: &TProgram, opts: &Opts) -> String {
     let mut m = Module::default();
     m.inline_exp = opts.inline_exp && !opts.strict_fp;
     m.inline_log = opts.inline_log && !opts.strict_fp;
+    m.negzero_sums = opts.negzero_sums && !opts.strict_fp;
     #[cfg(target_arch = "x86_64")]
     {
         m.avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
