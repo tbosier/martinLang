@@ -389,16 +389,21 @@ fn global_lines(m: &Module, o: &Opts) -> Vec<String> {
     v.push(if m.avx2 { "host: AVX2 and FMA (Mint's exp and log use its gathers; narrow data needs it)".to_string() } else { "host: no AVX2 and FMA (narrow data off)".to_string() });
     v.push(if m.inline_exp { "exp: Mint's own in the vector code Mint emits (scan and fission kernels, fused row loops); llvm.exp elsewhere".to_string() } else { format!("exp: llvm.exp everywhere ({})", off("--no-inline-exp")) });
     v.push(if m.inline_log { "log: Mint's own in the fission kernel's vector code; llvm.log elsewhere".to_string() } else { format!("log: llvm.log everywhere ({})", off("--no-inline-log")) });
-    v.push(if o.vecmath && !o.strict_fp {
-        "llvm.exp and llvm.log in loops LLVM vectorises: glibc's vector versions (libmvec)".to_string()
+    v.push(if uses_vecmath(o) {
+        "llvm.exp and llvm.log in loops LLVM vectorises: glibc's vector versions (build passes -fveclib=libmvec to clang)".to_string()
     } else {
-        format!("llvm.exp and llvm.log: scalar calls, no vector math library ({})", if o.strict_fp { "--strict-fp" } else { "--no-vecmath" })
+        format!("llvm.exp and llvm.log: no vector math library at build ({})", if o.strict_fp { "--strict-fp" } else { "--no-vecmath" })
     });
     if !m.negzero_sums {
         v.push(format!("register sums of adjoints in vector kernels start at 0.0 ({})", off("--no-negzero-sums")));
     }
     v.push("allocator: mint_alloc is declared noalias and returns 64-byte aligned memory, so LLVM needs no overlap checks on fresh buffers".into());
     v
+}
+
+/// Whether `build` links glibc's vector math library (`-fveclib=libmvec`).
+pub fn uses_vecmath(o: &Opts) -> bool {
+    o.vecmath && !o.strict_fp
 }
 
 /// Collects a function's `let`s and the names assigned after their `let`.
@@ -502,6 +507,8 @@ fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
     }
     let mut ret_val = None;
     if let Some(t) = &f.tail {
+        let at = cg.log_len();
+        cg.depth += 1;
         cg.f.begin_hoist();
         if t.ty.is_buffer() {
             cg.gen_into(t, "%out");
@@ -509,6 +516,8 @@ fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
             ret_val = Some(cg.gen_scalar(t));
         }
         cg.f.end_hoist();
+        cg.depth -= 1;
+        cg.log_header(at, format!("line {}: returns {}", t.span.line, show(t)));
     }
     let mut epi: Vec<String> = cg.f.frees.iter().map(|p| format!("call void @mint_free(ptr {p})")).collect();
     epi.push(match ret_val {
@@ -831,14 +840,10 @@ impl Cg<'_> {
             let caller = caller.split('(').next().unwrap_or("").to_string();
             let line = e.span.line;
             if let Some(mr) = self.m.log.as_deref_mut().and_then(|r| r.models.iter_mut().find(|r| &r.name == mname)) {
-                let mut total = explain::Poly::default();
-                for (_, t) in &tm.params {
-                    total.add(&explain::Poly::size_of(t));
-                }
-                let value = total.eval(&known).map(|v| format!(", so NUTS samples {v} values")).unwrap_or_default();
+                let value = mr.dim.eval(&known).map(|v| format!(", so NUTS samples {v} values")).unwrap_or_default();
                 mr.calls.push(format!("sample() at line {line} in {caller}: {}{value}", if binds.is_empty() { "no dimensions".to_string() } else { binds.join(", ") }));
             }
-            self.note(format!("sample({}): runs init (data copies, statistics, narrow-data checks), then NUTS with draws = {draws}, warmup = {warmup}, chains = {chains}, seed = {seed}", show(inst)));
+            self.note(format!("sample({}): runs the model's init (see model {mname}), then NUTS with draws = {draws}, warmup = {warmup}, chains = {chains}, seed = {seed}", show(inst)));
         }
         for ((dname, dty), arg) in tm.data.iter().zip(data) {
             let g = model::data_global(mname, dname);
@@ -1584,9 +1589,10 @@ impl Cg<'_> {
             for (k, (r, st)) in group.iter().zip(stmts).enumerate() {
                 let head = stmt_header(st);
                 let what = match r {
-                    RowStmt::Prod { .. } => format!("one value per row; the chunk's dot products {xname} * v first, {ROW_BLOCK} rows per pass over v"),
-                    RowStmt::Trans { rest, .. } => format!(
-                        "{xname}' * f by row updates, {ROW_BLOCK} rows per pass{}{}",
+                    RowStmt::Prod { mv, .. } => format!("one value per row; the chunk's dot products {} first, {ROW_BLOCK} rows per pass", show(mv)),
+                    RowStmt::Trans { f, rest, .. } => format!(
+                        "{xname}' * {} by row updates, {ROW_BLOCK} rows per pass{}{}",
+                        explain::show_factor(f),
                         if fold_t == Some(k) { format!("; when {cd} is not a multiple of 4 (checked at run time), computed in the Gram kernel's first padding column instead of by its own row updates") } else { String::new() },
                         rest.map(|e| format!("; {} added after the loop", show(e))).unwrap_or_default()
                     ),
@@ -1595,7 +1601,7 @@ impl Cg<'_> {
                 self.note(format!("{head}: {what}"));
             }
             self.note(if vector_ok {
-                format!("per-row values (producers, coefficients, weights): {ROW_LANES} rows per vector{}", if self.m.inline_exp { ", Mint's exp inline" } else { "" })
+                format!("per-row values (producers, coefficients, weights): {ROW_LANES} rows per vector")
             } else {
                 "per-row values one row at a time: log1p has no vector form".to_string()
             });
@@ -1983,10 +1989,11 @@ impl Cg<'_> {
 /// The report's description of the tiled Gram kernel (`gram_chunk`).
 fn tiled_gram_words(w: Option<&TExpr>) -> String {
     format!(
-        "tiled Gram kernel: chunks of {GRAM_CHUNK} rows; each chunk's weighted rows copied into scratch padded to a multiple of 4 columns; the upper triangle updated in 4 x {} and 4 x {} tiles (one 4 x 4 tile in the last strip) held in vector registers, mirrored at the end{}",
+        "tiled Gram kernel: chunks of {GRAM_CHUNK} rows; each chunk's {}rows copied into scratch padded to a multiple of 4 columns; the upper triangle updated in strips of 4 rows, each strip covered by 4 x {} and 4 x {} tiles as its width allows, held in vector registers (a strip 4 columns wide: one 4 x 4 tile), mirrored at the end{}",
+        if w.is_some() { "weighted " } else { "" },
         4 * TILE_WIDE,
         4 * TILE_NARROW,
-        if w.is_some() { "; the weights computed per row, never stored" } else { "" }
+        if w.is_some() { "; the weights computed per row of the chunk, never stored as a whole vector" } else { "" }
     )
 }
 

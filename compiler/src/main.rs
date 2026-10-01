@@ -172,12 +172,12 @@ fn main() {
             let rt = runtime_object();
             let mut cmd = Command::new("clang");
             cmd.args(["-O3", "-march=native", "-Wno-override-module"]);
-            if opts.vecmath && !opts.strict_fp {
+            if codegen::uses_vecmath(&opts) {
                 // glibc's vector math library (exp, log, ... on 4 lanes, <= 4 ulp)
                 cmd.arg("-fveclib=libmvec");
             }
             cmd.arg(&ll_path).arg(&rt).args(["-o", &o, "-fopenmp", "-lm", "-lpthread"]);
-            if opts.vecmath && !opts.strict_fp {
+            if codegen::uses_vecmath(&opts) {
                 cmd.arg("-lmvec");
             }
             let status = cmd.status().expect("run clang");

@@ -30,8 +30,9 @@ pub struct ModelRep {
     pub name: String,
     pub data: Vec<String>,
     pub params: Vec<ParamRep>,
-    /// Number of unconstrained values NUTS samples.
+    /// Number of unconstrained values NUTS samples, and as a polynomial.
     pub total: String,
+    pub dim: Poly,
     /// sample() calls of this model and the dimensions they bind.
     pub calls: Vec<String>,
     pub layout: Vec<String>,
@@ -198,6 +199,11 @@ pub fn show(e: &TExpr) -> String {
     show_p(e, 0)
 }
 
+/// `show`, parenthesised as the right operand of a product.
+pub fn show_factor(e: &TExpr) -> String {
+    show_p(e, 3)
+}
+
 fn prec(e: &TExpr) -> u8 {
     match &e.kind {
         TK::Bin(BinOp::Add | BinOp::Sub, ..) => 1,
@@ -337,6 +343,7 @@ pub fn fact_chain(e: &TExpr, sc: &Scope, depth: usize, seen: &mut HashSet<String
 
 fn fact_chain_as(e: &TExpr, label: Option<String>, sc: &Scope, depth: usize, seen: &mut HashSet<String>, out: &mut Vec<(usize, String)>) {
     if depth > 12 {
+        out.push((depth, "... (chain cut at depth 12)".into()));
         return;
     }
     let Some(f) = fact(&e.ty) else { return };
@@ -378,11 +385,11 @@ fn fact_chain_as(e: &TExpr, label: Option<String>, sc: &Scope, depth: usize, see
         TK::Gram { w: Some(w), .. } => {
             follow.push(w);
             match &e.ty {
-                Ty::Matrix(_, _, Struct::Psd) => format!("A' * diag(w) * A with weights w >= 0 (here {})", short(&w.ty)),
-                _ => "A' * diag(w) * A with weights of unknown sign".into(),
+                Ty::Matrix(_, _, Struct::Psd) => format!("a Gram product with weights >= 0 (the weights are {})", short(&w.ty)),
+                _ => "a Gram product with weights of unknown sign".into(),
             }
         }
-        TK::Gram { w: None, .. } => "A' * A".into(),
+        TK::Gram { w: None, .. } => "a Gram product".into(),
         TK::Bin(op, a, b) => {
             // (a literal operand is visible in the rule itself)
             follow.extend([&**a, &**b].into_iter().filter(|c| fact(&c.ty).is_some() && !matches!(c.kind, TK::Num(_))));
@@ -398,9 +405,10 @@ fn fact_chain_as(e: &TExpr, label: Option<String>, sc: &Scope, depth: usize, see
             follow.push(a);
             "transpose".into()
         }
-        TK::Sum(a) | TK::Norm(a) => {
+        TK::Norm(_) => "a norm is always >= 0".into(),
+        TK::Sum(a) => {
             follow.push(a);
-            "a sum of non-negative values".into()
+            format!("a sum of {} values", short(&a.ty))
         }
         TK::Call { name, .. } => format!("the declared return type of {name}"),
         _ => "derived by the checker".into(),

@@ -66,6 +66,12 @@ const FLAG_SETS: [&[&str]; 7] = [
     &["--no-fission", "--no-negzero-sums", "--no-vecmath"],
 ];
 
+/// Both commands come from the same binary, so this shows that explain
+/// compiles what emit (and build) compile, not that the code generators
+/// are unchanged. It assumes the IR is deterministic: gen_fission_kernel
+/// orders its scalar accumulators by a HashMap, which can differ between
+/// runs for a fission kernel with two or more scalar parameters (no program
+/// here has one).
 #[test]
 fn explain_compiles_what_emit_compiles() {
     let dir = std::env::temp_dir().join(format!("mint-explain-{}", std::process::id()));
@@ -160,7 +166,11 @@ fn dynamic_poisson() {
     has(&explain(f, &["--strict-fp"]), "threads: one (parallel kernel off, --strict-fp)");
     has(&explain(f, &["--no-narrow-data"]), "off (--no-narrow-data); the vector kernels read y as doubles");
     has(&explain(f, &["--no-inline-exp"]), "math: llvm.exp (4 lanes)");
-    has(&explain(f, &["--fused-leapfrog"]), "fused leapfrog (--fused-leapfrog): the leap entry point hands the sampler's leaf work on innov");
+    has(&explain(f, &["--fused-leapfrog"]), "fused leapfrog (--fused-leapfrog): the leap entry point runs the sampler's leaf work on innov from inside the fused scan kernel");
+    // without the parallel kernel the hook runs on the calling thread
+    let lf = explain(f, &["--fused-leapfrog", "--no-parallel-kernel"]);
+    has(&lf, "threads: one (parallel kernel off, --no-parallel-kernel)");
+    lacks(&lf, "to the kernel threads");
 }
 
 #[test]
@@ -170,7 +180,8 @@ fn logistic_newton() {
     has(&out, "fn fit(X: Matrix[n, p], y: Vector[n], lambda: Positive) -> Vector[p]");
     has(&out, "row fusion: lines 14 to 16 run as one loop over chunks of 32 rows of X, so each chunk of X is read from memory once");
     has(&out, "line 14: mu = sigmoid(X * w): one value per row");
-    has(&out, "line 15: g = X' * (mu - y) + lambda * w: X' * f by row updates");
+    has(&out, "line 14: mu = sigmoid(X * w): one value per row; the chunk's dot products X * w first");
+    has(&out, "line 15: g = X' * (mu - y) + lambda * w: X' * (mu - y) by row updates");
     has(&out, "when p is not a multiple of 4 (checked at run time), computed in the Gram kernel's first padding column");
     has(&out, "line 16: H = X' * diag(mu .* (1 - mu)) * X + lambda * I(p): tiled Gram kernel: chunks of 32 rows");
     has(&out, "4 x 12 and 4 x 8 tiles");
@@ -179,7 +190,7 @@ fn logistic_newton() {
     has(
         &out,
         "        H = X' * diag(mu .* (1 - mu)) * X + lambda * I(p) is SPD: PSD + SPD
-          X' * diag(mu .* (1 - mu)) * X is PSD: A' * diag(w) * A with weights w >= 0 (here Prob)
+          X' * diag(mu .* (1 - mu)) * X is PSD: a Gram product with weights >= 0 (the weights are Prob)
             mu .* (1 - mu) is Prob: Prob .* Prob
               mu = sigmoid(X * w) is Prob: sigmoid is always in (0, 1)
               1 - mu is Prob: 1 - Prob
@@ -221,7 +232,7 @@ fn logistic_bayes_and_linear() {
     has(&out, "X: tries float; ");
     let nk = explain("examples/logistic_bayes.mint", &["--no-fission-kernel"]);
     has(&nk, "fission kernel: off (--no-fission-kernel)");
-    has(&nk, "three passes over the n elements: the row dot products of X * beta");
+    has(&nk, "separate passes over the n elements: the row dot products of X * beta (4 rows at a time), then an elementwise loop for the density and its derivatives (left to LLVM), then the gradient row updates of X * beta");
     has(&explain("examples/logistic_bayes.mint", &["--no-fission"]), "loop fission: off (--no-fission)");
 
     let lin = explain("examples/linear_bayes.mint", &[]);
@@ -239,6 +250,98 @@ fn logistic_bayes_and_linear() {
     has(&explain("tests/fission/normal.mint", &[]), "scale exp(X * s) is Positive: exp is always Positive");
 }
 
+/// Runs explain on a program written to a temporary file.
+fn explain_src(name: &str, src: &str, flags: &[&str]) -> String {
+    let dir = std::env::temp_dir().join(format!("mint-explain-src-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.mint"));
+    std::fs::write(&path, src).unwrap();
+    let out = explain(path.to_str().unwrap(), flags);
+    let _ = std::fs::remove_file(&path);
+    out
+}
+
+/// Report lines that once described code the compiler does not emit.
+#[test]
+fn reports_only_what_is_emitted() {
+    // a product of data only has no gradient pass, in either fission path
+    let src = "model D {
+    data X: Matrix[n, p]
+    data y: Vector[n]
+    data w0: Vector[p]
+    param a: Real
+    a ~ Normal(0, 1)
+    y ~ BernoulliLogit(a * (X * w0))
+}
+fn main() {
+    let X: Matrix[n, p] = read(\"x.f64\")
+    let y: Vector[n] = read(\"y.f64\")
+    let w0: Vector[p] = read(\"w.f64\")
+    print(sample(D(X, y, w0), draws = 4, warmup = 0, chains = 1, seed = 1))
+}
+";
+    let k = explain_src("dataprod", src, &[]);
+    has(&k, "fission kernel: one loop over chunks of 32 rows; per chunk, the row dot products of X * w0 (4 rows at a time), then the density and its derivatives on 4 rows per vector; all in");
+    lacks(&k, "gradient updates");
+    let p = explain_src("dataprod", src, &["--no-fission-kernel"]);
+    has(&p, "the row dot products of X * w0");
+    lacks(&p, "gradient row updates");
+
+    // a running sum of a vector is one sequential pass
+    let v = explain_src(
+        "vcumsum",
+        "model V {
+    data y: Vector[n]
+    param z: Vector[n]
+    param s: Positive
+    z ~ Normal(0, 1)
+    s ~ Normal(0, 1)
+    y ~ Normal(cumsum(z), s)
+}
+fn main() {
+    let y: Vector[n] = read(\"y.f64\")
+    print(sample(V(y), draws = 4, warmup = 0, chains = 1, seed = 1))
+}
+",
+        &[],
+    );
+    has(&v, "running sum of z materialised before the loop (one sequential pass)");
+    has(&v, "scale s is Positive: param declared Positive");
+
+    // a row group without exp reports no exp; a norm is >= 0 by being a norm
+    let r = explain_src(
+        "rownoexp",
+        "fn f(X: Matrix[n, p], y: Vector[n], v: Vector[p]) -> Vector[p] {
+    let w = ones(p)
+    let mut out = zeros(p)
+    repeat 1 {
+        let mu = X * w
+        let g = X' * (mu - y)
+        let H = X' * X + (1 + norm(v)) * I(p)
+        out = solve(H, g)
+    }
+    out
+}
+fn s(A: SPD[p], z: Vector[p]) -> Vector[p] {
+    solve(A, z)
+}
+fn main() {
+    let X: Matrix[n, p] = read(\"x.f64\")
+    let y: Vector[n] = read(\"y.f64\")
+    print(f(X, y, ones(p)))
+    print(s(I(p), ones(p)))
+}
+",
+        &[],
+    );
+    has(&r, "row fusion: lines 5 to 7 run as one loop");
+    lacks(&r, "math: Mint's exp");
+    lacks(&r, "exp inline");
+    has(&r, "X' * X is PSD: a Gram product");
+    has(&r, "norm(v) is NonNeg: a norm is always >= 0");
+    has(&r, "  line 13: returns solve(A, z)\n    solve(A, z): Cholesky solve (mint_chol_solve), allowed because A is proved SPD:\n      A is SPD: declared SPD[p]");
+}
+
 #[test]
 fn scan_and_fission_test_models() {
     let th = explain("tests/scan/twohosts.mint", &[]);
@@ -248,6 +351,7 @@ fn scan_and_fission_test_models() {
     let b = explain("tests/scan/bernoulli.mint", &[]);
     has(&b, "scalar code, one row at a time: BernoulliLogit has no vector form in this kernel");
     has(&b, "threads: one (only vector kernels are split)");
+    has(&b, "gradients of beta (indexed by G): summed in registers per group of rows");
     has(&explain("tests/scan/nested.mint", &[]), "2 running sums along T");
     has(&explain("tests/fission/log1p.mint", &[]), "not a fission kernel: log1p or a running sum has no vector form in it");
     has(&explain("tests/fission/funcs.mint", &[]), "X * b (4 times, once per occurrence)");

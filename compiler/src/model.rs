@@ -1307,8 +1307,8 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                 let fission = opts.fission && ss.is_none() && matches!(shape, SShape::Vec(_)) && wants_fission(*dist, &l, &a);
                 match fission_why(*dist, &l, &a) {
                     Ok(why) if fission => note(m, k, format!("loop fission: {why}")),
-                    Ok(_) if !opts.fission && ss.is_none() => note(m, k, "loop fission: off (--no-fission); X * v is a row dot product inside the loop"),
-                    Err(why) if ss.is_none() && why != "no matrix-vector product" => note(m, k, format!("loop fission: no, {why}; X * v is a row dot product inside the loop")),
+                    Ok(_) if !opts.fission && ss.is_none() => note(m, k, format!("loop fission: off (--no-fission); {} inside the loop, one row dot product per element", mv_list(&l, &a))),
+                    Err(why) if ss.is_none() && why != "no matrix-vector product" => note(m, k, format!("loop fission: no, {why}; {} inside the loop, one row dot product per element", mv_list(&l, &a))),
                     _ => {}
                 }
                 stmts.push(Stmt::Tilde { dist: *dist, lhs: l, args: a, shape: shape.clone(), ss, fission });
@@ -1472,6 +1472,8 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
     // types per buffer than the default allows)
     let max_variants = std::env::var("MINTC_NARROW_VARIANTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v >= 1).unwrap_or(MAX_NARROW_VARIANTS);
     let mut cands: Vec<(String, Vec<Narrow>, bool)> = Vec::new();
+    // (for the report: why a candidate's types are what they are)
+    let mut why: HashMap<String, &'static str> = HashMap::new();
     for (n, _) in &tm.data {
         if !names.contains(n) {
             continue;
@@ -1490,6 +1492,16 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
         let (binary, counts) = (outcome(Dist::BernoulliLogit), outcome(Dist::PoissonLog));
         let kinds = if binary { vec![Narrow::I8] } else { vec![Narrow::I8, Narrow::I16, Narrow::F32] };
         cands.push((n.clone(), kinds, binary || counts));
+        why.insert(
+            n.clone(),
+            if binary {
+                " (a BernoulliLogit outcome, checked to be 0 or 1, so int8 only)"
+            } else if counts {
+                " (a PoissonLog outcome, checked to be counts)"
+            } else {
+                ""
+            },
+        );
     }
     // Too many variants: give up the less likely types first (small
     // integers in real-valued data, then float and int16 for counts),
@@ -1515,14 +1527,7 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
     }
     for (n, ks, _) in &cands {
         let tries: Vec<&str> = ks.iter().map(|k| narrow_name(*k)).collect();
-        let what = stmts.iter().find_map(|s| {
-            let Stmt::Tilde { dist, lhs, .. } = s;
-            match (dist, lhs) {
-                (Dist::BernoulliLogit, M::DataV(x, _) | M::DataM(x)) if x == n => Some(" (a BernoulliLogit outcome, checked to be 0 or 1, so int8 only)"),
-                (Dist::PoissonLog, M::DataV(x, _) | M::DataM(x)) if x == n => Some(" (a PoissonLog outcome, checked to be counts)"),
-                _ => None,
-            }
-        });
+        let what = why.get(n).copied();
         let skipped: Vec<&str> = dropped.iter().filter(|(d, _)| d == n).map(|(_, k)| narrow_name(*k)).collect();
         let skipped = if skipped.is_empty() { String::new() } else { format!("; {} not tried (at most {max_variants} variants of logp)", skipped.join(" and ")) };
         log.push(format!("{n}: tries {}; the vector kernels read a copy in the first type that holds every value exactly, else the doubles{}{skipped}", tries.join(", then "), what.unwrap_or("")));
@@ -1895,7 +1900,10 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             r.other.push(if g.leap_cov.is_empty() {
                 "fused leapfrog (--fused-leapfrog): not emitted, no matrix parameter is owned by exactly one fused scan kernel".to_string()
             } else {
-                format!("fused leapfrog (--fused-leapfrog): the leap entry point hands the sampler's leaf work on {} to the kernel threads", g.leap_cov.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "fused leapfrog (--fused-leapfrog): the leap entry point runs the sampler's leaf work on {} from inside the fused scan kernel, on each range of rows once its gradient is final (on the kernel's threads when it runs in parallel, else on the calling thread)",
+                    g.leap_cov.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                )
             });
         }
         if g.leap_cov.is_empty() {
@@ -2445,14 +2453,17 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
 
 /// The explain report for a statement that takes the general path of
 /// `gen_logp` (one loop over its index space, with materialised nodes
-/// around it). Mirrors the branches there.
+/// around it). Mirrors the branches there; a gradient pass exists only for
+/// a node with an adjoint (`node.active()`, as in `ws_slots`).
 fn generic_notes(g: &mut Mg, lhs: &M, args: &[M], shape: &SShape, nodes: &[&M]) {
     let prods: Vec<String> = nodes.iter().filter(|n| matches!(n, M::MatVec { .. })).map(|n| show_m(n)).collect();
+    let grads: Vec<String> = nodes.iter().filter(|n| matches!(n, M::MatVec { .. }) && n.active()).map(|n| show_m(n)).collect();
     let text = match shape {
         SShape::Scalar => "one scalar term".to_string(),
         SShape::Vec(n) if !prods.is_empty() => format!(
-            "three passes over the {n} elements: the row dot products of {} ({ROW_BLOCK} rows at a time), an elementwise loop for the density and its derivatives (left to LLVM's vectoriser), and the gradient row updates ({ROW_BLOCK} rows at a time)",
-            products(&prods)
+            "separate passes over the {n} elements: the row dot products of {} ({ROW_BLOCK} rows at a time), then an elementwise loop for the density and its derivatives (left to LLVM){}",
+            products(&prods),
+            if grads.is_empty() { String::new() } else { format!(", then the gradient row updates of {} ({ROW_BLOCK} rows at a time)", products(&grads)) }
         ),
         SShape::Vec(n) => format!("one loop over the {n} elements: value, density and reverse sweep per element"),
         SShape::Mat(r, c) if nodes.is_empty() && !uses_axes(lhs) && !args.iter().any(uses_axes) => format!("one flat loop over the {r} x {c} elements"),
@@ -2480,7 +2491,8 @@ fn generic_notes(g: &mut Mg, lhs: &M, args: &[M], shape: &SShape, nodes: &[&M]) 
         let M::Cumsum { inner, shape: own, .. } = n else { continue };
         let how = match own {
             SShape::Mat(r, c) if g.is_cm(r, c) => "column by column in the scan layout",
-            _ => "four rows interleaved",
+            SShape::Mat(..) => "four rows interleaved",
+            _ => "one sequential pass",
         };
         g.note(format!("running sum of {} materialised before the loop ({how}); its adjoint, a reverse running sum, after it", show_m(inner)));
     }
@@ -2668,9 +2680,12 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
     let scr_q = scratch(g, scr_l.is_some() && g.m.inline_log);
     if g.rec {
         let prods: Vec<String> = nodes.iter().map(|n| show_m(n)).collect();
-        g.note(format!("fission kernel: one loop over chunks of {CHUNK} rows; per chunk, the row dot products of {} ({L} rows at a time), then the density and its derivatives on {L} rows per vector, then the gradient updates ({L} rows at a time, reading the chunk's rows again from L1); all in Mint's own <{L} x double> code", products(&prods)));
+        // (the gradient updates run for the products with an adjoint buffer, as in `axpys`)
+        let grads: Vec<String> = nodes.iter().zip(&bufs).filter(|(_, (_, ad))| ad.is_some()).map(|(n, _)| show_m(n)).collect();
+        let upd = if grads.is_empty() { String::new() } else { format!(", then the gradient updates of {} ({L} rows at a time, reading the chunk's rows of the matrix again, now from cache)", products(&grads)) };
+        g.note(format!("fission kernel: one loop over chunks of {CHUNK} rows; per chunk, the row dot products of {} ({L} rows at a time), then the density and its derivatives on {L} rows per vector{upd}; all in Mint's own <{L} x double> code", products(&prods)));
         if scr_e.is_some() {
-            g.note(format!("the density's {} runs first, in a loop of its own over the chunk, into L1 scratch", if dist == Dist::PoissonLog { "exp(eta)" } else { "exp(-|eta|)" }));
+            g.note(format!("the density's {} runs first, in a loop of its own over the chunk, into a {CHUNK}-value scratch", if dist == Dist::PoissonLog { "exp(eta)" } else { "exp(-|eta|)" }));
         } else if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) {
             g.note("the density's exp stays in the main loop: the linear predictor calls a function, so it is not evaluated twice");
         }
@@ -3055,14 +3070,41 @@ fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
 }
 
 /// `kernel_lanes`, with the reason for one lane.
-fn lanes_why(dist: Dist, lhs: &M, args: &[M], fission: bool) -> (u32, &'static str) {
+fn lanes_why(dist: Dist, lhs: &M, args: &[M], fission: bool) -> (u32, String) {
     let inner_ok = stmt_globals(lhs, args, fission).iter().all(|n| vec_ok(n));
     if dist == Dist::BernoulliLogit {
-        (1, "BernoulliLogit has no vector form in this kernel")
+        (1, "BernoulliLogit has no vector form in this kernel".into())
     } else if !(vec_ok(lhs) && args.iter().all(vec_ok) && inner_ok) {
-        (1, "abs, log1p or a matrix-vector product has no vector form in this kernel")
+        // which operations `vec_ok` refused
+        fn no_vec(e: &M, out: &mut Vec<&'static str>) {
+            let mut put = |s: &'static str| {
+                if !out.contains(&s) {
+                    out.push(s)
+                }
+            };
+            match e {
+                M::Func(Func::Abs, _) => put("abs"),
+                M::Func(Func::Log1p, _) => put("log1p"),
+                M::MatVec { .. } => put("a matrix-vector product"),
+                _ => {}
+            }
+            match e {
+                M::Func(_, a) | M::Neg(a) => no_vec(a, out),
+                M::Bin(_, a, b) => {
+                    no_vec(a, out);
+                    no_vec(b, out);
+                }
+                M::Cumsum { inner, .. } => no_vec(inner, out),
+                _ => {}
+            }
+        }
+        let mut what = Vec::new();
+        for e in std::iter::once(lhs).chain(args) {
+            no_vec(e, &mut what);
+        }
+        (1, format!("{} has no vector form in this kernel", what.join(" and ")))
     } else {
-        (4, "")
+        (4, String::new())
     }
 }
 
@@ -3406,14 +3448,19 @@ fn gen_fused_scan<'s>(
             g.note(format!("gradients of {} (indexed by {rd}): summed in registers per group of rows", sc.rp.join(", ")));
         }
         if !sc.cp.is_empty() {
-            g.note(format!("gradients of {} (indexed by {cd}): per-lane partial sums, {cd} x 4 per thread, reduced once at the end", sc.cp.join(", ")));
+            g.note(if lanes > 1 {
+                format!("gradients of {} (indexed by {cd}): per-lane partial sums, {cd} x 4 per thread, reduced once at the end", sc.cp.join(", "))
+            } else {
+                format!("gradients of {} (indexed by {cd}): partial sums per column, reduced once at the end", sc.cp.join(", "))
+            });
         }
         let wide = lanes * KERNEL_UNROLL;
         g.note(match (&par, g.par_off) {
             (Some(_), _) => format!("threads: the groups of {wide} rows are split across the chain's threads when more than one is requested at run time (mint_par_groups; thread 0 also runs the rows left over); with one thread it runs the serial loop"),
-            (None, Some(flag)) if lanes > 1 => format!("threads: one (parallel kernel off, {flag})"),
             (None, _) if lanes == 1 => "threads: one (only vector kernels are split)".to_string(),
-            (None, _) => "threads: one (an absorbed statement has a matrix-vector product)".to_string(),
+            (None, Some(flag)) => format!("threads: one (parallel kernel off, {flag})"),
+            (None, _) if guest_matvec => "threads: one (an absorbed statement has a matrix-vector product)".to_string(),
+            (None, _) => unreachable!("par is set whenever par_nt is, lanes > 1 and no guest has a matrix-vector product"),
         });
     }
 }
@@ -3429,6 +3476,16 @@ fn products(ps: &[String]) -> String {
         }
     }
     seen.iter().map(|(p, n)| if *n == 1 { p.clone() } else { format!("{p} ({n} times, once per occurrence)") }).collect::<Vec<_>>().join(" and ")
+}
+
+/// The matrix-vector products of a statement, for the report.
+fn mv_list(lhs: &M, args: &[M]) -> String {
+    let mut mv = Vec::new();
+    for e in std::iter::once(lhs).chain(args) {
+        matvecs(e, &mut mv);
+    }
+    let names: Vec<String> = mv.iter().map(|n| show_m(n)).collect();
+    products(&names)
 }
 
 /// "1 running sum", "2 running sums".
@@ -3821,7 +3878,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
         g.scan_noted = true;
         g.note(if split {
             format!(
-                "passes per group: A, forward in time, the running sums and the density's argument into L1 scratch; B, exp over the scratch with nothing else live (the exp split); C (density and derivatives) and R (reverse running sums of the adjoints) together, from the last column{}",
+                "passes per group: A, forward in time, the running sums and the density's argument into the group's scratch; B, exp over the scratch with nothing else live (the exp split); C (density and derivatives) and R (reverse running sums of the adjoints) together, from the last column{}",
                 if lean { "; C reloads the argument (a sum of terms) instead of the running sum, and hands its adjoint to R in a register" } else { "" }
             )
         } else {
@@ -4132,30 +4189,22 @@ fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) {
     g.cm = cm.to_vec();
     let (layout, total) = g.layout(tm);
     g.f.memcpy(g.m, "%out", "%unc", &total);
-    if let Some(r) = rep(g.m) {
-        for (n, t) in &tm.params {
-            let transform = match t {
-                Ty::Matrix(r, c, _) if cm.contains(&(r.clone(), c.clone())) => "unconstrained; scan layout inside the sampler, draws written row-major",
-                Ty::Scalar(Dom::Positive) => "sampled as log; exp maps it back, log-Jacobian added",
-                Ty::Vector(_, Dom::Positive) => "each entry sampled as log; exp maps it back, log-Jacobian added",
-                _ => "unconstrained",
-            };
-            r.params.push(ParamRep { name: n.clone(), ty: explain::src_ty(t), size: Poly::size_of(t).to_string(), transform: transform.into() });
-        }
-    }
-    for ((_, t), (_, off, _)) in tm.params.iter().zip(&layout) {
-        match t {
+    for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+        // (the log-Jacobian of the exp is added in logp, gen_logp)
+        let transform = match t {
             Ty::Matrix(r, c, _) if g.is_cm(r, c) => {
                 // back to row-major for the draws
                 let (rd, cd) = (g.dim(r), g.dim(c));
                 let src = g.f.gep("%unc", off);
                 let dst = g.f.gep("%out", off);
                 untranspose(&mut g, &src, &dst, &rd, &cd);
+                "unconstrained; scan layout inside the sampler, draws written row-major"
             }
             Ty::Scalar(Dom::Positive) => {
                 let u = g.f.load("%unc", off);
                 let v = g.f.intrinsic1(g.m, "llvm.exp.f64", &u);
                 g.f.store(&v, "%out", off);
+                "sampled as log; exp maps it back, log-Jacobian added"
             }
             Ty::Vector(d, Dom::Positive) => {
                 let len = g.dim(d);
@@ -4166,8 +4215,12 @@ fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) {
                     let v = g.f.intrinsic1(g.m, "llvm.exp.f64", &u);
                     g.f.store(&v, "%out", &i);
                 });
+                "each entry sampled as log; exp maps it back, log-Jacobian added"
             }
-            _ => {}
+            _ => "unconstrained",
+        };
+        if let Some(r) = rep(g.m) {
+            r.params.push(ParamRep { name: n.clone(), ty: explain::src_ty(t), size: Poly::size_of(t).to_string(), transform: transform.into() });
         }
     }
     let header = format!("define void @mint_model_{}_constrain(ptr %unc, ptr %out)", tm.name);
@@ -4236,6 +4289,7 @@ fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, varian
             d.add(&Poly::size_of(t));
         }
         r.total = d.to_string();
+        r.dim = d;
     }
     let k = tm.params.len();
     let names = g.f.alloca(&format!("[{k} x ptr]"));
