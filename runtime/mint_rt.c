@@ -368,9 +368,11 @@ static void leapfrog_into(Nuts *s, const St *z, St *n, double eps) {
 
 // ---- the sampler's D-length passes
 //
-// Every sum over D is accumulated in LN lanes: element i goes to lane i % LN,
-// each lane adds its elements in index order, and the lanes are combined in a
-// fixed tree (lanes_total). When a chain's passes are split across threads,
+// Every sum over D in these passes (the leaves' kinetic energy and the
+// no-U-turn checks; not hamiltonian(), a plain loop used for the starting
+// energy and the step-size search) is accumulated in LN lanes: element i goes
+// to lane i % LN, each lane adds its elements in index order, and the lanes
+// are combined in a fixed tree (lanes_total). When a chain's passes are split across threads,
 // each thread's range starts at a multiple of LN and the threads' totals are
 // added in thread order. The result therefore does not depend on how a pass
 // is blocked or fused, or on the compiler's vectorisation; it does depend on
@@ -914,8 +916,10 @@ static void next_window(Windows *w) {
 static int read_cpu_list(const char *path, cpu_set_t *set) {
   FILE *f = fopen(path, "r");
   if (!f) return 0;
-  char buf[1024];
+  char buf[8192];
   int ok = fgets(buf, sizeof buf, f) != NULL;
+  // the whole line, or nothing: a truncated list would parse as other CPUs
+  ok = ok && (strchr(buf, '\n') || feof(f));
   fclose(f);
   if (!ok) return 0;
   CPU_ZERO(set);
@@ -965,23 +969,47 @@ static int l3_groups(cpu_set_t *g, int max) {
     if (!found || n == max) return 0;
     CPU_AND(&g[n], &l3, &allowed);
     if (!CPU_ISSET(c, &g[n])) return 0;
+    for (int k = 0; k < n; k++) {  // groups must not overlap
+      cpu_set_t both;
+      CPU_AND(&both, &g[k], &g[n]);
+      if (CPU_COUNT(&both)) return 0;
+    }
     n++;
   }
   return n;
 }
 
-// Restricts every thread of this chain's team to *set, after recording the
-// chain thread's previous mask in *old for restore_team.
-static int bind_team(int nt, const cpu_set_t *set, cpu_set_t *old) {
-  if (pthread_getaffinity_np(pthread_self(), sizeof *old, old) != 0) return 0;
+// Each thread's own mask from before bind_team, put back by restore_team.
+static __thread cpu_set_t saved_mask;
+static __thread int saved_ok;
+
+static void restore_team(int nt) {
 #pragma omp parallel num_threads(nt)
-  pthread_setaffinity_np(pthread_self(), sizeof *set, set);
-  return 1;
+  if (saved_ok) {
+    pthread_setaffinity_np(pthread_self(), sizeof saved_mask, &saved_mask);
+    saved_ok = 0;
+  }
 }
 
-static void restore_team(int nt, const cpu_set_t *old) {
-#pragma omp parallel num_threads(nt)
-  pthread_setaffinity_np(pthread_self(), sizeof *old, old);
+// Restricts every thread of this chain's team to *set. This relies on the
+// chain getting the same OpenMP threads for every pass (LLVM's "hot team"
+// of a thread that is not itself inside a parallel region), so it is not
+// done with dynamic team sizes, and it is undone when the team is smaller
+// than asked for or a thread could not be moved. Returns 1 when bound.
+static int bind_team(int nt, const cpu_set_t *set) {
+  if (omp_get_dynamic()) return 0;
+  int used = 0, fails = 0;
+#pragma omp parallel num_threads(nt) reduction(+ : fails)
+  {
+    if (omp_get_thread_num() == 0) used = omp_get_num_threads();
+    saved_ok = pthread_getaffinity_np(pthread_self(), sizeof saved_mask, &saved_mask) == 0;
+    if (!saved_ok || pthread_setaffinity_np(pthread_self(), sizeof *set, set) != 0) fails++;
+  }
+  if (used != nt || fails) {
+    restore_team(nt);
+    return 0;
+  }
+  return 1;
 }
 
 typedef struct {
@@ -1009,8 +1037,7 @@ static void *run_chain(void *arg) {
   s->D = D;
   s->nt = job->threads_per_chain;
   s->team_min = s->nt;
-  cpu_set_t old_mask;
-  int bound = job->l3 && s->nt > 1 && bind_team(s->nt, job->l3, &old_mask);
+  int bound = job->l3 && s->nt > 1 && bind_team(s->nt, job->l3);
   s->f = job->f;
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
@@ -1118,7 +1145,7 @@ static void *run_chain(void *arg) {
   job->step_size = s->eps;
   job->n_grad = s->n_grad;
   job->team_min = s->team_min;
-  if (bound) restore_team(s->nt, &old_mask);
+  if (bound) restore_team(s->nt);
   job->mean_leapfrog = job->draws ? (double)total_leapfrog / (double)job->draws : 0;
 
   free(wmean);

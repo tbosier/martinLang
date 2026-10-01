@@ -171,8 +171,10 @@ differs by more than 3 MCSE in any pair where both runs mixed.
     traffic.
   - For models with at least 8,192 parameters, each chain splits its sampler
     passes across threads (by default, about physical cores ÷ chains).
-  - Below that size the sampler runs serially and its draws are bit-identical
-    to the original implementation. The small model runs 1.8x faster.
+  - Below that size the sampler runs serially and its draws were
+    bit-identical to the original implementation. (A later change fixed the
+    order of the sampler's sums, so current draws differ from those by
+    rounding; see the Runtime section of [architecture.md](architecture.md).) The small model runs 1.8x faster.
 - **The compiler round** ([compiler-round.md](compiler-round.md)): a
   column-major layout for the scanned matrix, a fused kernel vectorised
   across series, Mint's own `exp`, and statement absorption made the gradient

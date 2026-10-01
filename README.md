@@ -159,6 +159,8 @@ Useful environment variables for compiled programs:
 - `MINT_BENCH_GRAD=K` times K gradient evaluations and exits.
 - `MINT_THREADS_PER_CHAIN=N` sets how many threads each chain's sampler
   passes use. The default is 1 below 8,192 parameters.
+- `MINT_CHAIN_AFFINITY=0` stops the runtime from keeping each threaded
+  chain's threads on the CPUs of one L3 cache.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 
