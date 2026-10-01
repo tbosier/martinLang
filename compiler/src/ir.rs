@@ -12,6 +12,56 @@ pub fn fconst(v: f64) -> String {
     format!("0x{:016X}", v.to_bits())
 }
 
+/// A narrow storage type for a copy of model data whose every value it holds
+/// exactly (chosen at run time, see `mint_narrow` in the runtime). Vector
+/// code loads it and converts in registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Narrow {
+    I8,
+    I16,
+    F32,
+}
+
+impl Narrow {
+    /// The runtime's code for this type (`mint_narrow`).
+    pub fn code(self) -> u32 {
+        match self {
+            Narrow::I8 => 1,
+            Narrow::I16 => 2,
+            Narrow::F32 => 3,
+        }
+    }
+    pub fn llty(self) -> &'static str {
+        match self {
+            Narrow::I8 => "i8",
+            Narrow::I16 => "i16",
+            Narrow::F32 => "float",
+        }
+    }
+    /// The element suffix of a masked-load intrinsic for this type.
+    pub fn mname(self) -> &'static str {
+        match self {
+            Narrow::I8 => "i8",
+            Narrow::I16 => "i16",
+            Narrow::F32 => "f32",
+        }
+    }
+    pub fn bytes(self) -> u32 {
+        match self {
+            Narrow::I8 => 1,
+            Narrow::I16 => 2,
+            Narrow::F32 => 4,
+        }
+    }
+    /// The conversion to double, exact for every value of the type.
+    pub fn conv(self) -> &'static str {
+        match self {
+            Narrow::F32 => "fpext",
+            _ => "sitofp",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Module {
     pub decls: BTreeSet<String>,
@@ -29,6 +79,11 @@ pub struct Module {
     /// its gather instruction directly, since LLVM's generic gather is split
     /// into scalar loads on some CPUs where the instruction is fast.
     pub avx2: bool,
+    /// While a model's narrow-data variant of `logp` is generated: the data
+    /// that variant reads through a narrow copy, and the suffix of the
+    /// variant's function names (empty for the wide one).
+    pub narrow_data: HashMap<String, Narrow>,
+    pub variant: String,
 }
 
 /// 2^(j/256) for j = 0..255, each correctly rounded to double (computed with
@@ -719,6 +774,13 @@ pub struct Fb {
     pub scalar_inline_exp: bool,
     /// Use Mint's log in vector code (lanes > 1): set by the fission kernel.
     pub inline_log: bool,
+    /// Data pointers (registers) with a narrow copy: wide pointer -> (narrow
+    /// pointer, its type). Only vector code (lanes > 1) loads the narrow
+    /// copy. That code is Mint's own, so its arithmetic is the same either
+    /// way; a scalar loop is left to LLVM's vectoriser, whose choice of
+    /// vector width and interleaving (and so the order of a reassociated
+    /// sum) could change with the type it loads.
+    pub narrow: HashMap<String, (String, Narrow)>,
 }
 
 impl Fb {
@@ -735,6 +797,7 @@ impl Fb {
             lanes: 1,
             scalar_inline_exp: false,
             inline_log: false,
+            narrow: HashMap::new(),
         }
     }
 
@@ -974,10 +1037,27 @@ impl Fb {
         r
     }
     pub fn load(&mut self, p: &str, idx: &str) -> String {
+        if self.lanes > 1 {
+            if let Some((np, k)) = self.narrow.get(p).cloned() {
+                return self.load_narrow(&np, k, idx);
+            }
+        }
         let a = self.gep(p, idx);
         let r = self.reg();
         let t = self.ty();
         self.emit(format!("{r} = load {t}, ptr {a}, align 8"));
+        r
+    }
+    /// Elements idx.. of a narrow copy, converted to the current type.
+    pub fn load_narrow(&mut self, np: &str, k: Narrow, idx: &str) -> String {
+        let (et, b) = (k.llty(), k.bytes());
+        let a = self.reg();
+        self.emit(format!("{a} = getelementptr inbounds {et}, ptr {np}, i64 {idx}"));
+        let (nt, t) = if self.lanes == 1 { (et.to_string(), "double".to_string()) } else { (format!("<{} x {et}>", self.lanes), self.ty()) };
+        let x = self.reg();
+        self.emit(format!("{x} = load {nt}, ptr {a}, align {b}"));
+        let r = self.reg();
+        self.emit(format!("{r} = {} {nt} {x} to {t}", k.conv()));
         r
     }
     pub fn store(&mut self, v: &str, p: &str, idx: &str) {

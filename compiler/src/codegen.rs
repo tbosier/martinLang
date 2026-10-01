@@ -41,6 +41,10 @@ pub struct Opts {
     pub inline_log: bool,
     /// split a fused scan kernel's groups of rows across the chain's threads
     pub parallel_kernel: bool,
+    /// let a model's vector kernels read a narrow copy (int8, int16 or
+    /// float) of data whose values it holds exactly, chosen when sample()
+    /// starts
+    pub narrow_data: bool,
 }
 
 #[derive(Clone)]

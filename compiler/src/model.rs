@@ -19,11 +19,16 @@ use std::collections::HashMap;
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Dist, Func, SShape, TExpr, TModel, TModelStmt, TK};
 use crate::codegen::{scalar_func, Opts};
-use crate::ir::{fconst, for_range, for_range_md, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::ir::{fconst, for_range, for_range_md, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module, Narrow};
 use crate::types::{Dim, Dom, Ty};
 
 pub fn data_global(model: &str, name: &str) -> String {
     format!("@mint_model_{model}_data_{name}")
+}
+
+/// The narrow copy of a data buffer (null when its values need doubles).
+fn narrow_global(model: &str, name: &str) -> String {
+    format!("@mint_model_{model}_nd_{name}")
 }
 
 pub fn dim_global(model: &str, sym: &str) -> String {
@@ -568,6 +573,10 @@ impl<'a> Mg<'a> {
             let gl = data_global(&tm.name, n);
             if t.is_buffer() {
                 let p = g.f.load_ptr(&gl);
+                if let Some(k) = g.m.narrow_data.get(n).copied() {
+                    let np = g.f.load_ptr(&narrow_global(&tm.name, n));
+                    g.f.narrow.insert(p.clone(), (np, k));
+                }
                 g.data_p.insert(n.clone(), p);
             } else {
                 let v = g.f.load_f64(&gl);
@@ -1085,11 +1094,148 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
         cm.retain(|s| !mv.contains(s));
     }
 
-    gen_init(m, tm, &stmts, opts, &cm);
+    // Narrow data: `init` picks, per sample() call, a variant of `logp`
+    // whose vector kernels read a narrow copy of each data buffer whose
+    // values it holds exactly (variant 0 reads only doubles).
+    let cands = narrow_candidates(tm, &stmts, opts, &cm);
+    for (n, _) in &cands {
+        m.globals.push(format!("{} = internal global ptr null", narrow_global(name, n)));
+    }
+    let nv: usize = cands.iter().map(|(_, k)| k.len() + 1).product();
+    if nv > 1 {
+        m.globals.push(format!("@mint_model_{name}_variant = internal global i64 0"));
+    }
+    gen_init(m, tm, &stmts, opts, &cm, &cands);
     gen_logp(m, tm, &stmts, opts, &cm);
+    for v in 1..nv {
+        m.narrow_data = narrow_variant(&cands, v).into_iter().collect();
+        m.variant = format!("_n{v}");
+        gen_logp(m, tm, &stmts, opts, &cm);
+    }
+    m.narrow_data.clear();
+    m.variant.clear();
+    if nv > 1 {
+        let fns: Vec<String> = (0..nv).map(|v| if v == 0 { format!("ptr @mint_model_{name}_logp") } else { format!("ptr @mint_model_{name}_logp_n{v}") }).collect();
+        m.globals.push(format!("@mint_model_{name}_logp_table = internal constant [{nv} x ptr] [{}]", fns.join(", ")));
+    }
     gen_constrain(m, tm, opts, &cm);
     let permute = gen_permute(m, tm, opts, &cm);
-    gen_sample_fn(m, tm, opts, permute);
+    gen_sample_fn(m, tm, opts, permute, nv);
+}
+
+/// Most variants of `logp` generated for narrow data. Each is a full copy
+/// for clang to compile: the logistic model took 0.14 s to build with one,
+/// 0.73 s with 8.
+const MAX_NARROW_VARIANTS: usize = 4;
+
+/// The data buffers that Mint's own vector kernels load (the vectorised
+/// fused scan kernel, with the statements it absorbs, and the fission
+/// kernel), each with the narrow types to try for it, narrowest first.
+/// Which one is used, if any, is decided at run time from the values.
+fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) -> Vec<(String, Vec<Narrow>)> {
+    if !opts.narrow_data {
+        return Vec::new();
+    }
+    fn leaves(e: &M, out: &mut Vec<String>) {
+        match e {
+            // a column-indexed vector in a kernel whose lanes run along rows
+            // is one scalar load per column: left wide
+            M::DataV(n, ax) if *ax != Ax::Col => out.push(n.clone()),
+            M::DataM(n) => out.push(n.clone()),
+            M::MatVec { mat, vec, .. } => {
+                out.push(mat.clone());
+                leaves(vec, out);
+            }
+            M::Cumsum { inner, .. } => leaves(inner, out),
+            M::Bin(_, a, b) => {
+                leaves(a, out);
+                leaves(b, out);
+            }
+            M::Neg(a) | M::Func(_, a) => leaves(a, out),
+            _ => {}
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    for s in stmts {
+        let Stmt::Tilde { dist, lhs, args, shape, ss: None, fission } = s else { continue };
+        let nodes = stmt_globals(lhs, args, *fission);
+        let scan = opts.scan_fusion && fused_scan_rows_cm(cm, lhs, args, shape, *fission).is_some() && kernel_lanes(*dist, lhs, args, false) > 1;
+        let fk = opts.fission_kernel && !opts.strict_fp && *fission && fission_kernel_ok(lhs, args, &nodes);
+        if !(scan || fk) {
+            continue;
+        }
+        leaves(lhs, &mut names);
+        for a in args {
+            leaves(a, &mut names);
+        }
+        if scan {
+            // element-wise statements over the same shape run in its reverse loop
+            for s2 in stmts {
+                let Stmt::Tilde { dist: d2, lhs: l2, args: a2, shape: sh2, ss: None, fission: f2 } = s2 else { continue };
+                if sh2 == shape && stmt_globals(l2, a2, *f2).is_empty() && !uses_axes(l2) && !a2.iter().any(uses_axes) && kernel_lanes(*d2, l2, a2, *f2) > 1 {
+                    leaves(l2, &mut names);
+                    for a in a2 {
+                        leaves(a, &mut names);
+                    }
+                }
+            }
+        }
+    }
+    // (name, types, whether the model makes it integer-valued)
+    let mut cands: Vec<(String, Vec<Narrow>, bool)> = Vec::new();
+    for (n, _) in &tm.data {
+        if !names.contains(n) {
+            continue;
+        }
+        // A BernoulliLogit outcome is checked to be 0 or 1 before sampling,
+        // so int8 always holds it, and a PoissonLog outcome is checked to be
+        // counts. Anything else may be small integers (indicators, codes) or
+        // values exact in float.
+        let outcome = |d: Dist| {
+            stmts.iter().any(|s| {
+                let Stmt::Tilde { dist, lhs, .. } = s;
+                *dist == d && matches!(lhs, M::DataV(x, _) | M::DataM(x) if x == n)
+            })
+        };
+        let (binary, counts) = (outcome(Dist::BernoulliLogit), outcome(Dist::PoissonLog));
+        let kinds = if binary { vec![Narrow::I8] } else { vec![Narrow::I8, Narrow::I16, Narrow::F32] };
+        cands.push((n.clone(), kinds, binary || counts));
+    }
+    // Too many variants: give up the less likely types first (small
+    // integers in real-valued data, then float and int16 for counts),
+    // then whole candidates, real-valued ones first.
+    let count = |c: &[(String, Vec<Narrow>, bool)]| c.iter().map(|(_, k, _)| k.len() + 1).product::<usize>();
+    for (ints, drop) in [(false, Narrow::I16), (false, Narrow::I8), (true, Narrow::F32), (true, Narrow::I16)] {
+        if count(&cands) <= MAX_NARROW_VARIANTS {
+            break;
+        }
+        for (_, ks, i) in cands.iter_mut() {
+            if *i == ints && ks.len() > 1 {
+                ks.retain(|k| *k != drop);
+            }
+        }
+    }
+    while count(&cands) > MAX_NARROW_VARIANTS {
+        let at = cands.iter().rposition(|c| !c.2).unwrap_or(cands.len() - 1);
+        cands.remove(at);
+    }
+    cands.into_iter().map(|(n, k, _)| (n, k)).collect()
+}
+
+/// The narrow data of variant v: candidate j takes digit j of v in mixed
+/// radix (radix 1 + its number of types; 0 is the wide data).
+fn narrow_variant(cands: &[(String, Vec<Narrow>)], v: usize) -> Vec<(String, Narrow)> {
+    let mut rem = v;
+    let mut out = Vec::new();
+    for (n, kinds) in cands {
+        let base = kinds.len() + 1;
+        let d = rem % base;
+        rem /= base;
+        if d > 0 {
+            out.push((n.clone(), kinds[d - 1]));
+        }
+    }
+    out
 }
 
 fn panic_model(tm: &TModel, msg: &str) -> ! {
@@ -1109,7 +1255,7 @@ fn ss_q(g: &mut Mg, plan: &SsPlan) -> String {
     q
 }
 
-fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) {
+fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], cands: &[(String, Vec<Narrow>)]) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
     // Column-major data matrices: a transposed copy, made once per sample().
@@ -1236,6 +1382,48 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         g.f.emit(format!("store ptr {b}, ptr @mint_model_{name}_ss{k}_b"));
         g.f.emit(format!("store double {cv}, ptr @mint_model_{name}_ss{k}_c"));
         g.f.emit(format!("store i64 {q}, ptr @mint_model_{name}_ss{k}_q"));
+    }
+    // Narrow copies of the data the vector kernels read (after the layout
+    // copy, so they share its order), and the variant of logp that reads
+    // them: candidate j's choice is digit j of the variant (narrow_variant).
+    if !cands.is_empty() {
+        g.m.declare("declare ptr @mint_narrow(ptr, i64, i64, ptr, ptr)");
+        let kind_at = g.f.alloca("i64");
+        let mut idx = "0".to_string();
+        let mut stride = 1usize;
+        for (n, kinds) in cands {
+            let gl = narrow_global(&tm.name, n);
+            // the previous sample()'s copy is released (free(NULL) is a no-op)
+            let old = g.f.load_ptr(&gl);
+            g.f.emit(format!("call void @mint_free(ptr {old})"));
+            let size = match tm.data.iter().find(|(d, _)| d == n).map(|(_, t)| t) {
+                Some(Ty::Vector(d, _)) => g.dim(d),
+                Some(Ty::Matrix(r, c, _)) => {
+                    let (r, c) = (g.dim(r), g.dim(c));
+                    g.f.imul(&r, &c)
+                }
+                _ => unreachable!("narrow candidates are data buffers"),
+            };
+            let mask: u32 = kinds.iter().map(|k| 1 << (k.code() - 1)).sum();
+            let msg = g.m.string(&format!("model {} data {n}", tm.name));
+            let src = g.data_p[n].clone();
+            let np = g.f.reg();
+            g.f.emit(format!("{np} = call ptr @mint_narrow(ptr {src}, i64 {size}, i64 {mask}, ptr {kind_at}, ptr {msg})"));
+            g.f.emit(format!("store ptr {np}, ptr {gl}"));
+            let kind = g.f.load_i64(&kind_at);
+            let mut digit = "0".to_string();
+            for (j, k) in kinds.iter().enumerate() {
+                let c = g.f.reg();
+                g.f.emit(format!("{c} = icmp eq i64 {kind}, {}", k.code()));
+                let d = g.f.reg();
+                g.f.emit(format!("{d} = select i1 {c}, i64 {}, i64 {digit}", j + 1));
+                digit = d;
+            }
+            let t = g.f.imul(&digit, &stride.to_string());
+            idx = g.f.iadd(&idx, &t);
+            stride *= kinds.len() + 1;
+        }
+        g.f.emit(format!("store i64 {idx}, ptr @mint_model_{}_variant", tm.name));
     }
     let header = format!("define void @mint_model_{}_init()", tm.name);
     g.finish(&header, &["ret void".into()]);
@@ -1785,7 +1973,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         }
     }
     let r = g.f.acc_get(&lp);
-    let header = format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name);
+    let header = format!("define double @mint_model_{}_logp{}(ptr noalias %theta, ptr noalias %grad)", tm.name, g.m.variant);
     g.finish(&header, &[format!("ret double {r}")]);
 }
 
@@ -2020,6 +2208,19 @@ fn tail_mask(g: &mut Mg, k0: &str, c: &str) -> String {
 
 /// A <4 x double> load of p[idx..idx+4] with the lanes outside `mask` zero.
 fn masked_load(g: &mut Mg, p: &str, idx: &str, mask: &str) -> String {
+    if let Some((np, k)) = g.f.narrow.get(p).cloned() {
+        // a narrow copy of data: the same lanes, converted (masked-off lanes
+        // are zero either way)
+        let (et, s, b) = (k.llty(), k.mname(), k.bytes());
+        g.m.declare(&format!("declare <4 x {et}> @llvm.masked.load.v4{s}.p0(ptr, i32, <4 x i1>, <4 x {et}>)"));
+        let a = g.f.reg();
+        g.f.emit(format!("{a} = getelementptr inbounds {et}, ptr {np}, i64 {idx}"));
+        let x = g.f.reg();
+        g.f.emit(format!("{x} = call <4 x {et}> @llvm.masked.load.v4{s}.p0(ptr {a}, i32 {b}, <4 x i1> {mask}, <4 x {et}> zeroinitializer)"));
+        let r = g.f.reg();
+        g.f.emit(format!("{r} = {} <4 x {et}> {x} to <4 x double>", k.conv()));
+        return r;
+    }
     g.m.declare("declare <4 x double> @llvm.masked.load.v4f64.p0(ptr, i32, <4 x i1>, <4 x double>)");
     let a = g.f.gep(p, idx);
     let r = g.f.reg();
@@ -2200,8 +2401,12 @@ fn axpy4_vec(g: &mut Mg, mp: &str, c: &str, lo: &str, hi: &str, ad: &str, gp: &s
 /// over its own (column-major) shape can run as one fused, blocked loop
 /// nest. Returns its row dimension when that applies.
 fn fused_scan_rows(g: &Mg, lhs: &M, args: &[M], shape: &SShape, fission: bool) -> Option<Dim> {
+    fused_scan_rows_cm(&g.cm, lhs, args, shape, fission)
+}
+
+fn fused_scan_rows_cm(cm: &[(Dim, Dim)], lhs: &M, args: &[M], shape: &SShape, fission: bool) -> Option<Dim> {
     let SShape::Mat(r, c) = shape else { return None };
-    if !g.is_cm(r, c) {
+    if !cm.iter().any(|(a, b)| a == r && b == c) {
         return None;
     }
     let nodes = stmt_globals(lhs, args, fission);
@@ -2581,7 +2786,7 @@ fn pos_vectors(tm: &TModel) -> Vec<String> {
 /// density and scalar adjoints written to entry `tid` of the output arrays.
 /// Returns the name of the entry point `(ctx, g0, g1, tid)`.
 fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], scalars: &[String]) -> String {
-    let kn = format!("mint_model_{}_scan{k}", tm.name);
+    let kn = format!("mint_model_{}_scan{k}{}", tm.name, g.m.variant);
     let pos = pos_vectors(tm);
     let ncp = sc.cp.len();
     // The same per-thread slots as the caller's buffers, requested at the
@@ -3233,7 +3438,7 @@ fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> b
     true
 }
 
-fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool) {
+fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, variants: usize) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.m.declare("declare void @mint_set_layout(ptr, ptr)");
     if permute {
@@ -3256,10 +3461,19 @@ fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool) {
         let sz = size.clone().unwrap_or("-1".into());
         g.f.emit(format!("store i64 {sz}, ptr {q}"));
     }
-    let r = g.f.reg();
     let name = &tm.name;
+    // the variant of logp chosen by init for this call's data
+    let logp = if variants > 1 {
+        let v = g.f.load_i64(&format!("@mint_model_{name}_variant"));
+        let a = g.f.reg();
+        g.f.emit(format!("{a} = getelementptr inbounds [{variants} x ptr], ptr @mint_model_{name}_logp_table, i64 0, i64 {v}"));
+        g.f.load_ptr(&a)
+    } else {
+        format!("@mint_model_{name}_logp")
+    };
+    let r = g.f.reg();
     g.f.emit(format!(
-        "{r} = call ptr @mint_sample(ptr @mint_model_{name}_logp, ptr @mint_model_{name}_constrain, i64 {total}, i64 %draws, i64 %warmup, i64 %chains, i64 %seed, i64 {k}, ptr {names}, ptr {sizes})"
+        "{r} = call ptr @mint_sample(ptr {logp}, ptr @mint_model_{name}_constrain, i64 {total}, i64 %draws, i64 %warmup, i64 %chains, i64 %seed, i64 {k}, ptr {names}, ptr {sizes})"
     ));
     let header = format!("define ptr @mint_model_{name}_sample(i64 %draws, i64 %warmup, i64 %chains, i64 %seed)");
     g.finish(&header, &[format!("ret ptr {r}")]);

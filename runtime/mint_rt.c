@@ -1669,6 +1669,72 @@ void mint_check_count(double v, int64_t i, const char *what) {
   }
 }
 
+// Narrow data. A model's vector kernels can read a copy of a data buffer in a
+// narrower type when that type holds every value exactly: converting back
+// gives the same double, bit for bit, so the results are unchanged. Kinds:
+// 1 int8, 2 int16, 3 float. An integer kind rejects -0.0 (it would come back
+// as +0.0); float rejects NaN (its payload might not survive) and keeps
+// infinities, -0.0 and values that are float subnormals.
+static int narrow_exact(double v, int kind) {
+  uint64_t a, b;
+  double back;
+  switch (kind) {
+    case 1:
+      if (!(v >= -128.0 && v <= 127.0)) return 0;
+      back = (double)(int8_t)v;
+      break;
+    case 2:
+      if (!(v >= -32768.0 && v <= 32767.0)) return 0;
+      back = (double)(int16_t)v;
+      break;
+    case 3:
+      if (isnan(v) || (isfinite(v) && fabs(v) > 3.4028234663852886e38)) return 0;
+      back = (double)(float)v;
+      break;
+    default:
+      return 0;
+  }
+  memcpy(&a, &v, sizeof a);
+  memcpy(&b, &back, sizeof b);
+  return a == b;
+}
+
+// The narrowest kind among `allowed` (bit k-1 for kind k) that holds every
+// value of p[0..n) exactly: returns a new copy in that kind and stores the
+// kind in *kind, or returns NULL with *kind = 0 when none does or
+// MINT_NARROW=0. MINT_NARROW=int16 or =float skips the narrower kinds (for
+// tests and measurements). MINT_NARROW_REPORT=1 prints the choice to stderr.
+void *mint_narrow(const double *p, int64_t n, int64_t allowed, int64_t *kind, const char *what) {
+  static const char *names[] = {"double", "int8", "int16", "float"};
+  const char *env = getenv("MINT_NARROW");
+  int k = 0, first = 1;
+  if (env && strcmp(env, "0") == 0) first = 4;
+  else if (env && strcmp(env, "int16") == 0) first = 2;
+  else if (env && strcmp(env, "float") == 0) first = 3;
+  {
+    for (int c = first; c <= 3 && !k; c++) {
+      if (!(allowed & (1 << (c - 1)))) continue;
+      int64_t i = 0;
+      while (i < n && narrow_exact(p[i], c)) i++;
+      if (i == n) k = c;
+    }
+  }
+  *kind = k;
+  void *q = NULL;
+  if (k) {
+    static const int bytes[] = {0, 1, 2, 4};
+    q = mint_alloc((n * bytes[k] + 7) / 8);
+    for (int64_t i = 0; i < n; i++) {
+      if (k == 1) ((int8_t *)q)[i] = (int8_t)p[i];
+      else if (k == 2) ((int16_t *)q)[i] = (int16_t)p[i];
+      else ((float *)q)[i] = (float)p[i];
+    }
+  }
+  const char *rep = getenv("MINT_NARROW_REPORT");
+  if (rep && strcmp(rep, "0") != 0) fprintf(stderr, "narrow: %s: %s\n", what, names[k]);
+  return q;
+}
+
 // Separate per-thread scratch buffers, one per slot. Generated code declares
 // this function with a `noalias` result, so LLVM knows distinct slots never
 // overlap and can vectorise loops that use several of them without runtime

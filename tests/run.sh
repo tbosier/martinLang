@@ -447,6 +447,10 @@ $M emit examples/logistic_bayes.mint -o build/log1p_check.ll 2>/dev/null \
 
 . tests/fission/run.sh
 
+# ---- narrow data copies: results byte-identical to the build without them
+
+. tests/narrow/run.sh
+
 # ---- eight schools: posterior means of mu and tau against exact grid
 # integration (mu 4.4414, tau 3.2904); allow 4 Monte Carlo standard errors.
 
