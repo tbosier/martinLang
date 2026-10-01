@@ -365,7 +365,7 @@ in the first one that holds every value exactly, bit for bit: an integer
 type rejects -0.0, and float rejects NaN and keeps infinities, -0.0 and
 float subnormals. The kernels then load the copy and convert in registers
 (`vpmovsxbd` + `vcvtdq2pd`, or `vcvtps2pd`). `--no-narrow-data` turns this
-off.
+off; it is also off under `--strict-fp` and on hosts without AVX2.
 
 The choice depends on the data, so it is made at run time. `logp` is
 generated in up to four variants (variant 0 reads only doubles), `init`
@@ -414,12 +414,21 @@ Without the asm it fails on 28 of 30 data sets of the model above.
 
 The same round changed one thing for every build: register sums of
 adjoints in the vector kernels (one element's running-sum or product
-adjoint, one column's gradient) start at -0.0 instead of 0.0. -0.0 + x is x
-for every x, so LLVM drops the first add, which it cannot do for 0.0 + x.
-The only possible difference is a sum whose every term is -0.0, which now
-gives -0.0 instead of +0.0 (`--strict-fp` keeps 0.0). The benchmark models'
-log densities, gradients and draws are byte-identical to the previous
-compiler's, but the IR is not.
+adjoint, one column's gradient) start at -0.0 instead of 0.0
+(`--no-negzero-sums` turns it off). -0.0 + x is x for every x, so LLVM drops
+the first add, which it cannot do for 0.0 + x. That is not the same
+arithmetic once multiplies are fused into adds: with the add gone, the
+product that was its operand can be fused into the next add without being
+rounded, which can change a result in the last bits (it does on
+`x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`, found by the
+second review). Mint's floating-point rules allow that (every add and
+multiply carries `contract`, below). On the benchmark models the log
+densities, gradients and draws are byte-identical to the previous
+compiler's, and with `--no-narrow-data --no-negzero-sums` their IR is the
+previous compiler's, byte for byte. The narrow and wide variants of one
+build share the change, so it does not affect their identity. On its own it
+is worth about 1 to 2% on the time-series gradient, but combined with the
+narrow copy about 5 to 7% (see compiler-round.md).
 
 `MINT_NARROW=0` makes the runtime pick variant 0, `MINT_NARROW=int16` or
 `float` skips the narrower types, and `MINT_NARROW_REPORT=1` prints each
@@ -501,8 +510,9 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   IEEE.
 - Narrow data copies are exact, and the kernels' results with them are
   byte-identical to those without them in every test (see "Narrow data").
-  Register sums of adjoints in the vector kernels start at -0.0, which
-  changes only the sign of a sum whose every term is -0.0.
+- Register sums of adjoints in the vector kernels start at -0.0, so their
+  first add disappears; through contraction that can change results in the
+  last bits (`--no-negzero-sums`).
 - `--strict-fp` turns all of this off, including the `log1p` substitution.
   `bench/results.json` includes those runs.
 

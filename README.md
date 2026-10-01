@@ -175,8 +175,8 @@ Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
 `--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`,
-`--no-narrow-data`, and `--strict-fp` (strict IEEE evaluation order, no
-vector math).
+`--no-narrow-data`, `--no-negzero-sums`, and `--strict-fp` (strict IEEE
+evaluation order, no vector math).
 
 **Narrow data.** When `sample()` starts, the generated code checks the data
 vectors and matrices that the model's vector kernels read (up to a limit of
@@ -185,10 +185,11 @@ int16 or float, the kernels read a copy in that type and convert in
 registers. In every test the log density, gradient and draws are
 byte-identical with and without the copies. In the benchmark data the
 time-series counts and the logistic 0/1 outcomes narrow to int8: the
-time-series gradient became 5 to 6% faster (1 to 2 points of that come
-from a change made at the same time that also applies without the copies)
-and a whole run of the small model 3% faster; the logistic gradient did not change measurably, because its
-real-valued X is not exact in float and stays double. It costs build time:
+time-series gradient became 5 to 7% faster and a whole run of the small
+model 3 to 4% faster, together with a change made at the same time (adjoint
+sums that start at -0.0, `--no-negzero-sums`; each alone gives 1 to 2%).
+The logistic gradient did not change measurably, because its real-valued X
+is not exact in float and stays double. It costs build time:
 those two models now take 0.56 and 0.37 s to build instead of 0.22 and
 0.14 s. See [architecture.md](docs/architecture.md#narrow-data).
 

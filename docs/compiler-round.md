@@ -244,8 +244,10 @@ X are not exact in float (0 of 10^5 and 0 of 10^7 values), and Newton's
 method is a function, which has no such step.
 
 The same change starts the vector kernels' register sums of adjoints at -0.0
-instead of 0.0, so LLVM drops their first add; that applies to every build
-("no narrow" below includes it, "base" does not).
+instead of 0.0, so LLVM drops their first add (`--no-negzero-sums` turns it
+off). That applies to every build ("no narrow" below includes it, "base"
+does not), and through FMA contraction it can change results in the last
+bits; on the benchmark models it does not.
 
 Measurement: `MINT_BENCH_GRAD`, one process pinned to one core (core 10,
 chosen when it and its SMT sibling were idle; core 12's sibling was busy
@@ -262,8 +264,20 @@ Medians, with the range:
 
 The int16 and float columns are the same binary with `MINT_NARROW=int16`
 or `float`; with `MINT_NARROW=0` it took 4.17 and 52.79 µs, the same as the
-no-narrow build. So on the time-series model the copies take about 4 to 5%
-off the gradient and the -0.0 sums about 1 to 2%. On the logistic model y
+no-narrow build.
+
+The two parts separately, after the second review (core 6, 11 rounds, load
+average 6 to 12; "neither" is `--no-narrow-data --no-negzero-sums`, whose
+IR equals the base's):
+
+| gradient, µs | base | neither | narrow only | -0.0 sums only | both (default) |
+|---|---|---|---|---|---|
+| time series, 3,171 parameters | 4.07 | 4.07 | 4.03 | 4.02 | **3.86** |
+| time series, 37,901 parameters | 52.49 | 52.28 | 51.54 | 51.34 | **49.01** |
+
+Each alone is worth 1 to 2%; together 5 to 7%. Part of what the narrow
+copy gains needs the -0.0 start (see the first item under "What did not
+help" below). On the logistic model y
 is 40 KB of the 840 KB read per gradient, and narrowing it changed nothing
 measurable; with X exact in float (an artificial case, made by rounding the
 benchmark X) the float copy took 5% off.
@@ -304,8 +318,8 @@ What did not help or was not kept:
   difference). Hiding the conversion cost speed until the -0.0 sums came
   in: on the small model (core 12, 9 rounds) base took 4.15 µs, the
   narrow build with the asm 4.10, and with the asm and the -0.0 sums 3.90,
-  against 3.88 for the unprotected version (with 0.0 sums). Part of what the unprotected
-  version had gained was LLVM dropping a 0.0 + x it could prove exact
+  against 3.88 for the unprotected version (with 0.0 sums). Part of what
+  the unprotected version had gained was LLVM dropping a 0.0 + x it could prove exact
   (x = count - exp(eta) is never -0.0 when the count is an integer); the
   -0.0 start removes that add in every build.
 - int16 and float copies of the counts: both slower than int8 (table).
