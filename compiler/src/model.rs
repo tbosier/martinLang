@@ -1182,15 +1182,19 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
         }
     }
     // (name, types, whether the model makes it integer-valued)
+    // MINTC_NARROW_VARIANTS overrides the limit (for tests that need more
+    // types per buffer than the default allows)
+    let max_variants = std::env::var("MINTC_NARROW_VARIANTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|v| *v >= 1).unwrap_or(MAX_NARROW_VARIANTS);
     let mut cands: Vec<(String, Vec<Narrow>, bool)> = Vec::new();
     for (n, _) in &tm.data {
         if !names.contains(n) {
             continue;
         }
         // A BernoulliLogit outcome is checked to be 0 or 1 before sampling,
-        // so int8 always holds it, and a PoissonLog outcome is checked to be
-        // counts. Anything else may be small integers (indicators, codes) or
-        // values exact in float.
+        // so int8 holds it (unless it contains -0.0, which the check accepts
+        // and int8 cannot hold: it then stays double), and a PoissonLog
+        // outcome is checked to be counts. Anything else may be small
+        // integers (indicators, codes) or values exact in float.
         let outcome = |d: Dist| {
             stmts.iter().any(|s| {
                 let Stmt::Tilde { dist, lhs, .. } = s;
@@ -1204,9 +1208,9 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
     // Too many variants: give up the less likely types first (small
     // integers in real-valued data, then float and int16 for counts),
     // then whole candidates, real-valued ones first.
-    let count = |c: &[(String, Vec<Narrow>, bool)]| c.iter().map(|(_, k, _)| k.len() + 1).product::<usize>();
+    let count = |c: &[(String, Vec<Narrow>, bool)]| c.iter().fold(1usize, |a, (_, k, _)| a.saturating_mul(k.len() + 1));
     for (ints, drop) in [(false, Narrow::I16), (false, Narrow::I8), (true, Narrow::F32), (true, Narrow::I16)] {
-        if count(&cands) <= MAX_NARROW_VARIANTS {
+        if count(&cands) <= max_variants {
             break;
         }
         for (_, ks, i) in cands.iter_mut() {
@@ -1215,7 +1219,7 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
             }
         }
     }
-    while count(&cands) > MAX_NARROW_VARIANTS {
+    while count(&cands) > max_variants {
         let at = cands.iter().rposition(|c| !c.2).unwrap_or(cands.len() - 1);
         cands.remove(at);
     }
@@ -1977,6 +1981,17 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     g.finish(&header, &[format!("ret double {r}")]);
 }
 
+/// The start of a register sum of adjoints inside a vector kernel (one
+/// element's running-sum or product adjoint, one column's gradient): -0.0,
+/// since -0.0 + x is x for every x, so LLVM drops the first add, which it
+/// cannot do for 0.0 + x (that is +0.0 when x is -0.0). Each of these sums
+/// receives at least one term, so the only difference is when every term
+/// is -0.0: the sum is then -0.0 instead of +0.0, the same number with
+/// another sign bit. --strict-fp keeps 0.0.
+fn adj_zero(strict: bool) -> String {
+    fconst(if strict { 0.0 } else { -0.0 })
+}
+
 /// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
 /// doubles) are read by the dot products and are still in L1 when the
 /// gradient updates read them again. 32 was faster than 16, 64 and 128 on
@@ -2052,7 +2067,7 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
         let ix = Ix::vec(i);
         for (k, (_, ad)) in keys.iter().zip(&bufs) {
             if ad.is_some() {
-                let acc = g.f.acc_new(&fconst(0.0));
+                let acc = g.f.acc_new(&adj_zero(g.f.strict));
                 g.node_acc.insert(*k, acc);
             }
         }
@@ -2219,7 +2234,12 @@ fn masked_load(g: &mut Mg, p: &str, idx: &str, mask: &str) -> String {
         g.f.emit(format!("{x} = call <4 x {et}> @llvm.masked.load.v4{s}.p0(ptr {a}, i32 {b}, <4 x i1> {mask}, <4 x {et}> zeroinitializer)"));
         let r = g.f.reg();
         g.f.emit(format!("{r} = {} <4 x {et}> {x} to <4 x double>", k.conv()));
-        return r;
+        // opaque to the optimiser, as in Fb::load_narrow
+        let l = g.f.lanes;
+        g.f.lanes = 4;
+        let o = g.f.opaque(&r);
+        g.f.lanes = l;
+        return o;
     }
     g.m.declare("declare <4 x double> @llvm.masked.load.v4f64.p0(ptr, i32, <4 x i1>, <4 x double>)");
     let a = g.f.gep(p, idx);
@@ -3004,7 +3024,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // copies, then one update of the per-lane partial sums
     let col_begin = |g: &mut Mg| {
         for p in cp.iter() {
-            let acc = g.f.acc_new(&fconst(0.0));
+            let acc = g.f.acc_new(&adj_zero(g.f.strict));
             g.inv_acc.insert((p.clone(), Ax::Col), acc);
         }
     };
@@ -3132,7 +3152,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
             vals.insert(keys[j], s);
         }
         for key in keys.iter() {
-            let acc = g.f.acc_new(&fconst(0.0));
+            let acc = g.f.acc_new(&adj_zero(g.f.strict));
             g.node_acc.insert(*key, acc);
         }
         let x = g.fwd(lhs, &ix, &mut vals);
@@ -3168,7 +3188,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
         let at = ad_at(g, col, k);
         g.ad_at = Some(at.clone());
         for n in owned {
-            let acc = g.f.acc_new(&fconst(0.0));
+            let acc = g.f.acc_new(&adj_zero(g.f.strict));
             g.elem_acc.insert(n.clone(), acc);
         }
         for j in (0..keys.len()).rev() {

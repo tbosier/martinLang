@@ -1304,6 +1304,7 @@ static void bench_grad(mint_logp_fn f, int64_t D, int64_t reps) {
   printf("grad-bench: reps=%lld ns_per_eval=%.1f logp=%.12e grad_norm=%.12e sink=%g\n",
          (long long)reps, 1e9 * (t1 - t0) / (double)reps, lp, sqrt(gn), sink * 0);
   if (getenv("MINT_PRINT_GRAD")) {
+    printf("exact log density: %.17g\n", lp);
     printf("grad:");
     for (int64_t i = 0; i < D; i++) printf(" %.17g", g[i]);
     printf("\n");

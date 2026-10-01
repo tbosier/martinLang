@@ -1058,6 +1058,22 @@ impl Fb {
         self.emit(format!("{x} = load {nt}, ptr {a}, align {b}"));
         let r = self.reg();
         self.emit(format!("{r} = {} {nt} {x} to {t}", k.conv()));
+        self.opaque(&r)
+    }
+
+    /// `v` (a converted narrow load) behind an empty inline asm, so that to
+    /// the optimiser it is an opaque value, as the load of a double is. With
+    /// the conversion in sight, LLVM learns facts about the value (an
+    /// integer converted to double is never -0.0, for example) that the
+    /// load of a double does not give it, and the code it then emits can
+    /// differ: on `Normal(a * X * beta + b * y, exp(X * beta))` with float
+    /// data the backend fused a different multiply into an add, and the
+    /// gradient changed in the last bit. The asm emits no instruction.
+    /// (`llvm.arithmetic.fence` instead did not prevent that.)
+    pub fn opaque(&mut self, v: &str) -> String {
+        let t = self.ty();
+        let r = self.reg();
+        self.emit(format!("{r} = call {t} asm \"\", \"=x,0\"({t} {v}) nounwind memory(none)"));
         r
     }
     pub fn store(&mut self, v: &str, p: &str, idx: &str) {

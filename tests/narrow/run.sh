@@ -116,7 +116,48 @@ if [ -f bench/dynpois/data_small/y.f64 ]; then
 fi
 narrow_case logistic examples/logistic_bayes.mint 1 "X: double" "y: int8"
 
-# the switch: the IR without the rewrite is the IR of a model without it
+# integer copies of a design matrix (allowed by raising the variant limit):
+# the dot products' and gradient updates' masked column tails (p = 13) load
+# int8 and int16
+sed 's#build/fis_Xbig.f64#build/fis_X_i8.f64#' tests/fission/logit.mint > build/nw_fis_xi8.mint
+sed 's#build/fis_Xbig.f64#build/fis_X_i16.f64#' tests/fission/logit.mint > build/nw_fis_xi16.mint
+MINTC_NARROW_VARIANTS=16 narrow_case fis_xi8 build/nw_fis_xi8.mint 1 "X: int8" "y: int8"
+MINTC_NARROW_VARIANTS=16 narrow_case fis_xi16 build/nw_fis_xi16.mint 1 "X: int16" "y: int8"
+grep -q "masked.load.v4i8" build/nw_fis_xi8.ll && grep -q "masked.load.v4i16" build/nw_fis_xi16.ll \
+  && pass "narrow data: integer masked loads emitted" || bad "narrow data: integer masked loads missing"
+
+# many candidates: the limit on variants must still hold (a product of
+# 4^32 once wrapped to 0 and left a variable undefined)
+{
+  echo "model Many {"
+  echo "    data X: Matrix[n, p]"
+  echo "    data z: Vector[n]"
+  for k in $(seq 0 31); do echo "    data x$k: Vector[n]"; done
+  echo "    param b: Vector[p]"
+  echo "    param s: Vector[p]"
+  echo "    b ~ Normal(0, 1)"
+  echo "    s ~ Normal(0, 0.3)"
+  echo "    z ~ Normal(X * b $(for k in $(seq 0 31); do printf '+ 0.01 * x%d ' $k; done), exp(X * s))"
+  echo "}"
+  echo "fn main() {"
+  echo '    let X: Matrix[n, p] = read("build/fis_X_f32.f64")'
+  echo '    let z: Vector[n] = read("build/fis_z_f32.f64")'
+  for k in $(seq 0 31); do echo "    let x$k: Vector[n] = read(\"build/fis_z_f32.f64\")"; done
+  echo "    let post = sample(Many(X, z $(for k in $(seq 0 31); do printf ', x%d' $k; done)), draws = 4, warmup = 0, chains = 1, seed = 1)"
+  echo "    print(post)"
+  echo "}"
+} > build/nw_many.mint
+narrow_case many build/nw_many.mint 1 "X: float" "z: float"
+[ "$(grep -c '^define double @mint_model_Many_logp' build/nw_many.ll)" = 4 ] \
+  && pass "narrow data: at most 4 variants of logp" || bad "narrow data: variant limit exceeded"
+
+# random models and data: narrow against wide, including raw draws
+python3 tests/narrow/fuzz.py $M 12 7 && pass "narrow data: randomised models and data" || bad "narrow data: randomised check"
+# and with every type available to every buffer (integer design matrices)
+MINTC_NARROW_VARIANTS=64 python3 tests/narrow/fuzz.py $M 12 8 && pass "narrow data: randomised models and data, all types" || bad "narrow data: randomised check, all types"
+
+# the switch: no copies and no variants in the IR (that this IR equals the
+# previous compiler's was checked by hand when the rewrite was added)
 grep -q "call ptr @mint_narrow" build/nw_logistic.ll && ! grep -q "mint_narrow\|logp_n1" build/nw_logistic_ref.ll \
   && pass "narrow data: --no-narrow-data removes the copies and variants" || bad "narrow data: --no-narrow-data"
 
@@ -124,8 +165,9 @@ grep -q "call ptr @mint_narrow" build/nw_logistic.ll && ! grep -q "mint_narrow\|
 nw_draws() { # NAME SOURCE [VAR=value...]
   local n=$1 src=$2; shift 2
   build "$src" nwd_$n && build "$src" nwd_${n}_ref --no-narrow-data || return
-  env "$@" MINT_DRAWS=build/nwd_$n.draws ./build/nwd_$n > /dev/null 2>&1
-  env "$@" MINT_DRAWS=build/nwd_${n}_ref.draws ./build/nwd_${n}_ref > /dev/null 2>&1
+  rm -f build/nwd_$n.draws build/nwd_${n}_ref.draws
+  env "$@" MINT_DRAWS=build/nwd_$n.draws ./build/nwd_$n > /dev/null 2>&1 || { bad "narrow data $n: sampling run failed"; return; }
+  env "$@" MINT_DRAWS=build/nwd_${n}_ref.draws ./build/nwd_${n}_ref > /dev/null 2>&1 || { bad "narrow data $n: reference run failed"; return; }
   [ -s build/nwd_$n.draws ] && cmp -s build/nwd_$n.draws build/nwd_${n}_ref.draws \
     && pass "narrow data $n: identical raw draws" || bad "narrow data $n: raw draws differ"
 }
