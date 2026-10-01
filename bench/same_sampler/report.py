@@ -63,16 +63,25 @@ def grad_section(g, out):
     out.append("")
 
 
-def whole_section(w, title, out):
+def busy(r):
+    """Hardware threads busy with other work, in the second before the run started."""
+    return sum(r["before"]["cpu_busy_percent"].values()) / 100
+
+
+def whole_section(w, title, out, note=""):
     out.append(f"## {title}\n")
+    if note:
+        out.append(note + "\n")
     s = w["settings"]
     runs = w["runs"]
     seeds = sorted({r["seed"] for r in runs})
     loads = [r["before"]["loadavg"][0] for r in runs]
     out.append(f"{s['chains']} chains in parallel, {s['warmup']} warmup + {s['draws']} draws, seeds "
                f"{', '.join(map(str, seeds))}, every implementation under the same runtime NUTS with the same "
-               f"settings and seed; runs interleaved. 1-minute load average before the runs: {min(loads):.1f} to "
-               f"{max(loads):.1f} on 24 hardware threads, so wall times carry a lot of noise from other work. "
+               f"settings and seed; runs interleaved. Machine load before each run: 1-minute load average "
+               f"{min(loads):.1f} to {max(loads):.1f} (it includes this harness's own previous run), and "
+               f"{min(map(busy, runs)):.1f} to {max(map(busy, runs)):.1f} of the 24 hardware threads busy in the "
+               "second before the run started (other work only). "
                "Medians over seeds, with the range. ESS and R-hat are the runtime's (rank-normalised bulk ESS, "
                "split R-hat), lowest and highest over all parameters.\n")
     out.append("| problem | implementation | runs | sampling s, median (range) | gradients, median | µs per gradient per chain, median (range) | lowest ESS, range | ESS per 1000 gradients, median | highest R-hat | divergences, total |")
@@ -94,11 +103,12 @@ def whole_section(w, title, out):
                    f"{rng(ess, '{:.0f}')} | {statistics.median(e1k):.3g} | {max(r['max_rhat'] for r in rs):.3f} | "
                    f"{sum(r['divergences'] for r in rs)} |")
     out.append("")
-    out.append("Per run (seed, sampling seconds, gradients, lowest ESS, load average before):\n")
+    out.append("Per run (seed: sampling seconds, gradients, lowest ESS, 1-minute load average before, "
+               "hardware threads busy with other work before):\n")
     for p, impl in keys:
         rs = sorted([r for r in runs if r["problem"] == p and r["impl"] == impl], key=lambda r: r["seed"])
         cells = "; ".join(f"{r['seed']}: {r['sampling_seconds']:.2f} s, {r['gradients']:,}, {r['min_ess']:.0f}, "
-                          f"{r['before']['loadavg'][0]:.1f}" for r in rs)
+                          f"{r['before']['loadavg'][0]:.1f}, {busy(r):.1f}" for r in rs)
         out.append(f"- {p}, {impl}: {cells}")
     out.append("")
 
@@ -159,6 +169,13 @@ def main():
         w = load(name)
         if w:
             whole_section(w, title, out)
+    w = load("whole_small_loaded.json")
+    if w:
+        whole_section(w, "The same small runs on a loaded machine (an earlier pass)", out,
+                      "The first pass of the small runs, while other agents kept 15 to 29 of the 24 hardware "
+                      "threads busy. Same seeds, so the same gradient counts and ESS as the quiet pass above (the "
+                      "draws are deterministic); only the times differ. Kept to show how much load moves wall "
+                      "times: up to 3x.")
     n = load("nutpie.json")
     if n:
         nutpie_section(n, out, "Sampler check: Mint's NUTS against nutpie, same Stan gradient, 4 chains")
