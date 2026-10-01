@@ -720,4 +720,145 @@ MINT_METRIC=lowrank MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 MINT_DRAWS=buil
   && pass "low-rank sampler follows a reduced OpenMP team (identical raw draws)" \
   || bad "reduced OpenMP team changed the low-rank draws"
 
+# ---- streaming summaries. By default the runtime keeps every draw only of
+# the rows the summary prints (with their quantiles) and summarises the
+# other parameters as they are drawn; MINT_KEEP_DRAWS=all keeps every draw
+# and computes the summary from the draws alone, as before. On the small
+# dynamic Poisson model (3,171 parameters), with 1 and 3 threads per chain:
+# the two summaries agree (rows and R-hat exactly, ESS to rounding),
+# MINT_DRAWS writes the same file both ways and its draws are those the
+# summary was computed from, and, per parameter on the same draws
+# (MINT_STATS_DUMP), the streaming mean, sd and split R-hat equal the
+# draw-level ones to rounding and so does the ESS (Geyer's sequence stops
+# within the 32 lags kept for all of them here). The batch-means fallback
+# is checked twice: with batches of one draw it must reproduce the
+# draw-level ESS, and with 8 lags kept (some parameters then take it) its
+# ESS must stay near the draw-level one. These parameters mix fast; the
+# fallback's accuracy on slowly mixing ones is not tested here.
+# stream_dump_check DUMP MAXFALLBACK [exact]: compares the two sets of statistics
+stream_dump_check() {
+  python3 - "$1" "$2" "${3:-}" <<'PY'
+import math, sys
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1])][1:]
+maxfb, exact = int(sys.argv[2]), sys.argv[3] == "exact"
+ok = len(rows) == 3171 and all(r[1] == "1" for r in rows)
+dm = dr = de = 0.0
+fb = []
+for r in rows:
+    m, sd, rh, e, sm, ssd, srh, se = map(float, r[2:10])
+    dm = max(dm, abs(sm - m) / sd, abs(ssd / sd - 1))
+    dr = max(dr, abs(srh - rh))
+    if r[10] == "1":
+        fb.append(se / e)
+    else:
+        de = max(de, abs(se / e - 1))
+print(f"      max mean/sd difference {dm:.1e}, R-hat {dr:.1e}, ESS (exact lags) {de:.1e}; {len(fb)} from batch means", end="")
+ok &= dm < 1e-9 and dr < 1e-9 and de < 1e-6 and len(fb) <= maxfb
+if fb:
+    g = math.exp(sum(map(math.log, fb)) / len(fb))
+    print(f", their ESS / draw-level ESS: geometric mean {g:.3f}, range {min(fb):.3f} to {max(fb):.3f}", end="")
+    if exact:
+        ok &= max(abs(x - 1) for x in fb) < 1e-6
+    else:
+        ok &= 0.8 < g < 1.25 and min(fb) > 0.33 and max(fb) < 3
+print()
+sys.exit(0 if ok else 1)
+PY
+}
+# same_summary A B: identical except the ESS values, which may differ by rounding
+same_summary() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+a, b = (open(p).read().splitlines() for p in sys.argv[1:3])
+ok = len(a) == len(b) and len(a) > 0
+ess = re.compile(r"(lowest ess )(\d+)")
+for x, y in zip(a, b):
+    ex, ey = [int(m.group(2)) for m in ess.finditer(x)], [int(m.group(2)) for m in ess.finditer(y)]
+    ok &= ess.sub(r"\1#", x) == ess.sub(r"\1#", y) and len(ex) == len(ey)
+    ok &= all(abs(u - v) <= 1 for u, v in zip(ex, ey))
+sys.exit(0 if ok else 1)
+PY
+}
+# draws_match FILE DUMP: every parameter's mean over the draws file equals the
+# mean the summary computed from the draws in memory (layout and offsets)
+draws_match() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+import numpy as np
+C, N, D = map(int, np.fromfile(sys.argv[1], dtype="<u8", count=3))
+x = np.fromfile(sys.argv[1], dtype="<f8", offset=24)
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[2])][1:]
+ok = x.size == C * N * D == C * N * len(rows)
+mean = np.array([float(r[2]) for r in rows]); sd = np.array([float(r[3]) for r in rows])
+err = float(np.max(np.abs(x.reshape(C * N, D).mean(axis=0) - mean) / sd)) if ok else float("inf")
+print(f"      max |mean over the file - summary mean| / sd = {err:.1e}")
+sys.exit(0 if ok and err < 1e-9 else 1)
+PY
+}
+if [ -x build/dynpois ]; then
+  for t in 1 3; do
+    rm -f build/stream_a.draws build/stream_b.draws
+    MINT_THREADS_PER_CHAIN=$t MINT_DRAWS=build/stream_a.draws ./build/dynpois > build/stream_a.out 2> build/stream_a.err
+    MINT_THREADS_PER_CHAIN=$t MINT_KEEP_DRAWS=all MINT_DRAWS=build/stream_b.draws MINT_STATS_DUMP=build/stream_b.tsv \
+      ./build/dynpois > build/stream_b.out 2> /dev/null
+    grep -q "summary: draws kept for 10 of 3171 parameters" build/stream_a.err \
+      && pass "streaming summary ($t threads per chain): draws kept only for the 10 printed rows" \
+      || { bad "streaming summary ($t threads per chain): kept draws"; grep summary: build/stream_a.err; }
+    same_summary build/stream_a.out build/stream_b.out \
+      && pass "streaming summary ($t threads per chain): same summary as with every draw kept" \
+      || { bad "streaming summary ($t threads per chain) differs from MINT_KEEP_DRAWS=all"; diff build/stream_a.out build/stream_b.out; }
+    [ "$(stat -c %s build/stream_a.draws 2>/dev/null)" = $((24 + 4 * 1000 * 3171 * 8)) ] \
+      && cmp -s build/stream_a.draws build/stream_b.draws && [ ! -e build/stream_a.draws.partial ] \
+      && pass "streaming summary ($t threads per chain): MINT_DRAWS writes the same file as with every draw kept" \
+      || bad "streaming summary ($t threads per chain): MINT_DRAWS files differ"
+    draws_match build/stream_a.draws build/stream_b.tsv \
+      && pass "streaming summary ($t threads per chain): the MINT_DRAWS file holds the summarised draws" \
+      || bad "streaming summary ($t threads per chain): the MINT_DRAWS file does not match the summary"
+    stream_dump_check build/stream_b.tsv 0 \
+      && pass "streaming summary ($t threads per chain): streaming statistics equal the draw-level ones" \
+      || bad "streaming summary ($t threads per chain): streaming statistics differ from the draw-level ones"
+  done
+  # MINT_DRAWS into a pipe (not seekable): written in order after sampling
+  rm -f build/stream_fifo build/stream_p.draws
+  mkfifo build/stream_fifo && { cat build/stream_fifo > build/stream_p.draws & }
+  MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/stream_fifo ./build/dynpois > /dev/null 2>&1
+  wait
+  cmp -s build/stream_p.draws build/stream_a.draws \
+    && pass "streaming summary: MINT_DRAWS into a pipe writes the same draws" || bad "streaming summary: MINT_DRAWS into a pipe"
+  rm -f build/stream_fifo build/stream_p.draws build/stream_a.draws build/stream_b.draws
+  MINT_KEEP_DRAWS=all MINT_ESS_LAGS=2 MINT_ESS_BATCHES=1000 MINT_STATS_DUMP=build/stream_d.tsv ./build/dynpois > /dev/null 2>&1
+  stream_dump_check build/stream_d.tsv 3171 exact && grep -qP "\\t1$" build/stream_d.tsv \
+    && pass "streaming summary: the batch-means ESS with batches of one draw is the draw-level ESS" \
+    || bad "streaming summary: batch-means ESS with batches of one draw"
+  MINT_KEEP_DRAWS=all MINT_ESS_LAGS=8 MINT_STATS_DUMP=build/stream_c.tsv ./build/dynpois > /dev/null 2>&1
+  stream_dump_check build/stream_c.tsv 3171 && grep -qP "\\t1$" build/stream_c.tsv \
+    && pass "streaming summary: the batch-means ESS fallback is close to the draw-level ESS" \
+    || bad "streaming summary: batch-means ESS fallback"
+  # pop, all 20 entries of beta, the first 3 of shared and of innov
+  out=$(MINT_KEEP_DRAWS=beta,nosuch ./build/dynpois 2>&1 >/dev/null)
+  grep -q "MINT_KEEP_DRAWS names nosuch" <<<"$out" && grep -q "draws kept for 27 of 3171" <<<"$out" \
+    && pass "MINT_KEEP_DRAWS keeps every draw of a named parameter and warns about an unknown name" \
+    || { bad "MINT_KEEP_DRAWS=beta,nosuch"; echo "$out"; }
+  # Peak memory must not grow with the number of draws when they are not
+  # kept (200 against 1,600 draws per chain); with every draw kept it grows
+  # by about the draws' size (1,400 x 4 x 3,171 doubles, 142 MB).
+  for n in 200 1600; do
+    sed "s/draws = 1000, warmup = 1000/draws = $n, warmup = 100/" examples/dynamic_poisson.mint > build/stream_mem$n.mint
+    build build/stream_mem$n.mint stream_mem$n
+  done
+  python3 - <<'PY' && pass "streaming summary: peak memory does not grow with the number of draws" || bad "streaming summary: peak memory"
+import os, subprocess, sys
+def rss(b, env):
+    p = subprocess.Popen(["./build/" + b], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ, **env))
+    _, st, ru = os.wait4(p.pid, 0)
+    return ru.ru_maxrss / 1024 if st == 0 else float("nan")
+s = [rss(f"stream_mem{n}", {}) for n in (200, 1600)]
+f = [rss(f"stream_mem{n}", {"MINT_KEEP_DRAWS": "all"}) for n in (200, 1600)]
+print(f"      peak MiB, 200 and 1,600 draws: streaming {s[0]:.0f}, {s[1]:.0f}; every draw kept {f[0]:.0f}, {f[1]:.0f}")
+sys.exit(0 if s[1] - s[0] < 4 and f[1] - f[0] > 0.9 * 1400 * 4 * 3171 * 8 / 2**20 else 1)
+PY
+else
+  bad "streaming summary: build/dynpois missing"
+fi
+
 exit $fail

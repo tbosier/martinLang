@@ -174,6 +174,28 @@ Useful environment variables for compiled programs:
   runtime's summation order, which gave exactly the unfused draws in the
   tests. `MINT_LEAP_TEST=1` checks one fused leaf against the runtime's own
   and exits; `=K` also times K leaves of each.
+- `MINT_DRAWS=FILE` writes every draw of every parameter, in the
+  parameters' own (constrained) scale: three little-endian u64 values
+  (chains, draws per chain, parameters), then chains x draws x parameters
+  f64. To a regular file the chains write their draws as they produce
+  them, into `FILE.partial`, which becomes FILE when sampling has finished
+  (a run that dies leaves FILE as it was). A pipe or terminal cannot be
+  written out of order, so then every draw is kept in memory and written
+  at the end.
+- `MINT_KEEP_DRAWS` chooses which draws stay in memory. By default only
+  those of the rows `print` shows (every entry of a parameter with at most
+  12 entries, the first 3 of a larger one), which it needs for the
+  quantiles; every other parameter is summarised as it is drawn, so memory
+  no longer grows with draws times parameters (see the Runtime section of
+  [architecture.md](docs/architecture.md)). `=beta,sigma` also keeps every
+  draw of the named parameters; `=all` keeps everything and computes the
+  summary from the draws alone, as before.
+- `MINT_STATS_DUMP=FILE` writes, when the posterior is printed, every
+  parameter's summary statistics and their streaming versions side by side
+  (with `MINT_KEEP_DRAWS=all`, to compare the two on the same draws).
+  `MINT_ESS_LAGS` (default 32) and `MINT_ESS_BATCHES` (default 128) size
+  the streaming ESS; per parameter and chain they cost 1.25 doubles
+  per lag and half a double per batch.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 - `MINT_METRIC=lowrank` adds to Stan's diagonal metric up to 8, 16 or 24

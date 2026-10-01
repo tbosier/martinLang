@@ -899,6 +899,64 @@ is checked against the exact formula at both sizes.
   data, so they are safe to call concurrently.
 - The summary reports the mean, sd, quantiles, split R-hat and an
   autocorrelation ESS (Geyer's initial monotone sequence).
+- **Streaming summaries.** The runtime no longer keeps every draw of every
+  parameter (chains x draws x D doubles). It keeps every draw only of the
+  rows `print` shows with their quantiles (all entries of a parameter with
+  at most 12, the first 3 of a larger one) and of the parameters named in
+  `MINT_KEEP_DRAWS`; those rows are computed from their draws exactly as
+  before. For every parameter, each chain updates after each kept draw
+  what the rest of the summary needs (ChainStats in `mint_rt.c`):
+  - Welford means and sums of squares of both halves of the chain and of
+    the whole chain, which give the mean, sd and split R-hat of the draws
+    up to rounding;
+  - for the ESS, the sums of lagged products at lags 1 to 31, kept per pair
+    of lags (2m, 2m + 1) because Geyer's sequence only uses their sum, of
+    the draws minus the chain's first draw rounded to float, added every 16
+    draws; a ring buffer of the last 48 values and sums of the first values
+    give the mean corrections. When the sequence stops before lag 32, the
+    ESS is the draw-level one up to that float rounding. Otherwise the ESS
+    comes from the same estimator applied to batch means (125 batches of 8
+    draws per chain for 1000 draws): the variance of the overall mean from
+    the batch means and their own autocorrelation.
+
+  With 1000 draws per chain that is 120 doubles' worth per parameter and
+  chain (at most 121 for any number of draws), against 1000 doubles of
+  stored draws before, next to the sampler's own state (also proportional
+  to D). The chain's threads update disjoint ranges of parameters, so the
+  statistics of given draws do not depend on the thread count, and no
+  chain writes another's statistics; chains are combined in chain order.
+  `MINT_DRAWS` to a regular file is written while sampling (each chain
+  `pwrite`s its draws into its own part of `FILE.partial`, renamed to FILE
+  at the end), so it no longer needs the draws in memory.
+  `MINT_KEEP_DRAWS=all` is the previous full-draw path.
+
+  Checked on the same draws (`MINT_STATS_DUMP` with `MINT_KEEP_DRAWS=all`),
+  on eight schools, both regressions and both dynamic Poisson sizes (3,171
+  and 37,901 parameters): the streaming mean, sd and R-hat equal the
+  draw-level ones to 1e-13 (relative to the sd for the mean), and every ESS
+  agrees to 1e-7 relative except 3 parameters of the large model (beta[32],
+  beta[96], beta[180]) whose sequence ran past lag 32: their batch-means
+  ESS was 0.88 to 0.94 of the draw-level one. The printed summaries of the
+  regressions and both dynamic Poisson sizes were identical to those of the
+  previous runtime (eight schools prints all its parameters, so its summary
+  never uses the streaming statistics). In those runs Geyer's sequence
+  stopped at lag 22 at the latest on the small model and 36 on the large
+  one (half of all parameters by lag 6 and 8).
+
+  The fallback is the weak part. These parameters mix fast; on simulated
+  AR(1) chains (4 x 1000 draws, 2,000 parameters per setting) with
+  autocorrelation 0.8, 0.9 and 0.95 (integrated autocorrelation time 9 to
+  39), 26%, 77% and 100% of the parameters took it, and over all of them
+  the 1st to 99th percentiles of streaming / draw-level ESS were 0.80 to
+  1.04, 0.81 to 1.05 and 0.90 to 1.04 (with `MINT_ESS_LAGS=64`, for 40
+  more doubles per parameter and chain, 4%, 26% and 66% took it). Batch means
+  alone, tried first, scattered more on the dynamic Poisson model: with 64
+  batches per chain the middle 90% of the ratios spanned 0.70 to 1.25 on
+  the large model and 0.76 to 1.14 with 128, because most of its
+  parameters' sequences stop within a few lags, where the draw-level
+  estimate is precise.
+  Peak memory and time of the large model: see
+  [flagship-demo.md](flagship-demo.md), milestone 0.
 - `MINT_GRADCHECK=1` compares the compiled gradient with central finite
   differences.
 - `MINT_BENCH_GRAD=K` times K gradient evaluations at a fixed point and exits.

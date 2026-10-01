@@ -208,6 +208,36 @@ Each has a completion test fixed in advance.
    forecasts). Completion test: memory independent of the number of latent
    parameters at fixed reported output, and the same summaries as the
    stored-draws path on the existing benchmarks.
+
+   Status: implemented in the runtime (see the Runtime section of
+   [architecture.md](architecture.md)). Full draws are kept for the rows
+   `print` shows and for parameters named in `MINT_KEEP_DRAWS`; everything
+   else is summarised as it is drawn, and `MINT_DRAWS` streams to its file.
+   On the same draws, the summaries printed for both regressions and both
+   dynamic Poisson sizes are identical to the stored-draws path's (eight
+   schools prints every parameter, so it keeps every draw). Peak resident
+   memory of the 37,901-parameter model (4 chains x 1000 draws, 3 threads
+   per chain) was 224 to 266 MiB in 4 runs of the final runtime, against
+   1,210 to 1,242 MiB with every draw stored (10 runs of the previous
+   runtime). Wall time could not be measured cleanly: the machine was
+   shared with other jobs throughout (load average 13 to 39 on 24 CPUs).
+   In three interleaved pairs with the final runtime, the streaming run
+   took 212 s against 211 s for the previous runtime when it ran second
+   (load 25), 140 s against 141 s when it ran first (load 17 to 22), and
+   660 s against 349 s when it ran second at a load of 27 to 33. Earlier
+   pairs with intermediate versions, always with the previous runtime
+   first while the load rose, had the streaming run 0.4 to 33% slower.
+   Measured inside the runs, constraining, keeping and summarising the
+   draws took 3.6 to 6.1 s summed over the 4 chains, under 1% of the
+   chains' time, so we do not attribute the slow pairs to it; a quiet
+   machine is needed to settle this. What still grows with the number
+   of latent parameters is the sampler's own state and the per-parameter
+   running statistics (120 doubles' worth per parameter and chain at 1000
+   draws, against 1000 doubles of stored draws before), because the
+   summary still reports the lowest ESS and highest R-hat over every
+   parameter. Memory that does not grow with the number of latent
+   parameters at all needs a summary that stops reporting diagnostics for
+   every latent scalar; that is not done.
 1. **Kalman collapse, Gaussian observations.** Exact small-instance checks
    pass; on S = 100, the posterior of the scales and the held-out forecasts
    agree with the reference within the stated rule; simulation-based

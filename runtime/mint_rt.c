@@ -5,6 +5,8 @@
 // sampler is identical on both sides of the benchmark.
 
 #define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <omp.h>
 #include <pthread.h>
@@ -13,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -2493,6 +2496,185 @@ static int bind_team(int nt, const cpu_set_t *set) {
   return 1;
 }
 
+// ---------------------------------------------------------------- streaming summaries
+//
+// print(post) reports, for every parameter, an ESS and a split R-hat, and
+// for the rows it shows also the mean, sd and quantiles. Storing every draw
+// of every parameter for that costs chains x draws x D doubles. Instead each
+// chain keeps, per parameter, what those statistics need, updated after
+// every kept draw, so this memory grows with D times a constant that does
+// not depend on the number of draws (with the defaults and 1000 draws per
+// chain, 120 doubles' worth; at most 121 for any number of draws):
+//  - Welford means and sums of squared deviations of the first half, the
+//    second half and the whole chain (the halves are those of split R-hat:
+//    draws [0, h) and [h, 2h) with h = N / 2): 6 doubles.
+//  - For the ESS, the sums of lagged products the draw-level estimate needs
+//    at lags 1 .. L - 1 (L = MINT_ESS_LAGS, 32 by default). That estimate
+//    (Geyer's initial monotone sequence, as in rhat_ess) only ever uses the
+//    autocovariances at lags 2m and 2m + 1 added together, so one sum per
+//    pair is kept: v_i (v_{i-2m} + v_{i-2m-1}), and v_i v_{i-1} for m = 0,
+//    where v_i is draw i minus the chain's first draw, rounded to float
+//    (about 7 significant digits of its distance from that draw). The
+//    last L values of v and, per pair, the sum of the first values that the
+//    pair's mean correction needs (also as a float) give the
+//    autocovariances of v, so when the sequence stops before lag L the ESS
+//    is the draw-level one up to that rounding (1e-7 relative in the tests). The products are added every CS_BLOCK = 16 draws, so that
+//    each sum is read and written once per block (see cs_products); the
+//    ring buffer of v therefore holds L + 16 values. L / 2 doubles,
+//    3 L / 2 + 16 floats and 2 doubles (the first draw and the sum of v).
+//  - When it does not stop before lag L (parameters with longer
+//    autocorrelation), the ESS comes from the means of nb consecutive
+//    batches of b draws instead (b = ceil(N / k), nb = floor(N / b) with
+//    k = MINT_ESS_BATCHES, 128 by default, at least 4: 125 batches of 8 for
+//    1000 draws; the last N - nb b draws are left out): see stream_stats.
+//    This is noisier than the draw-level estimate: on simulated AR(1)
+//    chains (4 x 1000 draws, autocorrelation 0.8 to 0.95) it was within
+//    0.80 to 1.05 of it for 98% of parameters. nb floats and 1 double.
+// Full draws are kept only for the parameters the summary prints quantiles
+// for and those named in MINT_KEEP_DRAWS (see mint_sample). Each chain
+// writes only its own ChainStats (with its own threads on disjoint ranges
+// of parameters), so the threaded sampler stays race-free and the
+// statistics of given draws do not depend on the thread count; the chains
+// are combined in chain order when the summary is computed.
+#define CS_BLOCK 16
+typedef struct {
+  int64_t D, N, h;
+  int64_t L, P;   // lags with exact sums (even, at most N) and their pairs, P = L / 2
+  int64_t R;      // ring slots: L + CS_BLOCK
+  int64_t b, nb;  // batch size and number of batches of the fallback
+  double *m1, *s1, *m2, *s2, *mt, *st;  // Welford mean and sum of squares: halves, whole chain
+  double *shift, *vsum;  // the chain's first draw; the sum of v
+  double *q;             // P x D: pair sums of lagged products of v
+  float *ring;           // R x D: v_i in slot i mod R
+  float *head;           // P x D: for pair m >= 1, 2 (v_0 + ... + v_{2m-1}) + v_{2m}
+  double *bsum;          // the running batch sum of v
+  float *bm;             // nb x D batch means of v
+} ChainStats;
+
+static double *zalloc(int64_t n) {
+  double *p = mint_alloc(n);
+  memset(p, 0, (size_t)(n > 0 ? n : 1) * sizeof(double));
+  return p;
+}
+
+// A positive integer from the environment; anything else is ignored with a warning.
+static int64_t env_pos(const char *name, int64_t dflt) {
+  const char *e = getenv(name);
+  if (!e || !*e) return dflt;
+  char *end;
+  errno = 0;
+  long long v = strtoll(e, &end, 10);
+  if (*end || errno || v <= 0) {
+    fprintf(stderr, "warning: %s=%s is not a positive integer; using %lld\n", name, e, (long long)dflt);
+    return dflt;
+  }
+  return v;
+}
+
+// Allocated by the chain's own thread, so that its pages are local to it.
+static void cs_init(ChainStats *S, int64_t D, int64_t N) {
+  S->D = D, S->N = N, S->h = N / 2;
+  int64_t L = env_pos("MINT_ESS_LAGS", 32);
+  if (L > N) L = N;
+  L -= L % 2;
+  if (L < 2) L = 2;
+  S->L = L, S->P = L / 2, S->R = L + CS_BLOCK;
+  int64_t k = env_pos("MINT_ESS_BATCHES", 128);
+  if (k < 4) k = 4;  // at least 4 batches per chain (N >= 4)
+  if (k > N) k = N;
+  S->b = (N + k - 1) / k;
+  S->nb = N / S->b;
+  double **v[] = {&S->m1, &S->s1, &S->m2, &S->s2, &S->mt, &S->st, &S->shift, &S->vsum, &S->bsum};
+  for (size_t j = 0; j < sizeof v / sizeof v[0]; j++) *v[j] = zalloc(D);
+  S->q = zalloc(S->P * D);
+  S->ring = mint_alloc((S->R * D + 1) / 2);
+  S->head = mint_alloc((S->P * D + 1) / 2);
+  S->bm = mint_alloc((S->nb * D + 1) / 2);
+}
+
+static inline void welford(double *m, double *s, double x, double r) {
+  double d = x - *m;
+  *m += d * r;
+  *s += d * (x - *m);
+}
+
+// The lagged products of draws t0 .. t1 (one block), parameters lo .. hi - 1,
+// in chunks of parameters small enough for the block's ring rows and sums
+// to stay in cache: each sum is then read and written once per block
+// rather than once per draw.
+static void cs_products(ChainStats *S, int64_t t0, int64_t t1, int64_t lo, int64_t hi) {
+  int64_t D = S->D, R = S->R, P = S->P;
+  for (int64_t j0 = lo; j0 < hi; j0 += 256) {
+    int64_t j1 = j0 + 256 < hi ? j0 + 256 : hi;
+    for (int64_t t = t0; t <= t1; t++) {
+      const float *restrict v = S->ring + (t % R) * D;
+      if (t >= 1) {
+        const float *r1 = S->ring + ((t - 1) % R) * D;
+        double *restrict q = S->q;
+        for (int64_t j = j0; j < j1; j++) q[j] += (double)v[j] * (double)r1[j];
+      }
+      for (int64_t m = 1; m < P && 2 * m <= t; m++) {
+        const float *ra = S->ring + ((t - 2 * m) % R) * D;
+        double *restrict q = S->q + m * D;
+        if (2 * m + 1 <= t) {
+          const float *rb = S->ring + ((t - 2 * m - 1) % R) * D;
+          for (int64_t j = j0; j < j1; j++) q[j] += (double)v[j] * ((double)ra[j] + (double)rb[j]);
+        } else {
+          for (int64_t j = j0; j < j1; j++) q[j] += (double)v[j] * (double)ra[j];
+        }
+      }
+    }
+  }
+}
+
+// Adds kept draw i (0-based) of the chain, parameters lo .. hi - 1. The
+// lagged products are added for blocks of CS_BLOCK draws at a time (the
+// ring keeps the block and the L values before it), and for the last
+// partial block at the last draw.
+static void cs_add(ChainStats *S, const double *x, int64_t i, int64_t lo, int64_t hi) {
+  int64_t D = S->D, h = S->h, L = S->L, b = S->b;
+  double *restrict sh = S->shift, *restrict vs = S->vsum;
+  if (i == 0)
+    for (int64_t j = lo; j < hi; j++) sh[j] = x[j];
+  float *restrict v = S->ring + (i % S->R) * D;
+  for (int64_t j = lo; j < hi; j++) v[j] = (float)(x[j] - sh[j]);
+  if ((i + 1) % CS_BLOCK == 0 || i == S->N - 1) cs_products(S, i - i % CS_BLOCK, i, lo, hi);
+  if (i < L && i % 2 == 0 && i >= 2) {
+    float *restrict hd = S->head + (i / 2) * D;
+    for (int64_t j = lo; j < hi; j++) hd[j] = (float)(2.0 * vs[j] + (double)v[j]);
+  }
+  for (int64_t j = lo; j < hi; j++) vs[j] += (double)v[j];
+
+  double rt = 1.0 / (double)(i + 1);
+  for (int64_t j = lo; j < hi; j++) welford(&S->mt[j], &S->st[j], x[j], rt);
+  if (i < h) {
+    for (int64_t j = lo; j < hi; j++) welford(&S->m1[j], &S->s1[j], x[j], rt);
+  } else if (i < 2 * h) {
+    double r = 1.0 / (double)(i - h + 1);
+    for (int64_t j = lo; j < hi; j++) welford(&S->m2[j], &S->s2[j], x[j], r);
+  }
+  if (i < S->nb * b) {
+    double *restrict bs = S->bsum;
+    for (int64_t j = lo; j < hi; j++) bs[j] += (double)v[j];
+    if ((i + 1) % b == 0) {
+      float *restrict o = S->bm + (i / b) * D;
+      for (int64_t j = lo; j < hi; j++) o[j] = (float)(bs[j] / (double)b), bs[j] = 0;
+    }
+  }
+}
+
+// Writes n bytes at offset off (the chains write disjoint parts of the
+// MINT_DRAWS file, so no ordering between them is needed).
+static void write_at(int fd, const void *buf, size_t n, off_t off) {
+  const char *p = buf;
+  while (n > 0) {
+    ssize_t w = pwrite(fd, p, n, off);
+    if (w < 0 && errno == EINTR) continue;
+    if (w <= 0) mint_panic("cannot write the MINT_DRAWS file");
+    p += w, n -= (size_t)w, off += w;
+  }
+}
+
 typedef struct {
   // inputs
   mint_logp_fn f;
@@ -2507,14 +2689,19 @@ typedef struct {
   const cpu_set_t *l3;  // CPUs for this chain's threads, or NULL
   const WarmupCfg *cfg;
   Pool *pool;  // NULL unless the chains pool their window estimates
+  const int64_t *keep_idx;  // the parameters whose draws are kept (all when nkeep == D)
+  int64_t nkeep;
+  int draws_fd;  // MINT_DRAWS file, or -1
   // outputs
   int team_min;
-  double *out;  // draws x D, constrained
+  double *out;      // draws x nkeep, constrained
+  ChainStats *stats;
   double step_size;
   int64_t n_grad, divergent, n_fused;
   int64_t warmup_grad;  // gradients used before the first kept draw (initialisation and warmup)
   double mean_leapfrog;
   int rank;  // low-rank metric: number of directions at the end of warmup
+  double stats_seconds;  // time spent constraining, keeping and summarising draws (and writing MINT_DRAWS)
 } ChainJob;
 
 static void *run_chain(void *arg) {
@@ -2638,6 +2825,9 @@ static void *run_chain(void *arg) {
   vzero(gmean, D);
   vzero(gm2, D);
   int64_t wn = 0;
+  int all_kept = job->nkeep == D;
+  double *xbuf = all_kept ? NULL : mint_alloc(D);
+  cs_init(job->stats, D, job->draws);
 
   job->divergent = 0;
   job->warmup_grad = s->n_grad;
@@ -2728,7 +2918,26 @@ static void *run_chain(void *arg) {
                            (long long)it, (long long)s->n_grad, s->eps);
       }
     } else {
-      job->constrain(q, job->out + (it - warmup) * D);
+      double ts = mint_clock();
+      int64_t i = it - warmup, nk = job->nkeep;
+      double *x = all_kept ? job->out + i * D : xbuf;
+      job->constrain(q, x);
+      if (!all_kept)
+        for (int64_t k = 0; k < nk; k++) job->out[i * nk + k] = x[job->keep_idx[k]];
+      if (s->nt > 1) {
+#pragma omp parallel num_threads(s->nt)
+        {
+          int64_t lo, hi;
+          split_range(D, omp_get_thread_num(), omp_get_num_threads(), &lo, &hi);
+          cs_add(job->stats, x, i, lo, hi);
+        }
+      } else {
+        cs_add(job->stats, x, i, 0, D);
+      }
+      if (job->draws_fd >= 0)
+        write_at(job->draws_fd, x, (size_t)D * sizeof(double),
+                 (off_t)(3 * sizeof(uint64_t)) + (off_t)((job->chain * job->draws + i) * D) * (off_t)sizeof(double));
+      job->stats_seconds += mint_clock() - ts;
       total_leapfrog += s->n_leapfrog;
       job->divergent += s->divergent;
     }
@@ -2743,6 +2952,7 @@ static void *run_chain(void *arg) {
   if (!lr_pool) free(lr_q), free(lr_g);
   free(lr_u), free(s->lr_v);
 
+  free(xbuf);
   free(wmean);
   free(wm2);
   free(gmean);
@@ -3034,7 +3244,11 @@ typedef struct {
   char **labels;  // D labels
   char **block_name;
   int64_t *block_start, *block_len;  // per parameter: first flat index, element count
-  double *draw;   // chains x draws x D
+  int64_t nkeep;     // parameters whose draws are kept (D: all of them, the full-draw path)
+  int64_t *keep_idx;  // nkeep flat indices, increasing
+  int64_t *keep_pos;  // D: position in keep_idx, or -1
+  double *draw;       // chains x draws x nkeep
+  ChainStats *stats;  // per chain, for every parameter
   double seconds;
   int64_t n_grad, divergent, warmup_grad;
   double *step_size, *mean_leapfrog;
@@ -3044,6 +3258,7 @@ typedef struct {
   int64_t warmup_iters;
   int warmup_fast;
   int lowrank, rank_min, rank_max;
+  double stats_seconds;  // summed over chains
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -3058,7 +3273,82 @@ static double quantile_sorted(const double *v, int64_t n, double q) {
   return v[lo] + (h - (double)lo) * (v[hi] - v[lo]);
 }
 
-// Split-R-hat and an autocorrelation-based ESS (Geyer's initial positive
+// Split R-hat from the means and (n - 1)-normalised variances of M half
+// chains of h draws each.
+static double split_rhat(const double *means, const double *vars, int64_t M, int64_t h) {
+  double grand = 0, W = 0, B = 0;
+  for (int64_t m = 0; m < M; m++) grand += means[m], W += vars[m];
+  grand /= (double)M;
+  W /= (double)M;
+  for (int64_t m = 0; m < M; m++) B += (means[m] - grand) * (means[m] - grand);
+  B = B * (double)h / (double)(M - 1);
+  double var_plus = ((double)(h - 1) / (double)h) * W + B / (double)h;
+  return W > 0 ? sqrt(var_plus / W) : NAN;
+}
+
+// var_plus of C chains of N draws from their means cm and their
+// N-normalised variances cv: ((N - 1) / N) W + B / N, with W the mean
+// within-chain variance and B / N the variance of the chain means. *W_out
+// gets W.
+static double var_plus(const double *cm, const double *cv, int64_t C, int64_t N, double *W_out) {
+  double Wf = 0, gm = 0, Bf = 0;
+  for (int64_t c = 0; c < C; c++) Wf += cv[c] * (double)N / (double)(N - 1), gm += cm[c];
+  Wf /= (double)C;
+  gm /= (double)C;
+  if (C > 1) {
+    for (int64_t c = 0; c < C; c++) Bf += (cm[c] - gm) * (cm[c] - gm);
+    Bf = Bf * (double)N / (double)(C - 1);
+  }
+  *W_out = Wf;
+  return ((double)(N - 1) / (double)N) * Wf + Bf / (double)N;
+}
+
+// Geyer's initial monotone sequence on the chain-averaged autocovariances of
+// C series of N values (value i of chain c at x[(c N + i) stride]), as
+// Stan's ESS does: the integrated autocorrelation time relative to var_plus,
+// which goes to *vp (NAN, and *vp not positive, when the series are
+// constant). cm and cv are C doubles of scratch.
+static double geyer_tau(const double *x, int64_t C, int64_t N, int64_t stride, double *cm, double *cv, double *vp) {
+  for (int64_t c = 0; c < C; c++) {
+    double s = 0;
+    for (int64_t i = 0; i < N; i++) s += x[(c * N + i) * stride];
+    cm[c] = s / (double)N;
+    double v = 0;
+    for (int64_t i = 0; i < N; i++) {
+      double d = x[(c * N + i) * stride] - cm[c];
+      v += d * d;
+    }
+    cv[c] = v / (double)N;
+  }
+  double Wf;
+  *vp = var_plus(cm, cv, C, N, &Wf);
+  if (!(*vp > 0)) return NAN;
+  double tau = 0;
+  double prev_pair = INFINITY;
+  for (int64_t t = 0; t + 1 < N; t += 2) {
+    double rho[2];
+    for (int k = 0; k < 2; k++) {
+      int64_t lag = t + k;
+      double acov = 0;
+      for (int64_t c = 0; c < C; c++) {
+        double s = 0;
+        for (int64_t i = 0; i + lag < N; i++)
+          s += (x[(c * N + i) * stride] - cm[c]) * (x[(c * N + i + lag) * stride] - cm[c]);
+        acov += s / (double)N;
+      }
+      acov /= (double)C;
+      rho[k] = lag == 0 ? 1.0 : 1.0 - (Wf - acov) / *vp;
+    }
+    double pair = rho[0] + rho[1];
+    if (pair < 0) break;
+    if (pair > prev_pair) pair = prev_pair;  // monotone sequence
+    prev_pair = pair;
+    tau += 2 * pair;
+  }
+  return tau - 1;
+}
+
+// Split-R-hat and an autocorrelation-based ESS (Geyer's initial monotone
 // sequence on chain-averaged autocovariances), computed on the raw draws.
 static void rhat_ess(const double *x, int64_t C, int64_t N, int64_t stride, double *rhat,
                      double *ess) {
@@ -3078,69 +3368,123 @@ static void rhat_ess(const double *x, int64_t C, int64_t N, int64_t stride, doub
     means[m] = mu;
     vars[m] = v / (double)(h - 1);
   }
-  double grand = 0, W = 0, B = 0;
-  for (int64_t m = 0; m < M; m++) grand += means[m], W += vars[m];
-  grand /= (double)M;
-  W /= (double)M;
-  for (int64_t m = 0; m < M; m++) B += (means[m] - grand) * (means[m] - grand);
-  B = B * (double)h / (double)(M - 1);
-  double var_plus = ((double)(h - 1) / (double)h) * W + B / (double)h;
-  *rhat = W > 0 ? sqrt(var_plus / W) : NAN;
+  *rhat = split_rhat(means, vars, M, h);
 
   // ESS over the full chains
-  double *cm = mint_alloc(C), *cv = mint_alloc(C);
-  for (int64_t c = 0; c < C; c++) {
-    double s = 0;
-    for (int64_t i = 0; i < N; i++) s += x[(c * N + i) * stride];
-    cm[c] = s / (double)N;
-    double v = 0;
-    for (int64_t i = 0; i < N; i++) {
-      double d = x[(c * N + i) * stride] - cm[c];
-      v += d * d;
-    }
-    cv[c] = v / (double)N;
-  }
-  double Wf = 0, gm = 0, Bf = 0;
-  for (int64_t c = 0; c < C; c++) Wf += cv[c] * (double)N / (double)(N - 1), gm += cm[c];
-  Wf /= (double)C;
-  gm /= (double)C;
-  if (C > 1) {
-    for (int64_t c = 0; c < C; c++) Bf += (cm[c] - gm) * (cm[c] - gm);
-    Bf = Bf * (double)N / (double)(C - 1);
-  }
-  double vp = ((double)(N - 1) / (double)N) * Wf + Bf / (double)N;
+  double vp;
+  double tau = geyer_tau(x, C, N, stride, means, vars, &vp);
   if (!(vp > 0)) {
     *ess = NAN;
-    goto done;
+  } else {
+    if (tau < 1.0 / log10((double)(C * N))) tau = 1.0 / log10((double)(C * N));
+    *ess = (double)(C * N) / tau;
   }
-  double tau = 0;
-  double prev_pair = INFINITY;
-  for (int64_t t = 0; t + 1 < N; t += 2) {
-    double rho[2];
-    for (int k = 0; k < 2; k++) {
-      int64_t lag = t + k;
-      double acov = 0;
-      for (int64_t c = 0; c < C; c++) {
-        double s = 0;
-        for (int64_t i = 0; i + lag < N; i++)
-          s += (x[(c * N + i) * stride] - cm[c]) * (x[(c * N + i + lag) * stride] - cm[c]);
-        acov += s / (double)N;
-      }
-      acov /= (double)C;
-      rho[k] = lag == 0 ? 1.0 : 1.0 - (Wf - acov) / vp;
+  free(means), free(vars);
+}
+
+// The same statistics from the chains' streaming summaries (ChainStats) of
+// parameter j. Mean, sd and split R-hat are those of the draws, up to
+// rounding. The ESS is the draw-level estimate, from the autocovariances
+// of v, when Geyer's sequence stops within the lags kept (or they are all
+// of them); *fallback is then 0. Otherwise (*fallback = 1) it applies the
+// same estimator to the series of batch means: with batches of b draws, the
+// variance of the overall mean is estimated as var_plus of the batch means
+// times their integrated autocorrelation time, divided by the C nb batch
+// means, and the ESS is the draws' var_plus over that (with b = 1 it is the
+// draw-level estimate). As in rhat_ess, a sequence whose first pair is
+// negative gives the largest ESS, C N log10(C N). scratch: 6 C + C nb + P
+// doubles.
+static void stream_stats(const ChainStats *S, int64_t C, int64_t j, double *scratch, double *mean, double *sd,
+                         double *rhat, double *ess, int *fallback) {
+  int64_t N = S[0].N, h = S[0].h, nb = S[0].nb, P = S[0].P, D = S[0].D;
+  double *means = scratch, *vars = scratch + 2 * C, *cm = scratch + 4 * C, *cv = scratch + 5 * C;
+  double *y = scratch + 6 * C, *acs = y + C * nb;
+  for (int64_t c = 0; c < C; c++) {
+    means[2 * c] = S[c].m1[j], vars[2 * c] = S[c].s1[j] / (double)(h - 1);
+    means[2 * c + 1] = S[c].m2[j], vars[2 * c + 1] = S[c].s2[j] / (double)(h - 1);
+  }
+  *rhat = split_rhat(means, vars, 2 * C, h);
+
+  double g = 0;
+  for (int64_t c = 0; c < C; c++) g += S[c].mt[j];
+  g /= (double)C;
+  double ss = 0;
+  for (int64_t c = 0; c < C; c++) ss += S[c].st[j] + (double)N * (S[c].mt[j] - g) * (S[c].mt[j] - g);
+  *mean = g;
+  *sd = sqrt(ss / (double)(C * N - 1));
+  *fallback = 0;
+
+  for (int64_t c = 0; c < C; c++) cm[c] = S[c].mt[j], cv[c] = S[c].st[j] / (double)N;
+  double W;
+  double vp = var_plus(cm, cv, C, N, &W);
+  if (!(vp > 0)) {
+    *ess = NAN;
+    return;
+  }
+  // chain-averaged autocovariance sums of each pair of lags: lag 1 for
+  // m = 0, lags 2m and 2m + 1 otherwise. For lag k,
+  //   N acov_k = sum_{i < N - k} v_i v_{i+k} - mu (A_k + B_k) + (N - k) mu^2
+  // with A_k the sum of all but the last k values and B_k of all but the
+  // first k (v_0 = 0: the first draw is the shift).
+  for (int64_t m = 0; m < P; m++) acs[m] = 0;
+  for (int64_t c = 0; c < C; c++) {
+    const ChainStats *Z = &S[c];
+    double sv = Z->vsum[j], mu = sv / (double)N;
+#define RING(i) ((double)Z->ring[((i) % Z->R) * D + j])
+    double tail = 0;  // the sum of the last 2m values
+    double A = sv - RING(N - 1), B = sv;
+    acs[0] += (Z->q[j] - mu * (A + B) + (double)(N - 1) * mu * mu) / (double)N;
+    tail = RING(N - 1) + RING(N - 2);
+    for (int64_t m = 1; m < P; m++) {
+      double A2 = 2 * sv - (2 * tail + RING(N - 1 - 2 * m));
+      double B2 = 2 * sv - (double)Z->head[m * D + j];
+      acs[m] += (Z->q[m * D + j] - mu * (A2 + B2) + (double)(2 * N - 4 * m - 1) * mu * mu) / (double)N;
+      tail += RING(N - 1 - 2 * m) + RING(N - 2 - 2 * m);
     }
-    double pair = rho[0] + rho[1];
-    if (pair < 0) break;
-    if (pair > prev_pair) pair = prev_pair;  // monotone sequence
+#undef RING
+  }
+  double tau = 0, prev_pair = INFINITY;
+  int stopped = 0;
+  for (int64_t m = 0; m < P; m++) {
+    double a = acs[m] / (double)C;
+    double pair = m == 0 ? 1.0 + (1.0 - (W - a) / vp) : 2.0 - (2.0 * W - a) / vp;
+    if (pair < 0) {
+      stopped = 1;
+      break;
+    }
+    if (pair > prev_pair) pair = prev_pair;
     prev_pair = pair;
     tau += 2 * pair;
   }
-  tau -= 1;
-  if (tau < 1.0 / log10((double)(C * N))) tau = 1.0 / log10((double)(C * N));
-  *ess = (double)(C * N) / tau;
-done:
-  free(means), free(vars), free(cm), free(cv);
+  if (stopped || P >= N / 2) {
+    tau -= 1;
+    if (tau < 1.0 / log10((double)(C * N))) tau = 1.0 / log10((double)(C * N));
+    *ess = (double)(C * N) / tau;
+    return;
+  }
+
+  *fallback = 1;
+  for (int64_t c = 0; c < C; c++)
+    for (int64_t k = 0; k < nb; k++) y[c * nb + k] = (double)S[c].bm[k * D + j] + S[c].shift[j];
+  double vpy;
+  double tauy = geyer_tau(y, C, nb, 1, cm, cv, &vpy);
+  double cap = (double)(C * N) * log10((double)(C * N));  // as the draw-level estimate's lower bound on tau
+  if (!(vpy > 0)) {
+    *ess = NAN;
+  } else if (!(tauy > 0)) {
+    *ess = cap;
+  } else {
+    double e = (double)(C * nb) * vp / (vpy * tauy);
+    *ess = e < cap ? e : cap;
+  }
 }
+
+// How many rows of a parameter the summary prints with all its columns:
+// every entry of a parameter with at most SUMMARY_ALL entries, otherwise the
+// first SUMMARY_HEAD.
+#define SUMMARY_ALL 12
+#define SUMMARY_HEAD 3
+static int64_t summary_rows(int64_t len) { return len > SUMMARY_ALL ? SUMMARY_HEAD : len; }
 
 MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t D, int64_t draws,
                            int64_t warmup, int64_t chains, int64_t seed, int64_t nparams,
@@ -3174,7 +3518,6 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
 
   MintPosterior *post = calloc(1, sizeof *post);
   post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;
-  post->draw = mint_alloc(chains * draws * D);
   post->labels = calloc((size_t)D, sizeof(char *));
   int64_t k = 0;
   post->block_name = calloc((size_t)nparams, sizeof(char *));
@@ -3198,6 +3541,64 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     }
   }
   if (k != D) mint_panic("sample: parameter sizes do not add up to the model dimension");
+
+  // Which parameters keep every draw: the rows the summary prints (with
+  // their quantiles), every parameter named in MINT_KEEP_DRAWS (a comma
+  // separated list), or all of them with MINT_KEEP_DRAWS=all (the full-draw
+  // path: the summary is then computed from the draws alone, as before
+  // streaming summaries). The others are summarised as they are drawn.
+  post->keep_pos = calloc((size_t)D, sizeof(int64_t));
+  for (int64_t i = 0; i < D; i++) post->keep_pos[i] = -1;
+  const char *kenv = getenv("MINT_KEEP_DRAWS");
+  int keep_all = kenv && strcmp(kenv, "all") == 0;
+  // MINT_DRAWS: every constrained draw, u64 chains, draws, D, then
+  // chains x draws x D f64. To a regular file (or a new one), each chain
+  // writes its draws into its own part of FILE.partial as they are drawn,
+  // and the file is renamed to FILE when sampling has finished, so a run
+  // that dies leaves FILE as it was. Anything else (a pipe, a terminal)
+  // cannot be written out of order: then every draw is kept in memory and
+  // written in order after sampling, as before streaming summaries.
+  const char *dump = getenv("MINT_DRAWS");
+  int draws_fd = -1;
+  char *draws_tmp = NULL;
+  if (dump) {
+    struct stat sb;
+    if (stat(dump, &sb) != 0 || S_ISREG(sb.st_mode)) {
+      draws_tmp = malloc(strlen(dump) + 9);
+      if (!draws_tmp) mint_panic("out of memory");
+      strcpy(draws_tmp, dump);
+      strcat(draws_tmp, ".partial");
+      draws_fd = open(draws_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (draws_fd < 0) mint_panic("cannot open MINT_DRAWS file");
+      uint64_t hdr[3] = {(uint64_t)chains, (uint64_t)draws, (uint64_t)D};
+      write_at(draws_fd, hdr, sizeof hdr, 0);
+    } else {
+      keep_all = 1;
+    }
+  }
+  for (int64_t j = 0; j < nparams; j++) {
+    int64_t s0 = post->block_start[j], len = post->block_len[j];
+    int64_t rows = keep_all ? len : summary_rows(len);
+    for (int64_t i = s0; i < s0 + rows; i++) post->keep_pos[i] = 0;
+  }
+  if (kenv && !keep_all) {
+    char *list = strdup(kenv), *save = NULL;
+    for (char *tok = strtok_r(list, ", ", &save); tok; tok = strtok_r(NULL, ", ", &save)) {
+      int64_t j = 0;
+      while (j < nparams && strcmp(post->block_name[j], tok) != 0) j++;
+      if (j == nparams) {
+        fprintf(stderr, "warning: MINT_KEEP_DRAWS names %s, which is not a parameter of this model\n", tok);
+        continue;
+      }
+      for (int64_t i = post->block_start[j]; i < post->block_start[j] + post->block_len[j]; i++) post->keep_pos[i] = 0;
+    }
+    free(list);
+  }
+  post->keep_idx = calloc((size_t)D, sizeof(int64_t));
+  for (int64_t i = 0; i < D; i++)
+    if (post->keep_pos[i] == 0) post->keep_pos[i] = post->nkeep, post->keep_idx[post->nkeep++] = i;
+  post->draw = mint_alloc(chains * draws * post->nkeep);
+  post->stats = calloc((size_t)chains, sizeof(ChainStats));
 
   // Threads per chain for the sampler's D-length passes. Splitting only pays
   // off when D is large; the default gives each chain about (physical cores /
@@ -3263,7 +3664,11 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .l3 = n_l3 > 1 ? &l3[c % n_l3] : NULL,
                          .cfg = &cfg,
                          .pool = pool_p,
-                         .out = post->draw + c * draws * D};
+                         .keep_idx = post->keep_idx,
+                         .nkeep = post->nkeep,
+                         .draws_fd = draws_fd,
+                         .out = post->draw + c * draws * post->nkeep,
+                         .stats = &post->stats[c]};
     if (chains == 1) {
       run_chain(&jobs[c]);
     } else if (pthread_create(&th[c], NULL, run_chain, &jobs[c]) != 0) {
@@ -3294,77 +3699,116 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     post->divergent += jobs[c].divergent;
     post->step_size[c] = jobs[c].step_size;
     post->mean_leapfrog[c] = jobs[c].mean_leapfrog;
+    post->stats_seconds += jobs[c].stats_seconds;
   }
   free(jobs);
   free(th);
-  const char *dump = getenv("MINT_DRAWS");
-  if (dump) {  // raw constrained draws: u64 chains, draws, D, then chains x draws x D f64
+  if (draws_fd >= 0) {
+    if (close(draws_fd) != 0 || rename(draws_tmp, dump) != 0) mint_panic("cannot write the MINT_DRAWS file");
+    free(draws_tmp);
+  } else if (dump) {  // not a regular file: every draw was kept, written in order
     FILE *f = fopen(dump, "wb");
     if (!f) mint_panic("cannot open MINT_DRAWS file");
     uint64_t hdr[3] = {(uint64_t)chains, (uint64_t)draws, (uint64_t)D};
     fwrite(hdr, sizeof hdr[0], 3, f);
     fwrite(post->draw, sizeof(double), (size_t)(chains * draws * D), f);
-    fclose(f);
+    if (fclose(f) != 0) mint_panic("cannot write the MINT_DRAWS file");
   }
   return post;
 }
 
 typedef struct {
   double mean, sd, q5, q50, q95, ess, rhat;
+  int fallback;  // streaming ESS from batch means (see stream_stats)
 } ColStat;
 
 typedef struct {
   MintPosterior *p;
   ColStat *out;
+  ColStat *stream;  // with MINT_STATS_DUMP: the streaming statistics of every parameter, or NULL
   int64_t lo, hi;
 } StatJob;
 
+// Statistics of parameters lo..hi-1: from the draws when they are kept (the
+// quantiles need them; the ESS and R-hat then use every draw), otherwise
+// from the streaming summaries, without quantiles (the summary never prints
+// those rows).
 static void *stat_worker(void *arg) {
   StatJob *j = arg;
   MintPosterior *p = j->p;
-  int64_t N = p->draws, C = p->chains, D = p->D, M = N * C;
+  int64_t N = p->draws, C = p->chains, K = p->nkeep, M = N * C;
   double *col = mint_alloc(M);
+  double *scratch = mint_alloc(6 * C + C * p->stats[0].nb + p->stats[0].P);
   for (int64_t c = j->lo; c < j->hi; c++) {
-    double s = 0;
-    for (int64_t i = 0; i < M; i++) col[i] = p->draw[i * D + c], s += col[i];
     ColStat *o = &j->out[c];
+    int64_t pos = p->keep_pos[c];
+    if (j->stream) {
+      ColStat *z = &j->stream[c];
+      z->q5 = z->q50 = z->q95 = NAN;
+      stream_stats(p->stats, C, c, scratch, &z->mean, &z->sd, &z->rhat, &z->ess, &z->fallback);
+    }
+    if (pos < 0) {
+      o->q5 = o->q50 = o->q95 = NAN;
+      stream_stats(p->stats, C, c, scratch, &o->mean, &o->sd, &o->rhat, &o->ess, &o->fallback);
+      continue;
+    }
+    double s = 0;
+    for (int64_t i = 0; i < M; i++) col[i] = p->draw[i * K + pos], s += col[i];
     o->mean = s / (double)M;
     double v = 0;
     for (int64_t i = 0; i < M; i++) v += (col[i] - o->mean) * (col[i] - o->mean);
     o->sd = sqrt(v / (double)(M - 1));
-    rhat_ess(p->draw + c, C, N, D, &o->rhat, &o->ess);
+    rhat_ess(p->draw + pos, C, N, K, &o->rhat, &o->ess);
     qsort(col, (size_t)M, sizeof(double), cmp_double);
     o->q5 = quantile_sorted(col, M, 0.05);
     o->q50 = quantile_sorted(col, M, 0.5);
     o->q95 = quantile_sorted(col, M, 0.95);
   }
   free(col);
+  free(scratch);
   return NULL;
 }
 
 void mint_print_posterior(MintPosterior *p) {
   int64_t N = p->draws, C = p->chains, D = p->D;
+  // MINT_STATS_DUMP=FILE writes, for every parameter, the statistics the
+  // summary used and the streaming ones (for comparing the two on the same
+  // draws; with MINT_KEEP_DRAWS=all every parameter has both).
+  const char *sdump = getenv("MINT_STATS_DUMP");
   // per-column statistics, computed on up to 24 threads
   ColStat *st = calloc((size_t)D, sizeof *st);
+  ColStat *ss = sdump ? calloc((size_t)D, sizeof *ss) : NULL;
   int64_t nt = D < 24 ? D : 24;
   pthread_t th[24];
   StatJob jobs[24];
   for (int64_t t = 0; t < nt; t++) {
-    jobs[t] = (StatJob){p, st, D * t / nt, D * (t + 1) / nt};
+    jobs[t] = (StatJob){p, st, ss, D * t / nt, D * (t + 1) / nt};
     pthread_create(&th[t], NULL, stat_worker, &jobs[t]);
   }
   for (int64_t t = 0; t < nt; t++) pthread_join(th[t], NULL);
+  if (sdump) {
+    FILE *f = fopen(sdump, "w");
+    if (!f) mint_panic("cannot open MINT_STATS_DUMP file");
+    fprintf(f, "parameter\tkept\tmean\tsd\trhat\tess\tstream_mean\tstream_sd\tstream_rhat\tstream_ess\tstream_fallback\n");
+    for (int64_t c = 0; c < D; c++)
+      fprintf(f, "%s\t%d\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%d\n", p->labels[c],
+              p->keep_pos[c] >= 0, st[c].mean, st[c].sd, st[c].rhat, st[c].ess, ss[c].mean, ss[c].sd, ss[c].rhat,
+              ss[c].ess, ss[c].fallback);
+    if (fclose(f) != 0) mint_panic("cannot write the MINT_STATS_DUMP file");
+    free(ss);
+  }
 
   printf("%-14s %12s %12s %12s %12s %12s %8s %6s\n", "parameter", "mean", "sd", "5%", "50%", "95%",
          "ess", "rhat");
-  int64_t worst_r = 0, worst_e = 0;
+  int64_t worst_r = 0, worst_e = 0, nfall = 0;
   for (int64_t c = 0; c < D; c++) {
+    nfall += st[c].fallback;
     if (st[c].rhat > st[worst_r].rhat || isnan(st[c].rhat)) worst_r = c;
     if (st[c].ess < st[worst_e].ess || isnan(st[c].ess)) worst_e = c;
   }
   for (int64_t b = 0; b < p->nparams; b++) {
     int64_t s0 = p->block_start[b], len = p->block_len[b];
-    int64_t shown = len > 12 ? 3 : len;
+    int64_t shown = summary_rows(len);
     for (int64_t c = s0; c < s0 + shown; c++) {
       ColStat *o = &st[c];
       printf("%-14s %12.5g %12.5g %12.5g %12.5g %12.5g %8.0f %6.3f\n", p->labels[c], o->mean, o->sd, o->q5,
@@ -3400,13 +3844,26 @@ void mint_print_posterior(MintPosterior *p) {
   fprintf(stderr, " leapfrog=%s", !p->n_fused ? "runtime" : p->leapfrog == 2 ? "fused-exact" : "fused");
   if (p->n_fused) fprintf(stderr, " (%lld of %lld gradients)", (long long)p->n_fused, (long long)p->n_grad);
   fprintf(stderr, "\n");
+  const ChainStats *S = &p->stats[0];
+  fprintf(stderr, "summary: draws kept for %lld of %lld parameters (constraining, keeping and summarising draws took %.3f s summed over chains)",
+          (long long)p->nkeep, (long long)D, p->stats_seconds);
+  if (p->nkeep < D)
+    fprintf(stderr, "; ess of the others from autocovariances at lags below %lld, %lld of them from %lld batch means of %lld draws per chain",
+            (long long)S->L, (long long)nfall, (long long)S->nb, (long long)S->b);
+  fprintf(stderr, "\n");
 }
 
 // Posterior mean of flat component j (0-based), used by generated code.
 double mint_posterior_mean(MintPosterior *p, int64_t j) {
+  int64_t pos = p->keep_pos[j];
+  if (pos < 0) {
+    double g = 0;
+    for (int64_t c = 0; c < p->chains; c++) g += p->stats[c].mt[j];
+    return g / (double)p->chains;
+  }
   double s = 0;
   int64_t n = p->draws * p->chains;
-  for (int64_t i = 0; i < n; i++) s += p->draw[i * p->D + j];
+  for (int64_t i = 0; i < n; i++) s += p->draw[i * p->nkeep + pos];
   return s / (double)n;
 }
 
