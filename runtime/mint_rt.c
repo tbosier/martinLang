@@ -4,9 +4,11 @@
 // numeric-kernel code. The Rust baselines link the same object so that the
 // sampler is identical on both sides of the benchmark.
 
+#define _GNU_SOURCE
 #include <math.h>
 #include <omp.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -254,8 +256,25 @@ typedef struct St {
 
 typedef struct {
   St *init_end, *final_beg, *prop_final;
-  double *rho_init, *rho_final;
+  double *rho_init;
 } Level;
+
+// A merge that waits for the last leaf of its subtree. The merge of two
+// subtrees (summed momentum and the three no-U-turn checks) needs nothing
+// that is not known once that leaf exists, so the leaf's second half-step
+// computes the sums of every merge it completes in the same pass over D (see
+// leaf_finish). States are read through their slots when the leaf runs.
+typedef struct {
+  double *rho;            // this subtree's summed momentum, stored only when the
+                          // merge is the last one the leaf completes
+  const double *ra, *rb;  // the two halves' sums; NULL is "the subtree below"
+                          // (the leaf's own momentum at the bottom)
+  St **beg, **end, **mid2, **mid1;
+  int persist;            // the result, filled in by the leaf
+} Merge;
+
+#define MAX_NT 64
+#define NPART (1 + 6 * (MAX_DEPTH + 2))
 
 typedef struct {
   int64_t D;
@@ -276,6 +295,14 @@ typedef struct {
   int depth;
   int nt;        // threads splitting this chain's D-length passes (1 = serial)
   int team_min;  // smallest OpenMP team that actually ran one of those passes
+  // merges waiting for a leaf: pend[pend_lo .. npend-1], innermost last
+  Merge pend[MAX_DEPTH + 2];
+  int npend, pend_lo;
+  // the next leaf's first half-step, computed ahead by the previous leaf
+  St *spec;
+  const St *spec_from;
+  double spec_eps;
+  double part[MAX_NT][NPART];  // per-thread partial sums of a leaf pass
 } Nuts;
 
 #define MAX_NT 64
@@ -385,136 +412,280 @@ static void leapfrog_into(Nuts *s, const St *z, St *n, double eps) {
   for (int64_t i = 0; i < D; i++) n->p[i] += 0.5 * eps * n->g[i];
 }
 
-// Leaf step of the tree: leapfrog, then in one pass the final momentum and
-// the kinetic energy. The sampler's sums are vectorised (`omp simd
-// reduction`): a fixed order, so draws are reproducible for a given build,
-// but not the strict left-to-right order of scalar code. Returns the Hamiltonian. (A leaf's momentum sum is its
-// own momentum, so nothing is copied for it; see build_tree.)
-static double leaf_into(Nuts *s, const St *z, St *n, double eps) {
-  int64_t D = s->D;
-  const double *restrict im = s->inv_m;
-  if (s->nt > 1) {
-    // Split across s->nt threads. Partial sums are combined in thread order,
-    // so the result is deterministic for a given thread count.
-    int nt = s->nt;
-#pragma omp parallel for num_threads(nt) schedule(static)
-    for (int64_t i = 0; i < D; i++) {
-      double ph = z->p[i] + 0.5 * eps * z->g[i];
-      n->p[i] = ph;
-      n->q[i] = z->q[i] + eps * im[i] * ph;
-    }
-    eval(s, n);
-    // OpenMP may give a smaller team than asked for (thread limits, nesting),
-    // so the split follows the team actually running, not nt.
-    double part[MAX_NT];
-    int used = 1;
-#pragma omp parallel num_threads(nt)
-    {
-      int t = omp_get_thread_num(), T = omp_get_num_threads();
-      if (t == 0) used = T;
-      int64_t lo = D * t / T, hi = D * (t + 1) / T;
-      double k = 0;
-      #pragma omp simd reduction(+ : k)
-      for (int64_t i = lo; i < hi; i++) {
-        double p = n->p[i] + 0.5 * eps * n->g[i];
-        n->p[i] = p;
-        k += p * p * im[i];
-      }
-      part[t] = k;
-    }
-    if (used < s->team_min) s->team_min = used;
-    double k = 0;
-    for (int t = 0; t < used; t++) k += part[t];
-    return -n->lp + 0.5 * k;
-  }
-  for (int64_t i = 0; i < D; i++) {
-    double ph = z->p[i] + 0.5 * eps * z->g[i];
-    n->p[i] = ph;
-    n->q[i] = z->q[i] + eps * im[i] * ph;
-  }
-  eval(s, n);
-  double k = 0;
-  #pragma omp simd reduction(+ : k)
-  for (int64_t i = 0; i < D; i++) {
-    double p = n->p[i] + 0.5 * eps * n->g[i];
-    n->p[i] = p;
-    k += p * p * im[i];
-  }
-  return -n->lp + 0.5 * k;
+// ---- the sampler's D-length passes
+//
+// Every sum over D in these passes (the leaves' kinetic energy and the
+// no-U-turn checks; not hamiltonian(), a plain loop used for the starting
+// energy and the step-size search) is accumulated in LN lanes: element i goes
+// to lane i % LN, each lane adds its elements in index order, and the lanes
+// are combined in a fixed tree (lanes_total). When a chain's passes are split across threads,
+// each thread's range starts at a multiple of LN and the threads' totals are
+// added in thread order. The result therefore does not depend on how a pass
+// is blocked or fused, or on the compiler's vectorisation; it does depend on
+// the number of threads.
+#define LN 8
+#define CHUNK 512  // block of the fused leaf pass, a multiple of LN
+
+static void split_range(int64_t D, int t, int T, int64_t *lo, int64_t *hi) {
+  int64_t nb = (D + LN - 1) / LN;
+  int64_t a = nb * t / T * LN, b = nb * (t + 1) / T * LN;
+  *lo = a < D ? a : D;
+  *hi = b < D ? b : D;
 }
 
-// rho = ra + rb, and the three no-U-turn checks:
-//   (a1, b1) = (end_ps . rho, beg_ps . rho)
+static double lanes_total(const double *a) {
+  return ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
+}
+
+// First half-step of a leapfrog from z into n: half-step momentum and the new
+// position, over [lo, hi).
+static void kern_half1(int64_t lo, int64_t hi, double eps, const double *restrict im,
+                       const double *restrict zp, const double *restrict zg, const double *restrict zq,
+                       double *restrict np, double *restrict nq) {
+  for (int64_t i = lo; i < hi; i++) {
+    double ph = zp[i] + 0.5 * eps * zg[i];
+    np[i] = ph;
+    nq[i] = zq[i] + eps * im[i] * ph;
+  }
+}
+
+// Second half-step over [lo, hi) (lo a multiple of LN): the final momentum
+// p, its kinetic-energy lanes k, and, when xp is not NULL, the first
+// half-step of the next leapfrog from this state (same arithmetic as
+// kern_half1).
+static void kern_half2(int64_t lo, int64_t hi, double eps, const double *restrict im, double *restrict p,
+                       const double *restrict g, const double *restrict q, double *restrict xp,
+                       double *restrict xq, double *restrict k) {
+  double kk[LN];
+  for (int l = 0; l < LN; l++) kk[l] = k[l];
+#define HALF2(e, l)                       \
+  do {                                    \
+    double v = p[e] + 0.5 * eps * g[e];   \
+    p[e] = v;                             \
+    kk[l] += v * v * im[e];               \
+  } while (0)
+#define HALF2_NEXT(e, l)                  \
+  do {                                    \
+    double v = p[e] + 0.5 * eps * g[e];   \
+    p[e] = v;                             \
+    kk[l] += v * v * im[e];               \
+    double ph = v + 0.5 * eps * g[e];     \
+    xp[e] = ph;                           \
+    xq[e] = q[e] + eps * im[e] * ph;      \
+  } while (0)
+  int64_t i = lo;
+  if (xp) {
+    for (; i + LN <= hi; i += LN)
+      for (int l = 0; l < LN; l++) HALF2_NEXT(i + l, l);
+    for (; i < hi; i++) HALF2_NEXT(i, (int)(i % LN));
+  } else {
+    for (; i + LN <= hi; i += LN)
+      for (int l = 0; l < LN; l++) HALF2(i + l, l);
+    for (; i < hi; i++) HALF2(i, (int)(i % LN));
+  }
+#undef HALF2
+#undef HALF2_NEXT
+  for (int l = 0; l < LN; l++) k[l] = kk[l];
+}
+
+// A merge over n elements (pointers already offset to the block; the block
+// starts at a multiple of LN): out = ra + rb and the lanes of the three
+// no-U-turn checks
+//   (a1, b1) = (end_ps . out, beg_ps . out)
 //   (a2, b2) = (mid2_ps . (ra + mid2_p), beg_ps . (ra + mid2_p))
 //   (a3, b3) = (end_ps . (rb + mid1_p), mid1_ps . (rb + mid1_p))
-// Returns 1 when all three pass.
-// Scaled momenta (inverse metric * p) are recomputed here instead of being
-// stored with every state: (im * p) rounds exactly as a stored value would,
-// and the sampler moves less memory.
-static int merge_checks(Nuts *s, double *rho, const double *ra, const double *rb, const double *beg_p,
-                        const double *end_p, const double *mid2_p, const double *mid1_p) {
+// Scaled momenta (inverse metric * p) are recomputed instead of being stored
+// with every state: (im * p) rounds exactly as a stored value would. out must
+// not overlap any input.
+static void kern_merge(int64_t n, const double *restrict im, const double *restrict ra,
+                       const double *restrict rb, const double *restrict bp, const double *restrict ep,
+                       const double *restrict m2, const double *restrict m1, double *restrict out,
+                       double (*restrict acc)[LN]) {
+  double a1[LN], b1[LN], a2[LN], b2[LN], a3[LN], b3[LN];
+  for (int l = 0; l < LN; l++)
+    a1[l] = acc[0][l], b1[l] = acc[1][l], a2[l] = acc[2][l], b2[l] = acc[3][l], a3[l] = acc[4][l],
+    b3[l] = acc[5][l];
+#define MERGE(e, l)                                  \
+  do {                                               \
+    double beg_ps = im[e] * bp[e], end_ps = im[e] * ep[e]; \
+    double xa = ra[e], xb = rb[e];                   \
+    double r = xa + xb;                              \
+    out[e] = r;                                      \
+    a1[l] += end_ps * r;                             \
+    b1[l] += beg_ps * r;                             \
+    double r2 = xa + m2[e];                          \
+    a2[l] += (im[e] * m2[e]) * r2;                   \
+    b2[l] += beg_ps * r2;                            \
+    double r3 = xb + m1[e];                          \
+    a3[l] += end_ps * r3;                            \
+    b3[l] += (im[e] * m1[e]) * r3;                   \
+  } while (0)
+  int64_t i = 0;
+  for (; i + LN <= n; i += LN)
+    for (int l = 0; l < LN; l++) MERGE(i + l, l);
+  for (; i < n; i++) MERGE(i, (int)(i % LN));
+#undef MERGE
+  for (int l = 0; l < LN; l++)
+    acc[0][l] = a1[l], acc[1][l] = b1[l], acc[2][l] = a2[l], acc[3][l] = b2[l], acc[4][l] = a3[l],
+    acc[5][l] = b3[l];
+}
+
+// The merge of two single leaves with momenta ra and rb (half of all merges):
+// the three checks reduce to one pair, (rb_ps . out, ra_ps . out), with
+// exactly the arithmetic of kern_merge's (a1, b1).
+static void kern_merge_leaves(int64_t n, const double *restrict im, const double *restrict ra,
+                              const double *restrict rb, double *restrict out, double (*restrict acc)[LN]) {
+  double a1[LN], b1[LN];
+  for (int l = 0; l < LN; l++) a1[l] = acc[0][l], b1[l] = acc[1][l];
+#define MERGE2(e, l)                 \
+  do {                               \
+    double xa = ra[e], xb = rb[e];   \
+    double r = xa + xb;              \
+    out[e] = r;                      \
+    a1[l] += (im[e] * xb) * r;       \
+    b1[l] += (im[e] * xa) * r;       \
+  } while (0)
+  int64_t i = 0;
+  for (; i + LN <= n; i += LN)
+    for (int l = 0; l < LN; l++) MERGE2(i + l, l);
+  for (; i < n; i++) MERGE2(i, (int)(i % LN));
+#undef MERGE2
+  for (int l = 0; l < LN; l++) acc[0][l] = a1[l], acc[1][l] = b1[l];
+}
+
+// ---- a leaf of the tree
+//
+// A leaf costs two passes over D around its gradient. The first half-step
+// writes the new state's position. The second (leaf_finish) writes its
+// momentum, sums its kinetic energy, computes every merge this leaf completes
+// (when it is the last leaf of one or more subtrees), and, unless the leaf
+// ends the trajectory's new subtree, also takes the first half-step of the
+// next leaf, so that most leaves need only this one pass. A merge's sum is
+// stored only for the outermost merge of the leaf; the inner ones are only
+// read by the merge above them and stay in a block-sized buffer. The
+// arithmetic of every stored value is that of a plain leapfrog followed by
+// separate merges; only the order of the sums differs (see LN above).
+
+typedef struct {
+  const double *ra, *rb;  // NULL: the merge below (the leaf's momentum at the bottom)
+  const double *bp, *ep, *m2p, *m1p;
+  double *out;            // NULL except for the outermost merge
+  int leaves;             // a merge of two single leaves
+} LevelJob;
+
+typedef struct {
+  Nuts *s;
+  St *n, *nx;  // the leaf, and the next leaf (NULL: none)
+  double eps;
+  int nlev;
+  LevelJob lev[MAX_DEPTH + 2];
+} LeafJob;
+
+static void leaf_work(LeafJob *J, int t, int T) {
+  Nuts *s = J->s;
+  St *n = J->n, *nx = J->nx;
+  const double *im = s->inv_m;
+  int64_t lo, hi;
+  split_range(s->D, t, T, &lo, &hi);
+  double k[LN] = {0};
+  double acc[MAX_DEPTH + 2][6][LN];
+  memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
+  double buf[2][CHUNK];
+  for (int64_t c0 = lo; c0 < hi; c0 += CHUNK) {
+    int64_t c1 = c0 + CHUNK < hi ? c0 + CHUNK : hi, m = c1 - c0;
+    kern_half2(c0, c1, J->eps, im, n->p, n->g, n->q, nx ? nx->p : NULL, nx ? nx->q : NULL, k);
+    const double *below = n->p + c0;
+    for (int v = 0; v < J->nlev; v++) {
+      const LevelJob *L = &J->lev[v];
+      double *out = L->out ? L->out + c0 : buf[v & 1];
+      const double *ra = L->ra ? L->ra + c0 : below, *rb = L->rb ? L->rb + c0 : below;
+      if (L->leaves)
+        kern_merge_leaves(m, im + c0, ra, rb, out, acc[v]);
+      else
+        kern_merge(m, im + c0, ra, rb, L->bp + c0, L->ep + c0, L->m2p + c0, L->m1p + c0, out, acc[v]);
+      below = out;
+    }
+  }
+  double *part = s->part[t];
+  part[0] = lanes_total(k);
+  for (int v = 0; v < J->nlev; v++)
+    for (int j = 0; j < 6; j++) part[1 + 6 * v + j] = lanes_total(acc[v][j]);
+}
+
+// Records the smallest OpenMP team that ran a pass: OpenMP may give fewer
+// threads than asked for (thread limits, nesting), and the passes split by
+// the team actually running.
+static void note_team(Nuts *s, int used) {
+  if (used < s->team_min) s->team_min = used;
+}
+
+// n = first half-step of a leapfrog from z
+static void leaf_start(Nuts *s, const St *z, St *n, double eps) {
   int64_t D = s->D;
   int nt = s->nt;
-  const double *restrict im = s->inv_m;
-  if (ra == beg_p && ra == mid1_p && rb == end_p && rb == mid2_p) {
-    // Merging two single leaves (half of all merges): ra and rb are the
-    // leaves' momenta, and the three checks reduce to the same two sums
-    // (with exactly the same arithmetic as the general loop below).
-    double part2[MAX_NT][2];
-    int used2 = 1;
-#pragma omp parallel num_threads(nt) if (nt > 1)
-    {
-      int t = omp_get_thread_num(), T = omp_get_num_threads();
-      if (t == 0) used2 = T;
-      int64_t lo = D * t / T, hi = D * (t + 1) / T;
-      double a1 = 0, b1 = 0;
-      #pragma omp simd reduction(+ : a1, b1)
-      for (int64_t i = lo; i < hi; i++) {
-        double xa = ra[i], xb = rb[i];
-        double r = xa + xb;
-        rho[i] = r;
-        a1 += (im[i] * xb) * r;
-        b1 += (im[i] * xa) * r;
-      }
-      part2[t][0] = a1, part2[t][1] = b1;
-    }
-    if (used2 < s->team_min) s->team_min = used2;
-    double a = 0, b = 0;
-    for (int t = 0; t < used2; t++) a += part2[t][0], b += part2[t][1];
-    return a > 0 && b > 0;
+  if (nt == 1) {
+    kern_half1(0, D, eps, s->inv_m, z->p, z->g, z->q, n->p, n->q);
+    return;
   }
-  double part[MAX_NT][6];
   int used = 1;
-#pragma omp parallel num_threads(nt) if (nt > 1)
+#pragma omp parallel num_threads(nt)
   {
     int t = omp_get_thread_num(), T = omp_get_num_threads();
     if (t == 0) used = T;
-    int64_t lo = D * t / T, hi = D * (t + 1) / T;
-    double a1 = 0, b1 = 0, a2 = 0, b2 = 0, a3 = 0, b3 = 0;
-    #pragma omp simd reduction(+ : a1, b1, a2, b2, a3, b3)
-    for (int64_t i = lo; i < hi; i++) {
-      double beg_ps = im[i] * beg_p[i], end_ps = im[i] * end_p[i];
-      // read both sums before writing rho, which may be one of them (the
-      // trajectory's sum is updated in place)
-      double xa = ra[i], xb = rb[i];
-      double r = xa + xb;
-      rho[i] = r;
-      a1 += end_ps * r;
-      b1 += beg_ps * r;
-      double r2 = xa + mid2_p[i];
-      a2 += (im[i] * mid2_p[i]) * r2;
-      b2 += beg_ps * r2;
-      double r3 = xb + mid1_p[i];
-      a3 += end_ps * r3;
-      b3 += (im[i] * mid1_p[i]) * r3;
-    }
-    part[t][0] = a1, part[t][1] = b1, part[t][2] = a2, part[t][3] = b2, part[t][4] = a3, part[t][5] = b3;
+    int64_t lo, hi;
+    split_range(D, t, T, &lo, &hi);
+    kern_half1(lo, hi, eps, s->inv_m, z->p, z->g, z->q, n->p, n->q);
   }
-  if (used < s->team_min) s->team_min = used;
-  double v[6] = {0, 0, 0, 0, 0, 0};
-  for (int t = 0; t < used; t++)
-    for (int k = 0; k < 6; k++) v[k] += part[t][k];
-  return (v[0] > 0 && v[1] > 0) & (v[2] > 0 && v[3] > 0) & (v[4] > 0 && v[5] > 0);
+  note_team(s, used);
+}
+
+// Second half of leaf n's leapfrog and the merges waiting for it (see above).
+// Returns the Hamiltonian; each completed merge's result is in its Merge.
+static double leaf_finish(Nuts *s, St *n, double eps) {
+  int lo = s->pend_lo, hi = s->npend;
+  LeafJob J = {.s = s, .n = n, .eps = eps, .nlev = hi - lo};
+  // When the merges reach the transition's own (pend[0]), this leaf ends the
+  // new subtree and the next direction is not yet drawn: no next leaf.
+  if (!(lo == 0 && hi > 0)) J.nx = st_acquire(s);
+  for (int v = 0; v < J.nlev; v++) {
+    const Merge *m = &s->pend[hi - 1 - v];
+    LevelJob *L = &J.lev[v];
+    L->ra = m->ra, L->rb = m->rb;
+    L->bp = (*m->beg)->p, L->ep = (*m->end)->p, L->m2p = (*m->mid2)->p, L->m1p = (*m->mid1)->p;
+    L->out = v == J.nlev - 1 ? m->rho : NULL;
+    if (v == J.nlev - 1 && !L->out) mint_panic("internal error: outermost merge has no output");
+    // two single leaves: the halves are the earlier leaf and this one
+    L->leaves = v == 0 && m->ra && !m->rb && m->ra == L->bp && m->ra == L->m1p && L->ep == n->p &&
+                L->m2p == n->p;
+  }
+  if (s->nt == 1) {
+    leaf_work(&J, 0, 1);
+    note_team(s, 1);
+  } else {
+    int used = 1;
+#pragma omp parallel num_threads(s->nt)
+    {
+      int t = omp_get_thread_num(), T = omp_get_num_threads();
+      if (t == 0) used = T;
+      leaf_work(&J, t, T);
+    }
+    note_team(s, used);
+    for (int t = 1; t < used; t++)
+      for (int j = 0; j < 1 + 6 * J.nlev; j++) s->part[0][j] += s->part[t][j];
+  }
+  const double *v = s->part[0];
+  for (int l = 0; l < J.nlev; l++) {
+    const double *x = v + 1 + 6 * l;
+    int ok = J.lev[l].leaves ? (x[0] > 0 && x[1] > 0)
+                             : (x[0] > 0 && x[1] > 0) & (x[2] > 0 && x[3] > 0) & (x[4] > 0 && x[5] > 0);
+    s->pend[hi - 1 - l].persist = ok;
+  }
+  if (J.nx) {
+    s->spec = J.nx;
+    s->spec_from = n;
+    s->spec_eps = eps;
+  }
+  return -n->lp + 0.5 * v[0];
 }
 
 static void sample_momentum(Nuts *s, St *z) {
@@ -535,42 +706,70 @@ static void vzero(double *v, int64_t D) { memset(v, 0, D * sizeof(double)); }
 static void vcopy(double *d, const double *s, int64_t D) { memcpy(d, s, D * sizeof(double)); }
 
 // Extends the trajectory from s->edge by 2^depth leapfrog steps. On return
-// *beg and *end reference the subtree's first and last states, *prop its
-// multinomial proposal, and rho has the subtree's summed momenta added.
-// The subtree's momentum sum is returned in *rho_out: the leaf's own momentum
-// at depth 0 (the leaf stays referenced as *beg and *end until the parent's
-// merge has used it), and otherwise rho, which the merge fills.
+// *beg and *end reference the subtree's first and last states and *prop its
+// multinomial proposal. The subtree's momentum sum is returned in *rho_out:
+// the leaf's own momentum at depth 0 (the leaf stays referenced as *beg and
+// *end until the parent's merge has used it), and otherwise rho. rho is only
+// written when this subtree is the first half of its parent (the parent's
+// merge reads it later); the sum of a second half is only read by the merge
+// that its last leaf also completes, so it is never stored, and rho may be
+// NULL there.
+//
+// The control flow is Stan's base_nuts. The difference is when the merges'
+// sums are computed: a merge is registered in s->pend before its second half
+// is built, and that half's last leaf computes it (leaf_finish). Its result
+// is read here in Stan's order, after the multinomial proposal is drawn.
 static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double *rho, const double **rho_out,
                       double H0, double sign, double *log_sum_weight) {
   if (depth == 0) {
-    St *n = st_acquire(s);
-    double h = leaf_into(s, s->edge, n, sign * s->eps);
-    *rho_out = n->p;
+    double eps = sign * s->eps;
+    St *n = s->spec;
+    s->spec = NULL;
+    if (n) {
+      if (s->spec_from != s->edge || s->spec_eps != eps) mint_panic("internal error: stale leapfrog half-step");
+    } else {
+      n = st_acquire(s);
+      leaf_start(s, s->edge, n, eps);
+    }
+    eval(s, n);
     st_release(s, s->edge);
     s->edge = n;
     s->n_leapfrog++;
+    st_set(s, prop, n);
+    st_set(s, beg, n);
+    st_set(s, end, n);
+    *rho_out = n->p;
+    double h = leaf_finish(s, n, eps);
     if (isnan(h)) h = INFINITY;
     n->h = h;
     if (h - H0 > 1000.0) s->divergent = 1;
     *log_sum_weight = log_sum_exp(*log_sum_weight, H0 - h);
     s->sum_metro += (H0 - h > 0) ? 1.0 : exp(H0 - h);
-    st_set(s, prop, n);
-    st_set(s, beg, n);
-    st_set(s, end, n);
     return !s->divergent;
   }
   Level *L = &s->lv[depth];
   int persist = 0;
   *rho_out = rho;
 
+  // The first half's last leaf completes the first half's merges but none
+  // waiting above this subtree.
   double lsw_init = -INFINITY;
   const double *r_init, *r_final;
-  if (!build_tree(s, depth - 1, prop, beg, &L->init_end, L->rho_init, &r_init, H0, sign, &lsw_init)) goto out;
+  int saved_lo = s->pend_lo;
+  s->pend_lo = s->npend;
+  int ok = build_tree(s, depth - 1, prop, beg, &L->init_end, L->rho_init, &r_init, H0, sign, &lsw_init);
+  s->pend_lo = saved_lo;
+  if (!ok) goto out;
 
+  // This merge: rho = r_init + (second half's sum), checks against *beg,
+  // *end, the second half's first state and the first half's last.
+  Merge *m = &s->pend[s->npend++];
+  *m = (Merge){.rho = rho, .ra = r_init, .rb = NULL, .beg = beg, .end = end, .mid2 = &L->final_beg,
+               .mid1 = &L->init_end};
   double lsw_final = -INFINITY;
-  if (!build_tree(s, depth - 1, &L->prop_final, &L->final_beg, end, L->rho_final, &r_final, H0, sign,
-                  &lsw_final))
-    goto out;
+  ok = build_tree(s, depth - 1, &L->prop_final, &L->final_beg, end, NULL, &r_final, H0, sign, &lsw_final);
+  s->npend--;
+  if (!ok) goto out;
 
   double lsw_subtree = log_sum_exp(lsw_init, lsw_final);
   *log_sum_weight = log_sum_exp(*log_sum_weight, lsw_subtree);
@@ -580,8 +779,7 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
     st_set(s, prop, L->prop_final);
   }
 
-  // rho = rho_init + rho_final and the three no-U-turn checks, in one pass
-  persist = merge_checks(s, rho, r_init, r_final, (*beg)->p, (*end)->p, L->final_beg->p, L->init_end->p);
+  persist = m->persist;
 out:
   st_set(s, &L->init_end, NULL);
   st_set(s, &L->final_beg, NULL);
@@ -590,14 +788,13 @@ out:
 }
 
 typedef struct {
-  double *rho, *rho_fwd, *rho_bck;
+  double *rho, *rho_next;  // the trajectory's summed momentum; the merge writes rho_next
 } Traj;
 
 // One NUTS transition from s->cur. On return s->cur is the selected sample.
 // Returns the acceptance statistic.
 static double transition(Nuts *s, Traj *t) {
   int64_t D = s->D;
-  (void)D;
   St *z0 = st_clone_position(s, s->cur);
   sample_momentum(s, z0);
   St *fwd_fwd = NULL, *fwd_bck = NULL, *bck_fwd = NULL, *bck_bck = NULL;
@@ -617,22 +814,31 @@ static double transition(Nuts *s, Traj *t) {
     int valid;
     double lsw_sub = -INFINITY;
     // The trajectory so far is one side of the merge and the new subtree the
-    // other; the merge writes their sum back into t->rho in place.
-    const double *r_new, *r_bck, *r_fwd;
+    // other (NULL: its sum comes from the subtree's last leaf). The merge is
+    // registered as pend[0]; the subtree's last leaf computes it.
+    const double *r_new;
+    s->npend = 1;
+    s->pend_lo = 0;
+    Merge *m = &s->pend[0];
+    *m = (Merge){.rho = t->rho_next, .beg = &bck_bck, .end = &fwd_fwd, .mid2 = &fwd_bck, .mid1 = &bck_fwd};
     if (rng_uniform(&s->rng) > 0.5) {
       st_set(s, &s->edge, edge_fwd);
       st_set(s, &bck_fwd, fwd_fwd);
-      valid = build_tree(s, s->depth, &propose, &fwd_bck, &fwd_fwd, t->rho_fwd, &r_new, H0, 1.0, &lsw_sub);
+      m->ra = t->rho, m->rb = NULL;
+      valid = build_tree(s, s->depth, &propose, &fwd_bck, &fwd_fwd, NULL, &r_new, H0, 1.0, &lsw_sub);
       st_set(s, &edge_fwd, s->edge);
-      r_bck = t->rho, r_fwd = r_new;
     } else {
       st_set(s, &s->edge, edge_bck);
       st_set(s, &fwd_bck, bck_bck);
-      valid = build_tree(s, s->depth, &propose, &bck_fwd, &bck_bck, t->rho_bck, &r_new, H0, -1.0, &lsw_sub);
+      m->ra = NULL, m->rb = t->rho;
+      valid = build_tree(s, s->depth, &propose, &bck_fwd, &bck_bck, NULL, &r_new, H0, -1.0, &lsw_sub);
       st_set(s, &edge_bck, s->edge);
-      r_bck = r_new, r_fwd = t->rho;
     }
+    s->npend = 0;
     if (!valid) break;
+    // the subtree is complete, so its last leaf has merged it into rho_next
+    double *tmp = t->rho;
+    t->rho = t->rho_next, t->rho_next = tmp;
     s->depth++;
     if (lsw_sub > log_sum_weight) {
       st_set(s, &sample, propose);
@@ -641,8 +847,11 @@ static double transition(Nuts *s, Traj *t) {
     }
     log_sum_weight = log_sum_exp(log_sum_weight, lsw_sub);
 
-    int persist = merge_checks(s, t->rho, r_bck, r_fwd, bck_bck->p, fwd_fwd->p, fwd_bck->p, bck_fwd->p);
-    if (!persist) break;
+    if (!m->persist) break;
+  }
+  if (s->spec) {  // a half-step taken ahead for a leaf that never came
+    st_release(s, s->spec);
+    s->spec = NULL;
   }
   st_set(s, &s->cur, sample);
   st_set(s, &s->edge, NULL);
@@ -736,6 +945,119 @@ static void next_window(Windows *w) {
   }
 }
 
+// ---- keeping a chain's threads on one L3 cache
+//
+// When a chain's passes are split across threads, the chain's own thread
+// (which runs the gradient) and its helpers hand the state vectors to each
+// other every leapfrog. On CPUs with several L3 caches (AMD's chiplets), a
+// chain whose threads sit behind different L3s moves that traffic across the
+// chip's interconnect: a 37,901-parameter chain with 3 threads took 17 to 18 s
+// instead of 10.6 s that way. So each threaded chain's threads are restricted
+// to the CPUs sharing one L3 (any of them, not one CPU each), and chains are
+// dealt to the L3s in turn. MINT_CHAIN_AFFINITY=0 turns this off.
+
+#define MAX_L3 16
+
+// Parses a sysfs CPU list such as "0-5,12-17".
+static int read_cpu_list(const char *path, cpu_set_t *set) {
+  FILE *f = fopen(path, "r");
+  if (!f) return 0;
+  char buf[8192];
+  int ok = fgets(buf, sizeof buf, f) != NULL;
+  // the whole line, or nothing: a truncated list would parse as other CPUs
+  ok = ok && (strchr(buf, '\n') || feof(f));
+  fclose(f);
+  if (!ok) return 0;
+  CPU_ZERO(set);
+  char *p = buf;
+  while (*p && *p != '\n') {
+    char *e;
+    long a = strtol(p, &e, 10), b = a;
+    if (e == p) return 0;
+    if (*e == '-') {
+      p = e + 1;
+      b = strtol(p, &e, 10);
+      if (e == p) return 0;
+    }
+    for (long c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET((int)c, set);
+    p = e;
+    if (*p == ',') p++;
+  }
+  return CPU_COUNT(set) > 0;
+}
+
+// The CPUs this process may use, grouped by shared L3 cache. Returns the
+// number of groups, or 0 when the topology cannot be read.
+static int l3_groups(cpu_set_t *g, int max) {
+  cpu_set_t allowed;
+  if (sched_getaffinity(0, sizeof allowed, &allowed) != 0) return 0;
+  int n = 0;
+  for (int c = 0; c < CPU_SETSIZE; c++) {
+    if (!CPU_ISSET(c, &allowed)) continue;
+    int seen = 0;
+    for (int k = 0; k < n; k++) seen |= CPU_ISSET(c, &g[k]) != 0;
+    if (seen) continue;
+    cpu_set_t l3;
+    int found = 0;
+    for (int idx = 0; idx < 8 && !found; idx++) {
+      char path[160];
+      snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cache/index%d/level", c, idx);
+      FILE *f = fopen(path, "r");
+      if (!f) break;
+      int level = 0;
+      if (fscanf(f, "%d", &level) != 1) level = 0;
+      fclose(f);
+      if (level == 3) {
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list", c, idx);
+        found = read_cpu_list(path, &l3);
+      }
+    }
+    if (!found || n == max) return 0;
+    CPU_AND(&g[n], &l3, &allowed);
+    if (!CPU_ISSET(c, &g[n])) return 0;
+    for (int k = 0; k < n; k++) {  // groups must not overlap
+      cpu_set_t both;
+      CPU_AND(&both, &g[k], &g[n]);
+      if (CPU_COUNT(&both)) return 0;
+    }
+    n++;
+  }
+  return n;
+}
+
+// Each thread's own mask from before bind_team, put back by restore_team.
+static __thread cpu_set_t saved_mask;
+static __thread int saved_ok;
+
+static void restore_team(int nt) {
+#pragma omp parallel num_threads(nt)
+  if (saved_ok) {
+    pthread_setaffinity_np(pthread_self(), sizeof saved_mask, &saved_mask);
+    saved_ok = 0;
+  }
+}
+
+// Restricts every thread of this chain's team to *set. This relies on the
+// chain getting the same OpenMP threads for every pass (LLVM's "hot team"
+// of a thread that is not itself inside a parallel region), so it is not
+// done with dynamic team sizes, and it is undone when the team is smaller
+// than asked for or a thread could not be moved. Returns 1 when bound.
+static int bind_team(int nt, const cpu_set_t *set) {
+  if (omp_get_dynamic()) return 0;
+  int used = 0, fails = 0;
+#pragma omp parallel num_threads(nt) reduction(+ : fails)
+  {
+    if (omp_get_thread_num() == 0) used = omp_get_num_threads();
+    saved_ok = pthread_getaffinity_np(pthread_self(), sizeof saved_mask, &saved_mask) == 0;
+    if (!saved_ok || pthread_setaffinity_np(pthread_self(), sizeof *set, set) != 0) fails++;
+  }
+  if (used != nt || fails) {
+    restore_team(nt);
+    return 0;
+  }
+  return 1;
+}
+
 typedef struct {
   // inputs
   mint_logp_fn f;
@@ -744,6 +1066,7 @@ typedef struct {
   uint64_t seed;
   int chain;
   int threads_per_chain;
+  const cpu_set_t *l3;  // CPUs for this chain's threads, or NULL
   // outputs
   int team_min;
   double *out;  // draws x D, constrained
@@ -762,6 +1085,7 @@ static void *run_chain(void *arg) {
   s->team_min = s->nt;
   int64_t saved_knt = kernel_nt;
   kernel_nt = kernel_threads(s->nt);
+  int bound = job->l3 && s->nt > 1 && bind_team(s->nt, job->l3);
   s->f = job->f;
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
@@ -769,10 +1093,9 @@ static void *run_chain(void *arg) {
   for (int d = 0; d <= MAX_DEPTH; d++) {
     Level *L = &s->lv[d];
     L->rho_init = mint_alloc(D);
-    L->rho_final = mint_alloc(D);
   }
   Traj t;
-  double **tv[] = {&t.rho, &t.rho_fwd, &t.rho_bck};
+  double **tv[] = {&t.rho, &t.rho_next};
   for (size_t k = 0; k < sizeof tv / sizeof tv[0]; k++) *tv[k] = mint_alloc(D);
 
   // Initialise uniformly on (-2, 2) in the unconstrained space, as Stan does.
@@ -870,6 +1193,7 @@ static void *run_chain(void *arg) {
   job->step_size = s->eps;
   job->n_grad = s->n_grad;
   job->team_min = s->team_min;
+  if (bound) restore_team(s->nt);
   job->mean_leapfrog = job->draws ? (double)total_leapfrog / (double)job->draws : 0;
 
   free(wmean);
@@ -879,7 +1203,6 @@ static void *run_chain(void *arg) {
   for (size_t k = 0; k < sizeof tv / sizeof tv[0]; k++) free(*tv[k]);
   for (int d = 0; d <= MAX_DEPTH; d++) {
     free(s->lv[d].rho_init);
-    free(s->lv[d].rho_final);
   }
   for (int k = 0; k < s->n_all; k++) {
     St *x = s->all[k];
@@ -1159,6 +1482,10 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   }
   if (tpc < 1) tpc = 1;
   if (tpc > MAX_NT) tpc = MAX_NT;
+  cpu_set_t l3[MAX_L3];
+  int n_l3 = 0;
+  const char *aenv = getenv("MINT_CHAIN_AFFINITY");
+  if (tpc > 1 && !(aenv && strcmp(aenv, "0") == 0)) n_l3 = l3_groups(l3, MAX_L3);
   ChainJob *jobs = calloc((size_t)chains, sizeof *jobs);
   pthread_t *th = calloc((size_t)chains, sizeof *th);
   double t0 = mint_clock();
@@ -1171,6 +1498,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .seed = (uint64_t)seed,
                          .chain = (int)c,
                          .threads_per_chain = tpc,
+                         .l3 = n_l3 > 1 ? &l3[c % n_l3] : NULL,
                          .out = post->draw + c * draws * D};
     if (chains == 1) {
       run_chain(&jobs[c]);

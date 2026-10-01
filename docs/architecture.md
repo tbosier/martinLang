@@ -438,25 +438,58 @@ is checked against the exact formula at both sizes.
   (position, momentum, gradient) instead of updating one in place. The tree then keeps references to its end points and
   proposals rather than copying D-length vectors. States are recycled from a
   per-chain free list.
-- **Fused passes.** The leapfrog's second half-step, kinetic energy and
-  subtree momentum sum are one pass. Each merge's summed momentum and three
-  no-U-turn checks are another. The scaled momentum (inverse metric times
-  momentum) is recomputed inside those passes rather than stored, which saves
-  one D-length vector of memory traffic per state.
+- **One pass per leaf.** A merge of two subtrees (their summed momentum and
+  the three no-U-turn checks) needs nothing that is not known once the last
+  leaf of the second subtree exists. So a merge is registered before its
+  second subtree is built, and that subtree's last leaf computes it in the
+  same pass as its own second half-step and kinetic energy, together with
+  every other merge it completes (a leaf that ends a depth-k subtree completes
+  k merges, plus the trajectory's own merge when it ends the new subtree). Unless the leaf ends the trajectory's new subtree, the same pass
+  also takes the first half-step of the next leaf, which is always the next
+  leapfrog from this leaf in the same direction. Most leaves therefore cost
+  one pass over D next to their gradient, instead of three to four. A
+  subtree's summed momentum is stored only when a later merge reads it (the
+  first half of a merge); the inner merges of a leaf pass their sums along in
+  a block-sized buffer. The results are read in Stan's order, after the
+  multinomial proposal of that level is drawn, and a half-step taken for a
+  leaf that never comes (the tree stopped) is discarded. The scaled momentum
+  (inverse metric times momentum) is recomputed inside the pass rather than
+  stored.
 - **Threads within a chain.** When the model has at least 8,192 parameters,
   those passes are split across OpenMP threads, by default
   (online CPUs ÷ 2) ÷ chains per chain; `MINT_THREADS_PER_CHAIN` overrides it.
   The same threads share the fused scan kernel of the gradient (see the scan
   kernel section); the rest of the gradient runs on the chain's own thread.
-- **Same draws where serial.** On the serial path the arithmetic and the order
-  of random draws are unchanged, so it produces bit-identical draws to the
-  original copying sampler. This was checked on eight schools and the dynamic
-  Poisson model; `tests/run.sh` does not re-check it. The threaded path sums
-  in a different order, so its draws differ by rounding and then diverge.
+  Each threaded chain's threads are restricted to the CPUs that share one L3 cache (chains
+  are dealt to the L3s in turn), because the chain's thread and its helpers
+  exchange the state vectors every leapfrog and that traffic is slow between
+  L3s on a chiplet CPU. This is skipped when OpenMP teams are dynamic
+  (`OMP_DYNAMIC`) or a chain gets a smaller team than asked for, and each
+  thread's previous mask is restored when the chain ends.
+  `MINT_CHAIN_AFFINITY=0` turns it off.
+- **Fixed summation order.** Every sum over D in the leaf passes (kinetic
+  energy, no-U-turn checks) is accumulated in 8 lanes
+  (element i in lane i mod 8, each lane in index order, lanes combined in a
+  fixed tree; per thread ranges start at multiples of 8 and thread totals are
+  added in thread order). The starting energy of a transition and the
+  step-size search use a plain sequential sum, as before. Draws are therefore reproducible for a given
+  thread count and do not depend on blocking, fusion or the compiler's
+  vectorisation, but they differ by rounding (and then diverge) from earlier
+  versions of the sampler and between thread counts. The fused sampler gave
+  bit-identical draws to the unfused one with the same sums (Stan's control
+  flow, separate merges) on eight schools (which has divergent transitions),
+  logistic and linear regression and the dynamic Poisson model, serial and
+  with 3 threads per chain; `tests/run.sh` does not re-check that.
 - **Speedups.** A whole 4-chain, 1000 + 1000 run went from 15.3 s to 8.3 s at
   3,171 dimensions (1.8x) and from 1448 s to 278 to 325 s at 37,901 dimensions
   (4.5 to 5.2x, depending on the run; 2.1x from the reference-counted states
-  alone).
+  alone). The one-pass leaves and the L3 affinity then took a whole
+  37,901-dimension run from 200 s (one run of the previous runtime) to 113
+  and 116 s (two runs, 3 and 2 threads per chain), and the 3,171-dimension
+  run from 4.0 to 4.4 s to 3.7 to 3.9 s (three runs each). These were
+  measured on a shared machine with other jobs running (load 7 to 13), so
+  the individual times are noisy; the large run's gain is mostly the
+  affinity.
 - **Metric adaptation.** The default is Stan's: the regularised variance of
   the warmup draws. `MINT_METRIC=grad` instead uses
   `sqrt(var(draws) / var(gradients))`, as nutpie does. It is not the default:

@@ -163,6 +163,8 @@ Useful environment variables for compiled programs:
 - `MINT_KERNEL_THREADS=N` overrides the number of threads the fused scan
   kernel uses: during sampling (default: the threads per chain) and in
   `MINT_BENCH_GRAD` and `MINT_GRADCHECK` (default 1).
+- `MINT_CHAIN_AFFINITY=0` stops the runtime from keeping each threaded
+  chain's threads on the CPUs of one L3 cache.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 
