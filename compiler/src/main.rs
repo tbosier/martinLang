@@ -85,7 +85,7 @@ fn runtime_object() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--no-narrow-data]");
+    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--no-narrow-data] [--no-negzero-sums]");
     exit(2);
 }
 
@@ -97,7 +97,7 @@ fn main() {
     let cmd = args[0].as_str();
     let path = &args[1];
     let mut out: Option<String> = None;
-    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true, fission_kernel: true, inline_log: true, parallel_kernel: true, narrow_data: true };
+    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true, fission_kernel: true, inline_log: true, parallel_kernel: true, narrow_data: true, negzero_sums: true };
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -118,6 +118,7 @@ fn main() {
             "--no-inline-log" => opts.inline_log = false,
             "--no-parallel-kernel" => opts.parallel_kernel = false,
             "--no-narrow-data" => opts.narrow_data = false,
+            "--no-negzero-sums" => opts.negzero_sums = false,
             _ => usage(),
         }
         k += 1;

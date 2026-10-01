@@ -84,6 +84,9 @@ pub struct Module {
     /// variant's function names (empty for the wide one).
     pub narrow_data: HashMap<String, Narrow>,
     pub variant: String,
+    /// Start the vector kernels' register sums of adjoints at -0.0
+    /// (`--no-negzero-sums` and `--strict-fp` keep 0.0).
+    pub negzero_sums: bool,
 }
 
 /// 2^(j/256) for j = 0..255, each correctly rounded to double (computed with

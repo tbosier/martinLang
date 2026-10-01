@@ -1097,7 +1097,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     // Narrow data: `init` picks, per sample() call, a variant of `logp`
     // whose vector kernels read a narrow copy of each data buffer whose
     // values it holds exactly (variant 0 reads only doubles).
-    let cands = narrow_candidates(tm, &stmts, opts, &cm);
+    let cands = narrow_candidates(tm, &stmts, opts, &cm, m.avx2);
     for (n, _) in &cands {
         m.globals.push(format!("{} = internal global ptr null", narrow_global(name, n)));
     }
@@ -1132,8 +1132,10 @@ const MAX_NARROW_VARIANTS: usize = 4;
 /// fused scan kernel, with the statements it absorbs, and the fission
 /// kernel), each with the narrow types to try for it, narrowest first.
 /// Which one is used, if any, is decided at run time from the values.
-fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) -> Vec<(String, Vec<Narrow>)> {
-    if !opts.narrow_data {
+fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], avx2: bool) -> Vec<(String, Vec<Narrow>)> {
+    // Off under --strict-fp, and without AVX2 (the barrier in Fb::opaque
+    // needs a vector register for <4 x double>; programs are built for the host).
+    if !opts.narrow_data || opts.strict_fp || !avx2 {
         return Vec::new();
     }
     fn leaves(e: &M, out: &mut Vec<String>) {
@@ -1984,12 +1986,15 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
 /// The start of a register sum of adjoints inside a vector kernel (one
 /// element's running-sum or product adjoint, one column's gradient): -0.0,
 /// since -0.0 + x is x for every x, so LLVM drops the first add, which it
-/// cannot do for 0.0 + x (that is +0.0 when x is -0.0). Each of these sums
-/// receives at least one term, so the only difference is when every term
-/// is -0.0: the sum is then -0.0 instead of +0.0, the same number with
-/// another sign bit. --strict-fp keeps 0.0.
-fn adj_zero(strict: bool) -> String {
-    fconst(if strict { 0.0 } else { -0.0 })
+/// cannot do for 0.0 + x (that is +0.0 when x is -0.0). That is not the
+/// same arithmetic after contraction: with the add gone, the product that
+/// was its operand can be fused into the next add, unrounded, which can
+/// change the result in the last bits (it does on
+/// `x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`). Mint's
+/// floating-point rules allow that (every add and multiply carries
+/// `contract`). `--no-negzero-sums` and `--strict-fp` keep 0.0.
+fn adj_zero(negzero: bool) -> String {
+    fconst(if negzero { -0.0 } else { 0.0 })
 }
 
 /// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
@@ -2067,7 +2072,7 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
         let ix = Ix::vec(i);
         for (k, (_, ad)) in keys.iter().zip(&bufs) {
             if ad.is_some() {
-                let acc = g.f.acc_new(&adj_zero(g.f.strict));
+                let acc = g.f.acc_new(&adj_zero(g.m.negzero_sums));
                 g.node_acc.insert(*k, acc);
             }
         }
@@ -3024,7 +3029,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // copies, then one update of the per-lane partial sums
     let col_begin = |g: &mut Mg| {
         for p in cp.iter() {
-            let acc = g.f.acc_new(&adj_zero(g.f.strict));
+            let acc = g.f.acc_new(&adj_zero(g.m.negzero_sums));
             g.inv_acc.insert((p.clone(), Ax::Col), acc);
         }
     };
@@ -3152,7 +3157,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
             vals.insert(keys[j], s);
         }
         for key in keys.iter() {
-            let acc = g.f.acc_new(&adj_zero(g.f.strict));
+            let acc = g.f.acc_new(&adj_zero(g.m.negzero_sums));
             g.node_acc.insert(*key, acc);
         }
         let x = g.fwd(lhs, &ix, &mut vals);
@@ -3188,7 +3193,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
         let at = ad_at(g, col, k);
         g.ad_at = Some(at.clone());
         for n in owned {
-            let acc = g.f.acc_new(&adj_zero(g.f.strict));
+            let acc = g.f.acc_new(&adj_zero(g.m.negzero_sums));
             g.elem_acc.insert(n.clone(), acc);
         }
         for j in (0..keys.len()).rev() {

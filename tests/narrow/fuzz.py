@@ -7,7 +7,7 @@ the raw draws of a short sampling run (which amplify any difference in
 the last bit anywhere along the trajectory)
 must be identical, and the report must show that a narrow copy was used.
 
-usage: fuzz.py MINTC DATASETS_PER_MODEL SEED   (run from the repository root;
+usage: fuzz.py MINTC DATASETS_PER_MODEL SEED [MINTC FLAGS...]   (run from the repository root;
 writes to build/). Exits 1 on any difference."""
 import os
 import random
@@ -149,7 +149,7 @@ for name, model in list(VEC.items()) + list(SCAN.items()):
     src = f"{B}/{pre}.mint"
     open(src, "w").write(main_fn(model, reads, ctor))
     # shapes are fixed per binary only through the data, so one build serves every data set
-    if subprocess.run([mintc, "build", src, "-o", f"{B}/{pre}"], capture_output=True).returncode != 0:
+    if subprocess.run([mintc, "build", src, "-o", f"{B}/{pre}"] + sys.argv[4:], capture_output=True).returncode != 0:
         print(f"FAIL  fuzz {name}: build failed")
         bad += 1
         continue

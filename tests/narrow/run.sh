@@ -155,11 +155,16 @@ narrow_case many build/nw_many.mint 1 "X: float" "z: float"
 python3 tests/narrow/fuzz.py $M 12 7 && pass "narrow data: randomised models and data" || bad "narrow data: randomised check"
 # and with every type available to every buffer (integer design matrices)
 MINTC_NARROW_VARIANTS=64 python3 tests/narrow/fuzz.py $M 12 8 && pass "narrow data: randomised models and data, all types" || bad "narrow data: randomised check, all types"
+# and with the adjoint sums starting at 0.0
+python3 tests/narrow/fuzz.py $M 8 9 --no-negzero-sums && pass "narrow data: randomised models and data, --no-negzero-sums" || bad "narrow data: randomised check, --no-negzero-sums"
 
-# the switch: no copies and no variants in the IR (that this IR equals the
-# previous compiler's was checked by hand when the rewrite was added)
+# the switch: no copies and no variants in the IR (with --no-negzero-sums
+# too, the IR of the benchmark models was checked by hand to equal that of
+# the compiler before this change); and none under --strict-fp
 grep -q "call ptr @mint_narrow" build/nw_logistic.ll && ! grep -q "mint_narrow\|logp_n1" build/nw_logistic_ref.ll \
   && pass "narrow data: --no-narrow-data removes the copies and variants" || bad "narrow data: --no-narrow-data"
+build examples/dynamic_poisson.mint nw_strict --strict-fp && ! grep -q "mint_narrow" build/nw_strict.ll \
+  && pass "narrow data: off under --strict-fp" || bad "narrow data: copies made under --strict-fp"
 
 # raw draws of short sampling runs, narrow against wide
 nw_draws() { # NAME SOURCE [VAR=value...]
