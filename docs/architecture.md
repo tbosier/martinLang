@@ -124,17 +124,25 @@ them.
   `X' * diag(mu .* (1 - mu)) * X` and the vector of `X' * (mu - y)` are
   computed inside the kernel's row loop and never stored.
 - The Gram kernel computes the upper triangle only and mirrors it at the end.
-  It works on chunks of 32 rows copied (with their weighted copy) into L1
-  scratch padded to a multiple of 8 columns, and updates H one 4 x 8 tile at a
-  time held in eight vector registers: six loads per eight vector FMAs.
-  `--no-gram-blocking` restores the older row-by-row kernel.
+  It works on chunks of 32 rows. The weighted rows W = diag(w) X go into L1
+  scratch padded with zeros to a multiple of 4 columns, and H is updated in
+  strips of four rows, each covered by 4 x 12 tiles (12 vector registers;
+  per row, three vector loads from W and four broadcasts straight from X feed
+  12 FMAs) and 4 x 8 tiles. Only the 4 x 4 blocks on the diagonal compute
+  entries below it. Each strip prefetches its share of the next chunk of X.
+  When p is not a multiple of 4 and the fused loop also computes `X' * r`, r
+  goes in W's first padding column, so that product comes out of the Gram
+  kernel at no extra cost. `--no-gram-blocking` restores the older row-by-row
+  kernel.
 - **Row fusion** (`--no-row-fusion`; off under `--strict-fp`). Consecutive
   `let`s in a `repeat` body that stream the rows of one matrix run as one
   loop over chunks of rows: a producer (an elementwise function of `X * w`,
   one value per row) and consumers of it (`X' * f + ...` and
   `X' * diag(w) * X + ...`, which may use earlier producers elementwise). Each
   chunk of X is read from memory once. Newton's three passes over X become
-  one.
+  one. Within a chunk, the producers' dot products run first (four rows per
+  pass over w), then the per-row values (the sigmoid with Mint's `exp`, the
+  weights and coefficients) four rows at a time in vector registers.
 - The runtime allocator is declared `noalias` (fresh memory, like `malloc`)
   and returns 64-byte aligned buffers, so LLVM knows a new buffer overlaps
   nothing and needs no run-time overlap checks.

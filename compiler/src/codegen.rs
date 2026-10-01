@@ -222,8 +222,9 @@ fn find_matvec_x(e: &TExpr, vars: &HashMap<String, Loc>) -> Option<String> {
     children(e).into_iter().find_map(|c| find_matvec_x(c, vars))
 }
 
-/// Rows per chunk of the tiled Gram kernel (the chunk's two scratch copies
-/// then fit in L1 for up to about 64 columns).
+/// Rows per chunk of the tiled Gram kernel and of fused row loops (the chunk
+/// of X and its weighted copy are 26 KB at 50 columns; 16, 24, 48 and 64
+/// rows were no faster for Newton).
 const GRAM_CHUNK: u32 = 32;
 
 enum Prep {
