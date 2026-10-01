@@ -300,13 +300,13 @@ $M emit examples/dynamic_poisson.mint -o build/exp_check.ll 2>/dev/null \
 # (every binade including subnormals, around 1, around every table
 # boundary), and 0, -0, negatives, subnormals, the extreme doubles,
 # infinities and NaN as in libm. And its log1p on [0, 1] (BernoulliLogit's
-# softplus): within 2.5 ulp of log1pl over 4.5e6 inputs (the bound is about
+# softplus): within 2.1 ulp of log1pl over 4.5e6 inputs (the bound is about
 # 2 ulp), exact at 0, 1 and the smallest subnormal, NaN for NaN.
 
 $M emit tests/fission/normal.mint -o build/log_check.ll 2>/dev/null \
   && python3 tests/log/check_log.py build/log_check.ll && pass "vector log accuracy and special values" || bad "vector log accuracy"
 $M emit examples/logistic_bayes.mint -o build/log1p_check.ll 2>/dev/null \
-  && python3 tests/log/check_log1p.py build/log1p_check.ll 2.5 && pass "vector log1p accuracy and special values" || bad "vector log1p accuracy"
+  && python3 tests/log/check_log1p.py build/log1p_check.ll 2.1 && pass "vector log1p accuracy and special values" || bad "vector log1p accuracy"
 
 # ---- fission kernel paths against the three-pass fission and the unsplit loop
 

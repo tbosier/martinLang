@@ -37,6 +37,7 @@ driver = r"""
 void vlog4(const double *, double *);
 static double ulps(double a, long double ref) {
   if (isnan(ref)) return isnan(a) ? 0 : 1e9;
+  if (isnan(a)) return 1e9; /* a NaN where the reference is a number */
   if (isinf(ref)) return a == ref ? 0 : 1e9;
   double r = (double)ref;
   if (r == 0) return a == 0 ? 0 : 1e9;

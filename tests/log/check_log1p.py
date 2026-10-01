@@ -6,7 +6,7 @@ links it into a C driver with clang, and compares log1p(e) (given
 q = 1/(1 + e), as the kernel passes it) against long double log1pl:
 uniform e in [0, 1], log-uniform e down to the smallest subnormal, dense e
 around every table step, and 0, 1, the smallest subnormal and NaN.
-usage: python3 tests/log/check_log1p.py IR_FILE [MAX_ULP]   (exit status 0 = pass)
+usage: python3 tests/log/check_log1p.py IR_FILE [MAX_ULP, default 2]   (exit status 0 = pass)
 """
 import os
 import re
@@ -35,6 +35,7 @@ driver = r"""
 void vl4(const double *, const double *, double *);
 static double ulps(double a, long double ref) {
   if (isnan(ref)) return isnan(a) ? 0 : 1e9;
+  if (isnan(a)) return 1e9; /* a NaN where the reference is a number */
   double r = (double)ref;
   if (r == 0) return a == 0 ? 0 : 1e9;
   double u = nextafter(fabs(r), INFINITY) - fabs(r);

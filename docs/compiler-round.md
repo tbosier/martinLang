@@ -174,3 +174,59 @@ Those are corrected above and in `tests/run.sh`.
   copies do not all fit in 32 KB).
 - At 37,901 parameters, a whole run spends most of its time in the sampler,
   which this round did not touch.
+
+## Follow-up: the fission kernel (logistic gradient)
+
+The logistic gradient's three fission passes (dot products, elementwise
+density, gradient updates) became one loop over chunks of 32 rows in Mint's
+own vector code, with Mint's `exp` and a new Mint `log` inline (see
+"Loop fission" in [architecture.md](architecture.md)). Switches:
+`--no-fission-kernel` (the three passes as before) and `--no-inline-log`.
+
+Measurement: `MINT_BENCH_GRAD=20000`, pinned to core 8, base build (commit
+41f69c5), this build and the max-effort Rust interleaved, 7 repetitions per
+set, four sets. Other jobs were running throughout (load average 7 to 22),
+and the sets mixed quiet runs with runs about 1.6x slower in every binary,
+so the table gives the fastest run and the range of the quiet runs; the
+medians are mostly contention.
+
+| | base | this build | max-effort Rust |
+|---|---|---|---|
+| gradient, fastest of 28 | 33.4 µs | **23.7 µs** | 38.5 µs |
+| gradient, quiet runs | 33.4 to 39.0 µs | 23.7 to 27.6 µs | 38.5 to 40.3 µs |
+| cycles per gradient, fastest | 153,000 | **109,000** | 176,000 |
+| instructions per gradient | 424,000 | **277,000** | 496,000 |
+| whole run (1 chain), fastest of 14 | 0.526 s | **0.379 s** | 0.622 s |
+
+In every one of the 28 gradient repetitions this build was faster than the
+base build and the Rust run next to it; in whole runs it was faster than the
+base in 12 of 14 repetitions and than the Rust in 13 of 14 (the exceptions
+coincided with contention). Whole runs are not like for like: the gradients differ in the
+last bits, so the chains diverge and take different numbers of gradients
+(14,565 and 14,136 at seed 7). The log density and gradient agree with the
+max-effort Rust to 3.7e-15 of the largest component, as before.
+
+What did not help (each measured, then removed):
+
+- software prefetch of the next chunk of X, in one burst or spread over the
+  elementwise loop, into L1 or L2: up to 5% slower;
+- computing the next chunk's dot products inside this chunk's exp loop
+  (software pipelining): no faster, 8.5% more instructions;
+- fewer elementwise loops: exp and log1p in one loop was 16% slower, and
+  everything in one loop 12% slower (each iteration becomes one long
+  dependency chain);
+- chunks of 16, 64 or 128 rows; eight rows per group in the dot products
+  and updates: no faster;
+- a general `log` that takes 1/c from the CPU's reciprocal estimate (one
+  gather instead of two, as glibc does): slower in isolation (1.56 against
+  1.36 ns per value) and less accurate (2.5 ulp).
+
+Mint's general `log` is still slower than glibc's vector `log` in isolation
+(about 1.25 to 1.35 against 1.1 ns per value). Inside the kernel, where
+glibc's calls spill every vector register, the two measured the same on a
+Normal model with an indexed scale and on a model with `log(u)`. The
+logistic model does not use it: BernoulliLogit takes the specialised log1p.
+
+Unchanged: linear regression, eight schools, the dynamic Poisson model and
+Newton compile to the same machine code as before (their model and main
+functions disassemble identically), so they cannot have regressed.

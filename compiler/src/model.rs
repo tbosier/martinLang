@@ -930,8 +930,17 @@ impl<'a> Mg<'a> {
                     Some(e) => e,
                     None => self.bl_exp(eta),
                 };
+                // In vector code with Mint's log: log1p(e) from Mint's log1p on
+                // [0, 1], with q = 1/(1 + e) shared with the sigmoid
+                let mint_l1p = self.f.lanes > 1 && self.f.inline_log && self.m.inline_log;
                 let l1p = match self.log_override.take() {
                     Some(l) => l,
+                    None if mint_l1p => {
+                        let u = self.f.fadd(&one, &e);
+                        let q = self.f.fdiv(&one, &u);
+                        self.q_override = Some(q.clone());
+                        self.f.log1p01(self.m, &e, &q)
+                    }
                     None => self.bl_log(&e),
                 };
                 let pos = self.f.intrinsic2(self.m, "llvm.maxnum.f64", eta, &fconst(0.0));
@@ -1780,7 +1789,8 @@ fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
 ///   - the row dot products, four rows at a time, in Mint's vector form;
 ///   - the density, its derivatives and the elementwise part of the backward
 ///     sweep as Mint's own <4 x double> code with Mint's exp and log inline
-///     (no calls, so nothing is spilled around them). For BernoulliLogit
+///     (no calls for them, so nothing is spilled around them; a power other
+///     than ^2 still calls the vector math library's pow). For BernoulliLogit
 ///     and PoissonLog the density's exp, and BernoulliLogit's log1p, run in
 ///     loops of their own first (see run_chunk);
 ///   - the row updates of the gradient, four rows at a time, reading the
@@ -1873,8 +1883,8 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
         g.f.inline_log = true;
         // The density's exp, then its log, each in a loop of its own over the
         // chunk, into L1 scratch: each iteration is then a short dependency
-        // chain, and several overlap (one loop doing everything was 15%
-        // slower, and 10% without the separate exp).
+        // chain, and several overlap (measured on the logistic gradient: exp
+        // and log1p in one loop, 16% slower; everything in one loop, 12%).
         if let Some(se) = &scr_e {
             for_range(g, "0", &nv, |g, j| {
                 let o = g.f.imul(j, &L.to_string());
