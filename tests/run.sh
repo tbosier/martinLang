@@ -204,13 +204,14 @@ done
 
 # ---- fused scan kernels: every path (nested running sums, the one-lane
 # BernoulliLogit path, row/column/scalar parameters, row counts that are not
-# multiples of the vector width) must give the same log density and gradient
-# as the same model built without the scan layout, scan fusion and inline exp,
-# and must pass the finite-difference check.
+# multiples of the vector width, and 16, which leaves the scan layout no
+# last block) must give the same log density and gradient as the same model
+# built without the scan layout, scan fusion and inline exp, and must pass
+# the finite-difference check.
 
 python3 tests/scan/make_data.py build
-for m in nested bernoulli mixed nested_sq colreuse datascan twohosts; do
-  for G in 7 13 20; do
+for m in nested bernoulli mixed nested_sq colreuse datascan twohosts twoowned; do
+  for G in 7 13 16 20; do
     sed "s/NG/$G/" tests/scan/$m.mint > build/scan_$m.$G.mint
     build build/scan_$m.$G.mint scan_${m}_${G}_opt || continue
     build build/scan_$m.$G.mint scan_${m}_${G}_ref --no-scan-layout --no-scan-fusion --no-inline-exp || continue
@@ -258,8 +259,9 @@ done
 # changes, so the log density and every gradient component must agree with
 # the one-thread result to a tolerance (1e-12 of the largest component, and
 # 1e-10 relative per component). G=61 is 7 groups of 8 rows (split 2/2/3), a
-# single vector and a leftover row; G=7, 13 and 20 have fewer groups than
-# threads. BernoulliLogit (one lane) and a running sum of data only are not
+# single vector and a leftover row, which thread 0 runs inside the parallel
+# region; G=7, 13, 16 and 20 have fewer groups than threads (16 leaves the
+# scan layout no last block). BernoulliLogit (one lane) and a running sum of data only are not
 # parallelised, and the generated code must say so.
 
 # close_grad A B LABEL
@@ -299,10 +301,10 @@ par_check() { # NAME SOURCE par|serial
     || bad "parallel scan kernel $n: 1 thread differs from --no-parallel-kernel"
   [ "$want" = par ] && close_grad build/par_${n}_t3.out build/par_${n}_t1.out "parallel scan kernel $n: 3 threads match 1 thread"
 }
-for m in nested mixed nested_sq colreuse twohosts layout_draws bernoulli datascan; do
+for m in nested mixed nested_sq colreuse twohosts twoowned layout_draws bernoulli datascan; do
   want=par
   case $m in bernoulli|datascan) want=serial ;; esac
-  for G in 7 13 20 61; do
+  for G in 7 13 16 20 61; do
     sed "s/NG/$G/" tests/scan/$m.mint > build/par_$m.$G.mint
     par_check ${m}_$G build/par_$m.$G.mint $want
   done
@@ -333,6 +335,96 @@ if [ -f bench/dynpois/data_large/y.f64 ]; then
     MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/par_run_b.draws ./build/par_dynpois_run > /dev/null 2>&1
     [ -s build/par_run_a.draws ] && cmp -s build/par_run_a.draws build/par_run_b.draws \
       && pass "parallel scan kernel in the sampler: identical raw draws in two runs" || bad "parallel scan kernel in the sampler: raw draws differ between runs"
+  fi
+fi
+
+# ---- fused leapfrog (mintc --fused-leapfrog). The leap entry point hands
+# each kernel thread's rows of a covered matrix parameter to the sampler's
+# leaf work. MINT_LEAP_TEST runs one leaf with a merge through it and
+# through the runtime's own path: the gradient, log density, momentum, next
+# half-step and merged momentum must be bit-identical, and the kinetic
+# energy and merge sums equal to 1e-12, with 1 and 3 kernel threads
+# requested (a kernel never runs more threads than it has groups of 8
+# series: at 7, 13 and 16 series one, at 20 two, at 61 three). Models with
+# nothing to cover (a running sum of data only; a matrix parameter shared
+# by two scan statements, which neither kernel owns) and default builds must
+# not have the entry point; nested covers one parameter and twoowned three,
+# in two kernels. In whole runs (nested at 61 series, the small dynamic
+# Poisson model), with 1 and 3 threads per chain, MINT_FUSED_LEAPFROG=exact
+# (the fused leaf work with the sums in the runtime's order) must run and
+# give exactly the draws of MINT_FUSED_LEAPFROG=0, and the fused sums (the
+# default in such a build) must run and be deterministic; on the large
+# model, exact against 0 with 3 threads. The fused sums' correctness rests
+# on MINT_LEAP_TEST: their draws differ from the unfused ones by rounding,
+# and then diverge.
+leap_check() { # MODEL G leap|none
+  local n=${1}_$2 want=$3 has=none
+  build build/par_$1.$2.mint leap_$n --fused-leapfrog || return
+  grep -q "define double @mint_model_.*_leap(" build/leap_$n.ll && has=leap
+  [ "$has" = "$want" ] && pass "fused leapfrog $n: generated code has $want" || { bad "fused leapfrog $n: expected $want, got $has"; return; }
+  [ "$want" = leap ] || return
+  for t in 1 3; do
+    out=$(MINT_KERNEL_THREADS=$t MINT_LEAP_TEST=1 ./build/leap_$n 2>&1)
+    grep -q "^leap-test: ok" <<<"$out" && pass "fused leapfrog $n, $t kernel threads requested: same leaf as the runtime's" \
+      || { bad "fused leapfrog $n, $t kernel threads requested: leaf differs"; echo "$out"; }
+  done
+}
+# covered BIN N: the leap entry point covers N parameters
+covered() {
+  local got
+  got=$(awk '/^define i64 @mint_model_.*_leap_blocks/,/^}/' build/$1.ll | sed -n 's/.*ret i64 \([0-9]*\).*/\1/p')
+  [ "$got" = "$2" ] && pass "fused leapfrog $1: covers $2 parameter(s)" || bad "fused leapfrog $1: covers '$got' parameters, expected $2"
+}
+for m in nested mixed nested_sq colreuse twohosts twoowned layout_draws bernoulli datascan; do
+  want=leap
+  case $m in datascan|twohosts) want=none ;; esac
+  for G in 7 13 16 20 61; do leap_check $m $G $want; done
+done
+[ -x build/leap_nested_61 ] && covered leap_nested_61 1
+[ -x build/leap_twoowned_61 ] && covered leap_twoowned_61 3
+[ -f build/par_nested_20.ll ] && { grep -q "define double @mint_model_.*_leap(" build/par_nested_20.ll \
+  && bad "a default build emits the leap entry point" || pass "a default build has no leap entry point"; }
+# draws_same LABEL BIN ENV_A ENV_B: the raw draws of two runs are identical
+draws_same() {
+  env $3 MINT_DRAWS=build/leap_a.draws ./build/$2 > /dev/null 2>&1
+  env $4 MINT_DRAWS=build/leap_b.draws ./build/$2 > /dev/null 2>&1
+  [ -s build/leap_a.draws ] && cmp -s build/leap_a.draws build/leap_b.draws && pass "$1" || bad "$1"
+  rm -f build/leap_a.draws build/leap_b.draws
+}
+# ran LABEL BIN ENV MODE: the sampler reports leaves through the fused leapfrog in MODE
+ran() {
+  local out
+  out=$(env $3 ./build/$2 2>&1 >/dev/null)
+  grep -q "leapfrog=$4 (" <<<"$out" && pass "$1" || { bad "$1"; echo "$out" | grep sampler; }
+}
+sed 's/draws = 4, warmup = 0/draws = 30, warmup = 30/' build/par_nested.61.mint > build/leap_nested.mint
+sed 's/draws = 1000, warmup = 1000/draws = 40, warmup = 40/' examples/dynamic_poisson.mint > build/leap_dps.mint
+for m in nested dps; do
+  build build/leap_$m.mint leap_$m --fused-leapfrog || continue
+  for t in 1 3; do
+    draws_same "fused leapfrog $m, $t threads per chain: exact sums give the runtime's draws" leap_$m \
+      "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=exact"
+    ran "fused leapfrog $m, $t threads per chain: exact mode ran" leap_$m "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=exact" fused-exact
+    draws_same "fused leapfrog $m, $t threads per chain: deterministic" leap_$m \
+      "MINT_THREADS_PER_CHAIN=$t" "MINT_THREADS_PER_CHAIN=$t"
+    ran "fused leapfrog $m, $t threads per chain: on by default in a --fused-leapfrog build" leap_$m "MINT_THREADS_PER_CHAIN=$t" fused
+  done
+done
+if [ -f bench/dynpois/data_large/y.f64 ] && [ -f build/par_dynpois_run.mint ]; then
+  if build build/par_dynpois_run.mint leap_dpl --fused-leapfrog; then
+    draws_same "fused leapfrog, large model, 3 threads per chain: exact sums give the runtime's draws" leap_dpl \
+      "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=exact"
+    ran "fused leapfrog, large model: exact mode ran" leap_dpl "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=exact" fused-exact
+    ran "fused leapfrog, large model: an unknown MINT_FUSED_LEAPFROG value keeps the default (on)" leap_dpl \
+      "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=yes" fused
+    out=$(MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=0 ./build/leap_dpl 2>&1 >/dev/null)
+    grep -q "leapfrog=runtime$" <<<"$out" && pass "MINT_FUSED_LEAPFROG=0 turns the fused leapfrog off" \
+      || { bad "MINT_FUSED_LEAPFROG=0 did not turn the fused leapfrog off"; echo "$out"; }
+  fi
+  if [ -x build/par_dynpois_run ]; then
+    out=$(MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=1 ./build/par_dynpois_run 2>&1 >/dev/null)
+    grep -q "leapfrog=runtime$" <<<"$out" && pass "a default build has no fused leapfrog to turn on" \
+      || { bad "a default build ran a fused leapfrog"; echo "$out"; }
   fi
 fi
 

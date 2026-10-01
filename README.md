@@ -165,6 +165,14 @@ Useful environment variables for compiled programs:
   `MINT_BENCH_GRAD` and `MINT_GRADCHECK` (default 1).
 - `MINT_CHAIN_AFFINITY=0` stops the runtime from keeping each threaded
   chain's threads on the CPUs of one L3 cache.
+- `MINT_FUSED_LEAPFROG=0` turns off the fused leapfrog in a program built
+  with `mintc --fused-leapfrog` (the sampler's leaf work done by the fused
+  scan kernel's threads; not built by default, because it measured no
+  faster than the runtime's own pass, see
+  [compiler-round.md](docs/compiler-round.md)). `=exact` keeps the
+  runtime's summation order, which gave exactly the unfused draws in the
+  tests. `MINT_LEAP_TEST=1` checks one fused leaf against the runtime's own
+  and exits; `=K` also times K leaves of each.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 
@@ -172,7 +180,8 @@ Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
 `--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`, and `--strict-fp`
-(strict IEEE evaluation order, no vector math).
+(strict IEEE evaluation order, no vector math). `--fused-leapfrog` turns
+one on (see `MINT_FUSED_LEAPFROG` above).
 
 ## The language in one page
 

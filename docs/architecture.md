@@ -159,6 +159,9 @@ A `model` block becomes four LLVM functions:
   Positive parameters.
 - `init` computes the precomputed statistics.
 - `sample` calls the runtime's NUTS.
+- With a fused scan kernel that owns a matrix parameter, also `leap`, the
+  log density with a hook for the sampler (see the fused leapfrog in the
+  Runtime section), and `leap_blocks`.
 
 The gradient is produced by reverse-mode differentiation *at compile time*,
 per observation:
@@ -257,12 +260,22 @@ agrees with the direct computation to 12 significant digits.
 ### Scan layout and the fused scan kernel
 
 When a model takes `cumsum` of a `Matrix[G, T]` along T, every model
-quantity of that shape is stored column-major (`--no-scan-layout` turns this
-off): the parameter inside the sampler's vector, the data (copied once per
-`sample`), and scratch buffers. Draws are still written in the user's order,
-and the runtime converts its benchmark point and printed gradients through
-two generated functions (`mint_set_layout`). Four adjacent series at one time
-are then one contiguous vector load.
+quantity of that shape is stored in the scan layout (`--no-scan-layout`
+turns this off): the parameter inside the sampler's vector, the data (copied
+once per `sample`), and scratch buffers. The series are taken in blocks of
+8 (a kernel group, below), each block stored column-major: the 8 series at
+time 0, then at time 1, and so on, so each block is one contiguous range of
+8 T values; the G mod 8 series left over form a last block stored the same
+way (`Mg::cm_row`: element (g, t) is at base(g) + t * stride(g)). Draws are
+still written in the user's order, and the runtime converts its benchmark
+point and printed gradients through two generated functions
+(`mint_set_layout`). Four adjacent series at one time are then one
+contiguous vector load, and a kernel group reads and writes one contiguous
+range instead of 8 values every G. (Until this round the layout was plain
+column-major, whole columns of G. With the blocks the large model's
+gradient took 43 to 45 µs against 50 to 53 µs on one thread, 12 to 18%
+less, and 17 to 24 against 24 to 29 µs on three threads; five interleaved
+pairs at load 2.8 to 5.5, see compiler-round.md.)
 
 A matrix statement whose only materialised nodes are running sums over its
 own shape then runs as one kernel (`--no-scan-fusion` turns it off) over
@@ -300,12 +313,15 @@ Around the kernel:
   and its gradient, so the loop over groups is emitted as a function of its
   own, `(ctx, g0, g1, tid)`. The context carries theta, grad, the buffers of
   Positive vector parameters, the scalar parameter values and two output
-  arrays. The runtime's `mint_par_groups` gives thread t of a team of T the
+  arrays (and, in the fused leapfrog's `leap`, its hook). The runtime's `mint_par_groups` gives thread t of a team of T the
   groups [n t / T, n (t + 1) / T). Each thread has its own scratch (the same
   per-thread `mint_ws_slot`s), its own slice of the column partial sums, and
   writes its log density and scalar adjoints to entry t; the caller adds
-  them up in thread order. Single vectors and leftover rows stay on the
-  calling thread. The team is the chain's threads per chain during sampling
+  them up in thread order. Single vectors and leftover rows are run by
+  thread 0 (the calling thread) after its groups, inside the parallel
+  region, so that every row is done when the region ends (they used to run
+  after it, which mattered once the fused leapfrog, in the Runtime section,
+  needed every row's gradient final inside the region). The team is the chain's threads per chain during sampling
   (so 1 below 8,192 parameters), 1 for `MINT_BENCH_GRAD` and
   `MINT_GRADCHECK`, and `MINT_KERNEL_THREADS` overrides both. When one
   thread is requested the generated code takes the serial loop instead,
@@ -316,8 +332,8 @@ Around the kernel:
   bits, but like Mint's other reassociated sums it can change a component
   by more when large terms cancel.
 - On the large dynamic Poisson model (250 series, 31 groups) the gradient
-  takes 53 µs on one thread and 21.5 µs on three cores that share an L3
-  cache. On three cores spread over the Ryzen's two core complexes it takes
+  took 53 µs on one thread and 21.5 µs on three cores that share an L3
+  cache, before the scan layout's blocks (above). On three cores spread over the Ryzen's two core complexes it takes
   32 µs; why the kernel itself runs slower then was not found (the threads
   write no shared cache lines except at range edges, and removing those
   stores did not close the gap). In whole 4-chain runs of that model
@@ -328,16 +344,17 @@ Around the kernel:
   (once 154 s),
   so the size of the gain is not established.
 
-`tests/run.sh` builds seven models three ways (default, layout without
+`tests/run.sh` builds eight models three ways (default, layout without
 fusion, and neither) and requires the same log density and gradient to 1e-12
-at 7, 13 and 20 series, plus a finite-difference check at the benchmark
-point. The models cover linear and nonlinear nested running sums, the
+at 7, 13, 16 and 20 series (16 leaves the layout no last block), plus a
+finite-difference check at the benchmark point. The models cover linear and nonlinear nested running sums, the
 one-lane BernoulliLogit path, row, column and scalar parameters inside and
 outside the sum, a column parameter also used by statements of another
-shape, a running sum of data only, and two scan statements sharing a matrix
-parameter. A further test checks that sampled draws come back in the user's
+shape, a running sum of data only, two scan statements sharing a matrix
+parameter, and two scan statements each owning its own. A further test checks that sampled draws come back in the user's
 order. For the parallel kernel the same models (also at 61 series: seven
-groups, a single vector and a leftover row) and the dynamic Poisson model
+groups, a single vector and a leftover row, which thread 0 runs inside the
+parallel region) and the dynamic Poisson model
 must be bit-identical on 1 thread to the `--no-parallel-kernel` build, and
 on 3 threads agree with 1 thread to 1e-12 of the largest gradient component
 and 1e-10 relative per component. The tests also check which models are
@@ -467,6 +484,55 @@ is checked against the exact formula at both sizes.
   (`OMP_DYNAMIC`) or a chain gets a smaller team than asked for, and each
   thread's previous mask is restored when the chain ends.
   `MINT_CHAIN_AFFINITY=0` turns it off.
+- **Fused leapfrog** (off by default: a program built with `mintc
+  --fused-leapfrog` uses it, unless `MINT_FUSED_LEAPFROG=0`). When a fused
+  scan kernel owns a matrix parameter, the compiler then also emits
+  `leap(theta, grad, hook, hctx)`, a second copy of the log density with a
+  hook: each kernel thread, as soon as its groups are done (their gradient
+  is then final), calls the runtime's `leaf_block` on its own rows, which in
+  the scan layout are one contiguous range of the parameter; thread 0 also
+  hands over the rows left over after the groups, which it runs too. The
+  whole leaf work on that range (second half-step, the next leaf's first
+  half-step, kinetic energy, merges) runs there, on the core that has just
+  written its gradient, with the runtime's own code, so every stored value
+  has the unfused arithmetic. `leap_blocks` tells the runtime which parts of
+  theta are covered (at most 64 parameters); the calling thread does the
+  leaf work on the rest (401 elements on the large model) after the
+  gradient. A leaf then needs no parallel region of its own for its second
+  half; the first half-step of a leaf that has none taken ahead (the first
+  after the end of a trajectory's new subtree) is still a parallel pass
+  (`leaf_start`), as before. The kinetic energy and the merges' sums are
+  added in another order (in blocks of 8 from the start of each thread's
+  range, the threads in order, then the rest), so the draws differ by
+  rounding from the unfused path and then diverge.
+  `MINT_FUSED_LEAPFROG=exact` does only the half-steps in the hooks and the
+  sums in a leaf pass of the runtime's order; its draws were bit-identical
+  to the unfused path's in every test. That rests on `leap` computing
+  exactly the gradient of `logp`, which holds for the tested models but is
+  not guaranteed by construction: the two are separately optimised copies,
+  and LLVM may reassociate their `reassoc` sums differently.
+  The fused leapfrog is off by default because it was not faster
+  (`docs/compiler-round.md`). Our reading of why: once the scan layout
+  stores each group of series contiguously, the runtime's own leaf pass,
+  split by index ranges, already gives each thread nearly the same elements
+  as its kernel groups (on the large model the ranges differ by 231 and 863
+  elements at the two boundaries, out of 37,901, assuming each OpenMP
+  thread runs on the same core in both regions), so fusing saves one
+  parallel region per leaf, and the hooks (which leave the rest of theta to
+  one thread) cost about as much; neither cost was measured on its own.
+  `tests/run.sh` checks, in `--fused-leapfrog` builds: that `exact` ran and
+  gave the unfused draws, on a scan test model (nested, 61 series) and the
+  small dynamic Poisson model with 1 and 3 threads per chain and on the
+  large model with 3; that the fused sums ran and are deterministic; how
+  many parameters are covered (one for nested, three in two kernels for
+  another model); and, with `MINT_LEAP_TEST`, one fused leaf with a merge
+  against the unfused one (state bit-identical, each sum to 1e-12 of
+  itself or of a thousandth of the largest) for each scan test model that
+  has a covered parameter (all but two: a running sum of data only, and a
+  matrix shared by two scan statements, which neither kernel owns), at 7 to
+  61 series, with 1 and 3 kernel threads requested (a kernel runs at most
+  one thread per group of 8 series, so only the 61-series runs split three
+  ways). The fused sums themselves are checked only by that one-leaf test.
 - **Fixed summation order.** Every sum over D in the leaf passes (kinetic
   energy, no-U-turn checks) is accumulated in 8 lanes
   (element i in lane i mod 8, each lane in index order, lanes combined in a
@@ -479,7 +545,7 @@ is checked against the exact formula at both sizes.
   bit-identical draws to the unfused one with the same sums (Stan's control
   flow, separate merges) on eight schools (which has divergent transitions),
   logistic and linear regression and the dynamic Poisson model, serial and
-  with 3 threads per chain; `tests/run.sh` does not re-check that.
+  with 3 threads per chain; `tests/run.sh` does not re-check that. (The fused leapfrog, above, sums in another order.)
 - **Speedups.** A whole 4-chain, 1000 + 1000 run went from 15.3 s to 8.3 s at
   3,171 dimensions (1.8x) and from 1448 s to 278 to 325 s at 37,901 dimensions
   (4.5 to 5.2x, depending on the run; 2.1x from the reference-counted states

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Dist, Func, SShape, TExpr, TModel, TModelStmt, TK};
 use crate::codegen::{scalar_func, Opts};
-use crate::ir::{fconst, for_range, for_range_md, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::ir::{fconst, for_range, for_range_md, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
 use crate::types::{Dim, Dom, Ty};
 
 pub fn data_global(model: &str, name: &str) -> String {
@@ -170,11 +170,10 @@ fn for_shape(g: &mut Mg, sh: &SShape, body: impl FnOnce(&mut Mg, &Ix)) {
             let cm = g.is_cm(r, c);
             let (r, c) = (g.dim(r), g.dim(c));
             if cm {
-                // column-major storage: element (row, col) is at col * rows + row
+                // the scan layout (see Mg::cm_row)
                 for_range(g, "0", &c, |g, col| {
-                    let base = g.f.imul(col, &r);
                     for_range(g, "0", &r, |g, row| {
-                        let flat = g.f.iadd(&base, row);
+                        let flat = g.cm_flat(row, col, &r, &c);
                         body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
                     });
                 });
@@ -523,6 +522,12 @@ struct Mg<'a> {
     /// When fused scan kernels may run on several threads: the register
     /// holding the requested thread count (`mint_par_threads`).
     par_nt: Option<String>,
+    /// The leap entry point (`gen_logp` with `leap`): the matrix parameters
+    /// whose leapfrog work the fused scan kernels hand to the runtime's hook,
+    /// with their offsets in theta.
+    leap_cov: Vec<(String, String)>,
+    /// The model's parameters (for `leap_blocks_of`).
+    leap_tm_params: Vec<(String, Ty)>,
 }
 
 impl HasFb for Mg<'_> {
@@ -559,6 +564,8 @@ impl<'a> Mg<'a> {
             pending_ad: HashMap::new(),
             ws_slot_of: HashMap::new(),
             par_nt: None,
+            leap_cov: Vec::new(),
+            leap_tm_params: tm.params.clone(),
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -594,6 +601,41 @@ impl<'a> Mg<'a> {
 
     fn is_cm(&self, r: &Dim, c: &Dim) -> bool {
         self.cm.iter().any(|(a, b)| a == r && b == c)
+    }
+
+    /// Where row `row` of a matrix in the scan layout lives: element (row,
+    /// col) is at base + col * stride. The rows are stored in blocks of
+    /// CM_BLOCK (a fused scan kernel's group of rows), each block column by
+    /// column, CM_BLOCK elements per column; the last rows mod CM_BLOCK rows
+    /// form a last block of their own, as many elements per column. So a
+    /// group's elements are one contiguous range, and so are a thread's
+    /// groups.
+    fn cm_row(&mut self, row: &str, rows: &str, cols: &str) -> (String, String) {
+        let b = CM_BLOCK.to_string();
+        let nfull = self.f.iop("sdiv", rows, &b);
+        let full = self.f.imul(&nfull, &b);
+        let infull = self.f.reg();
+        self.f.emit(format!("{infull} = icmp slt i64 {row}, {full}"));
+        let rb = self.f.iop("srem", row, &b);
+        let r0 = self.f.iop("sub nsw", row, &rb);
+        let fb = self.f.imul(&r0, cols);
+        let fb = self.f.iadd(&fb, &rb);
+        let tb = self.f.imul(&full, cols);
+        let to = self.f.iop("sub nsw", row, &full);
+        let tb = self.f.iadd(&tb, &to);
+        let ts = self.f.iop("sub nsw", rows, &full);
+        let base = self.f.reg();
+        self.f.emit(format!("{base} = select i1 {infull}, i64 {fb}, i64 {tb}"));
+        let stride = self.f.reg();
+        self.f.emit(format!("{stride} = select i1 {infull}, i64 {b}, i64 {ts}"));
+        (base, stride)
+    }
+
+    /// Index of element (row, col) of a matrix in the scan layout.
+    fn cm_flat(&mut self, row: &str, col: &str, rows: &str, cols: &str) -> String {
+        let (b, st) = self.cm_row(row, rows, cols);
+        let o = self.f.imul(col, &st);
+        self.f.iadd(&b, &o)
     }
 
     /// Emits `store(p[col], acc)` style flushes of column accumulators.
@@ -1086,10 +1128,11 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     }
 
     gen_init(m, tm, &stmts, opts, &cm);
-    gen_logp(m, tm, &stmts, opts, &cm);
+    gen_logp(m, tm, &stmts, opts, &cm, false);
+    let leap = opts.fused_leapfrog && gen_logp(m, tm, &stmts, opts, &cm, true);
     gen_constrain(m, tm, opts, &cm);
     let permute = gen_permute(m, tm, opts, &cm);
-    gen_sample_fn(m, tm, opts, permute);
+    gen_sample_fn(m, tm, opts, permute, leap);
 }
 
 fn panic_model(tm: &TModel, msg: &str) -> ! {
@@ -1241,27 +1284,29 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     g.finish(&header, &["ret void".into()]);
 }
 
-/// dst[col * rows + row] = src[row * cols + col]
+/// Row-major src into the scan layout (see Mg::cm_row) in dst.
 fn transpose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
     for_range(g, "0", rows, |g, row| {
         let base = g.f.imul(row, cols);
+        let (b, st) = g.cm_row(row, rows, cols);
         for_range(g, "0", cols, |g, col| {
             let i = g.f.iadd(&base, col);
             let x = g.f.load(src, &i);
-            let j = g.f.imul(col, rows);
-            let j = g.f.iadd(&j, row);
+            let j = g.f.imul(col, &st);
+            let j = g.f.iadd(&j, &b);
             g.f.store(&x, dst, &j);
         });
     });
 }
 
-/// dst[row * cols + col] = src[col * rows + row]
+/// The scan layout in src back to row-major in dst.
 fn untranspose(g: &mut Mg, src: &str, dst: &str, rows: &str, cols: &str) {
     for_range(g, "0", rows, |g, row| {
         let base = g.f.imul(row, cols);
+        let (b, st) = g.cm_row(row, rows, cols);
         for_range(g, "0", cols, |g, col| {
-            let j = g.f.imul(col, rows);
-            let j = g.f.iadd(&j, row);
+            let j = g.f.imul(col, &st);
+            let j = g.f.iadd(&j, &b);
             let x = g.f.load(src, &j);
             let i = g.f.iadd(&base, col);
             g.f.store(&x, dst, &i);
@@ -1278,7 +1323,30 @@ fn first_of(g: &mut Mg, n: &str) -> String {
     r
 }
 
-fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) {
+/// Emits the model's log density and gradient, `logp(theta, grad)`.
+///
+/// With `leap`, emits instead `leap(theta, grad, hook, hctx)`, the same
+/// function with a hook for the sampler (the fused leapfrog): the matrix
+/// parameters owned by exactly one fused scan kernel (all their gradient is
+/// summed in its reverse loop) are covered (at most LEAP_MAX_BLOCKS). Each
+/// thread of a kernel, once its groups of rows are done, so that their
+/// gradient is final, calls
+///
+///   hook(hctx, slot, lo, len)
+///
+/// for each covered parameter: in the scan layout (Mg::cm_row) the
+/// thread's rows are the one contiguous range theta[lo .. lo + len). The
+/// runtime then does its leaf work on those elements on that thread
+/// (leaf_block in runtime/mint_rt.c). `slot` is the kernel's thread index;
+/// thread 0 (the calling thread) also runs the single vectors and leftover
+/// rows and hands them over as one more range, and when the kernel runs
+/// serially the calling thread hands over the whole parameter as slot 0
+/// (leap_hook_calls). Also emits
+/// `leap_blocks(out)`, which writes (offset, length) of each covered
+/// parameter and returns their number, so the runtime can do the rest of
+/// theta itself. Returns false, emitting nothing, when nothing would be
+/// covered.
+fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], leap: bool) -> bool {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
     let (layout, _total) = g.layout(tm);
@@ -1327,6 +1395,18 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 }
             }
         }
+    }
+    if leap {
+        for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+            // (at most LEAP_MAX_BLOCKS; any further parameter is left to the runtime)
+            if matches!(t, Ty::Matrix(..)) && owned.values().filter(|v| v.contains(n)).count() == 1 && g.leap_cov.len() < LEAP_MAX_BLOCKS {
+                g.leap_cov.push((n.clone(), off.clone()));
+            }
+        }
+        if g.leap_cov.is_empty() {
+            return false;
+        }
+        gen_leap_blocks(g.m, tm, opts, cm, &g.leap_cov.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>());
     }
     // Zero the gradient of every parameter whose gradient is accumulated
     // (scalars and Positive vectors are stored at the end; owned matrices
@@ -1509,21 +1589,22 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                     rows_dot_blocked(&mut g, &mp, &vp, &c, "0", &n, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
                 }
                 M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
-                    // Column-major: column c of the running sum is column c-1
-                    // plus column c of the operand, a contiguous vector loop.
+                    // Scan layout: column c of the running sum is column c-1
+                    // plus column c of the operand.
                     let (rows, cols) = (g.dim(rd), g.dim(cd));
                     let fw2 = fw.clone();
                     let pass = |g: &mut Mg, lo: &str, hi: &str, first: bool| {
                         for_range(g, lo, hi, |g, col| {
-                            let base = g.f.imul(col, &rows);
                             for_range(g, "0", &rows, |g, row| {
-                                let flat = g.f.iadd(&base, row);
+                                let (b, st) = g.cm_row(row, &rows, &cols);
+                                let o = g.f.imul(col, &st);
+                                let flat = g.f.iadd(&b, &o);
                                 let ix = Ix { flat: flat.clone(), row: row.to_string(), col: col.to_string() };
                                 let v = g.fwd(inner, &ix, &mut HashMap::new());
                                 let s = if first {
                                     v
                                 } else {
-                                    let p = g.f.iop("sub nsw", &flat, &rows);
+                                    let p = g.f.iop("sub nsw", &flat, &st);
                                     let prev = g.f.load(&fw2, &p);
                                     g.f.fadd(&prev, &v)
                                 };
@@ -1607,7 +1688,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 for_range(&mut g, "0", &n, |g, i| body(g, &Ix::vec(i)));
             }
             SShape::Mat(r, c) if g.is_cm(r, c) => {
-                // Column-major: column outer, row inner (contiguous). Gradients of
+                // Scan layout: column outer, row inner. Gradients of
                 // column-indexed parameters are summed in registers per column.
                 let mut cp = Vec::new();
                 axis_params(lhs, Ax::Col, &mut cp);
@@ -1617,9 +1698,8 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 let (r, c) = (g.dim(r), g.dim(c));
                 for_range(&mut g, "0", &c, |g, col| {
                     g.col_accs_begin(&cp);
-                    let base = g.f.imul(col, &r);
                     for_range(g, "0", &r, |g, row| {
-                        let flat = g.f.iadd(&base, row);
+                        let flat = g.cm_flat(row, col, &r, &c);
                         body(g, &Ix { flat, row: row.to_string(), col: col.to_string() });
                     });
                     g.col_accs_flush(&cp, col);
@@ -1684,14 +1764,15 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                         for_range(g, lo, hi, |g, k| {
                             let col = g.f.iop("sub nsw", &last, k);
                             g.col_accs_begin(&cp);
-                            let base = g.f.imul(&col, &rows);
                             for_range(g, "0", &rows, |g, row| {
-                                let flat = g.f.iadd(&base, row);
+                                let (b, st) = g.cm_row(row, &rows, &cols);
+                                let o = g.f.imul(&col, &st);
+                                let flat = g.f.iadd(&b, &o);
                                 let a = g.f.load(&ad2, &flat);
                                 let sum = if first {
                                     a
                                 } else {
-                                    let nx = g.f.iadd(&flat, &rows);
+                                    let nx = g.f.iadd(&flat, &st);
                                     let b = g.f.load(&ad2, &nx);
                                     let s = g.f.fadd(&a, &b);
                                     g.f.store(&s, &ad2, &flat);
@@ -1785,8 +1866,58 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         }
     }
     let r = g.f.acc_get(&lp);
-    let header = format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name);
+    let header = if leap {
+        // grad is not noalias here: the hook reads it through the sampler's
+        // own pointers
+        format!("define double @mint_model_{}_leap(ptr noalias %theta, ptr %grad, ptr %hook, ptr %hctx)", tm.name)
+    } else {
+        format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name)
+    };
     g.finish(&header, &[format!("ret double {r}")]);
+    true
+}
+
+/// Most parameters the leap entry point covers: the size of the runtime's
+/// buffer for `leap_blocks` (MAX_LEAP_BLOCKS in runtime/mint_rt.c).
+const LEAP_MAX_BLOCKS: usize = 64;
+
+/// `leap_blocks(out)`: (offset, length) in theta of each parameter the leap
+/// entry point covers (see `gen_logp`); returns their number.
+fn gen_leap_blocks(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)], covered: &[String]) {
+    let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.cm = cm.to_vec();
+    let (layout, _) = g.layout(tm);
+    let mut k = 0usize;
+    for (n, off, size) in &layout {
+        if !covered.contains(n) {
+            continue;
+        }
+        for (j, v) in [off.clone(), size.clone().unwrap()].iter().enumerate() {
+            let a = g.f.reg();
+            g.f.emit(format!("{a} = getelementptr inbounds i64, ptr %out, i64 {}", 2 * k + j));
+            g.f.emit(format!("store i64 {v}, ptr {a}"));
+        }
+        k += 1;
+    }
+    let header = format!("define i64 @mint_model_{}_leap_blocks(ptr %out)", tm.name);
+    g.finish(&header, &[format!("ret i64 {k}")]);
+}
+
+/// The leap entry point: rows r0..r1 of the covered parameters among
+/// `owned` are final (r0 a multiple of CM_BLOCK, and r1 too unless it is
+/// the last row). In the scan layout (Mg::cm_row) those rows are one
+/// contiguous range of each parameter, which the hook takes, as `slot`.
+fn leap_hook_calls(g: &mut Mg, owned: &[String], slot: &str, r0: &str, r1: &str, hook: &str, hctx: &str) {
+    let cov: Vec<(String, String)> = g.leap_cov.iter().filter(|(n, _)| owned.contains(n)).cloned().collect();
+    for (n, off) in cov {
+        let Some((_, Ty::Matrix(_, c, _))) = g.leap_tm_params.iter().find(|(m, _)| *m == n).cloned() else { unreachable!() };
+        let cols = g.dim(&c);
+        let a = g.f.imul(r0, &cols);
+        let a = g.f.iadd(&off, &a);
+        let n = g.f.iop("sub nsw", r1, r0);
+        let len = g.f.imul(&n, &cols);
+        g.f.emit(format!("call void {hook}(ptr {hctx}, i64 {slot}, i64 {a}, i64 {len})"));
+    }
 }
 
 /// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
@@ -2254,6 +2385,8 @@ fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
 /// Rows per group in a fused scan kernel: UNROLL vectors of 4 lanes.
 const KERNEL_UNROLL: u32 = 2;
 const KERNEL_WIDTH: u32 = 4 * KERNEL_UNROLL;
+/// Rows per block of the scan layout (see `Mg::cm_row`): a kernel's group.
+const CM_BLOCK: u32 = KERNEL_WIDTH;
 
 /// A sum of terms: its backward sweep needs no values of its parts.
 fn additive(e: &M) -> bool {
@@ -2456,14 +2589,52 @@ fn gen_fused_scan<'s>(
         let vps: Vec<HashMap<String, String>> =
             (0..UNROLL).map(|_| scalars.iter().map(|n| (n.clone(), g.f.acc_new(&fconst(0.0)))).collect()).collect();
         g.f.lanes = 1;
-        let serial_groups = |g: &mut Mg| {
+        // the vector accumulators into the log density and the scalar
+        // adjoints (after the groups and single vectors of the serial code)
+        let reduce_vec = |g: &mut Mg| {
+            g.f.lanes = lanes;
+            let mut tot = g.f.acc_get(&lpv[0]);
+            for a in &lpv[1..] {
+                let v = g.f.acc_get(a);
+                tot = g.f.fadd(&tot, &v);
+            }
+            let s = g.f.hsum(g.m, &tot);
+            let mut sums = Vec::new();
+            for n in &scalars {
+                let mut tot = g.f.acc_get(&vps[0][n]);
+                for m in &vps[1..] {
+                    let v = g.f.acc_get(&m[n]);
+                    tot = g.f.fadd(&tot, &v);
+                }
+                sums.push((n.clone(), g.f.hsum(g.m, &tot)));
+            }
+            g.f.lanes = 1;
+            g.f.acc_add(lp, &s);
+            for (n, v) in sums {
+                let acc = g.padj[&n].clone();
+                g.f.acc_add(&acc, &v);
+            }
+        };
+        // groups, single vectors, then leftover rows, on the calling thread
+        let serial_all = |g: &mut Mg| {
             for_range(g, "0", &groups, |g, b| {
                 let r0 = g.f.imul(b, &wide);
                 scan_group(g, &sc, lanes, UNROLL, &r0, &lpv, &vps);
             });
+            let d2 = done_wide.clone();
+            for_range(g, "0", &singles, |g, b| {
+                let off = g.f.imul(b, &lanes.to_string());
+                let r0 = g.f.iadd(&d2, &off);
+                scan_group(g, &sc, lanes, 1, &r0, &lpv, &vps);
+            });
+            reduce_vec(g);
+            let lp1 = [lp.to_string()];
+            for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+            leap_hook_calls(g, owned, "0", "0", &rows, "%hook", "%hctx");
         };
         if let Some(nt) = &par {
-            // With more than one thread requested, the outlined kernel;
+            // With more than one thread requested, the outlined kernel (its
+            // thread 0 also runs the single vectors and leftover rows);
             // otherwise exactly the serial code (and its arithmetic).
             let kn = gen_par_kernel(g, tm, k, &sc, nodes, &scalars);
             let (l_par, l_ser, l_join) = (g.f.label("par"), g.f.label("ser"), g.f.label("pjoin"));
@@ -2476,43 +2647,17 @@ fn gen_fused_scan<'s>(
             g.f.br(&l_join);
             g.f.start_block(&l_ser);
             zero_parts(g);
-            serial_groups(g);
+            serial_all(g);
             g.f.br(&l_join);
             g.f.start_block(&l_join);
         } else {
-            serial_groups(g);
+            serial_all(g);
         }
-        let d2 = done_wide.clone();
-        for_range(g, "0", &singles, |g, b| {
-            let off = g.f.imul(b, &lanes.to_string());
-            let r0 = g.f.iadd(&d2, &off);
-            scan_group(g, &sc, lanes, 1, &r0, &lpv, &vps);
-        });
-        g.f.lanes = lanes;
-        let mut tot = g.f.acc_get(&lpv[0]);
-        for a in &lpv[1..] {
-            let v = g.f.acc_get(a);
-            tot = g.f.fadd(&tot, &v);
-        }
-        let s = g.f.hsum(g.m, &tot);
-        let mut sums = Vec::new();
-        for n in &scalars {
-            let mut tot = g.f.acc_get(&vps[0][n]);
-            for m in &vps[1..] {
-                let v = g.f.acc_get(&m[n]);
-                tot = g.f.fadd(&tot, &v);
-            }
-            sums.push((n.clone(), g.f.hsum(g.m, &tot)));
-        }
-        g.f.lanes = 1;
-        g.f.acc_add(lp, &s);
-        for (n, v) in sums {
-            let acc = g.padj[&n].clone();
-            g.f.acc_add(&acc, &v);
-        }
+    } else {
+        let lp1 = [lp.to_string()];
+        for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+        leap_hook_calls(g, owned, "0", "0", &rows, "%hook", "%hctx");
     }
-    let lp1 = [lp.to_string()];
-    for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
     let used = if par.is_some() {
         let r = g.f.reg();
         g.f.emit(format!("{r} = load i64, ptr {used_at}"));
@@ -2581,9 +2726,12 @@ fn pos_vectors(tm: &TModel) -> Vec<String> {
 /// density and scalar adjoints written to entry `tid` of the output arrays.
 /// Returns the name of the entry point `(ctx, g0, g1, tid)`.
 fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], scalars: &[String]) -> String {
-    let kn = format!("mint_model_{}_scan{k}", tm.name);
+    let leap = !g.leap_cov.is_empty();
+    let kn = format!("mint_model_{}_{}scan{k}", tm.name, if leap { "leap_" } else { "" });
     let pos = pos_vectors(tm);
     let ncp = sc.cp.len();
+    let leap_base = CTX_FIXED + ncp + 2 * pos.len() + scalars.len();
+    let covered: Vec<String> = g.leap_cov.iter().map(|(n, _)| n.clone()).collect();
     // The same per-thread slots as the caller's buffers, requested at the
     // same sizes: on the calling thread they are the caller's own buffers,
     // and are never reallocated under it.
@@ -2601,6 +2749,7 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
         let mut km = Mg::new(&mut *g.m, tm, strict);
         km.cm = cm;
         let (layout, _) = km.layout(tm);
+        km.leap_cov = tm.params.iter().zip(&layout).filter(|((n, _), _)| covered.contains(n)).map(|((n, _), (_, off, _))| (n.clone(), off.clone())).collect();
         let sc_base = CTX_FIXED + ncp + 2 * pos.len();
         for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
             match t {
@@ -2622,8 +2771,8 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
                     let v = km.f.reg();
                     km.f.emit(format!("{v} = load double, ptr {a}"));
                     km.pval.insert(n.clone(), v);
-                    // never used: the kernel's scalar gradients go to its
-                    // vector accumulators
+                    // the leftover rows' (one lane): the groups' and single
+                    // vectors' go to the vector accumulators
                     let acc = km.f.acc_new(&fconst(0.0));
                     km.padj.insert(n.clone(), acc);
                 }
@@ -2663,6 +2812,47 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let r0 = km.f.imul(b, &wide);
             scan_group(km, &sck, lanes, UNROLL, &r0, &lpv, &vps);
         });
+        // the leap entry point: this thread's rows are final, one contiguous
+        // range of each covered parameter (the scan layout)
+        let mut hp = Vec::new();
+        if leap {
+            for j in 0..2 {
+                let a = km.f.reg();
+                km.f.emit(format!("{a} = getelementptr inbounds i64, ptr %ctx, i64 {}", leap_base + j));
+                let v = km.f.reg();
+                km.f.emit(format!("{v} = load ptr, ptr {a}"));
+                hp.push(v);
+            }
+            let r0 = km.f.imul("%g0", &wide);
+            let r1 = km.f.imul("%g1", &wide);
+            leap_hook_calls(&mut km, sc.owned, "%tid", &r0, &r1, &hp[0], &hp[1]);
+        }
+        // thread 0 (the calling thread) also runs the single vectors and the
+        // leftover rows (and their leap hook)
+        let lp1 = km.f.acc_new(&fconst(0.0));
+        {
+            let rows = sck.rows.clone();
+            let groups = km.f.iop("sdiv", &rows, &wide);
+            let done_wide = km.f.imul(&groups, &wide);
+            let rest = km.f.iop("sub nsw", &rows, &done_wide);
+            let singles = km.f.iop("sdiv", &rest, &lanes.to_string());
+            let s_end = km.f.imul(&singles, &lanes.to_string());
+            let done = km.f.iadd(&done_wide, &s_end);
+            let t0 = km.f.reg();
+            km.f.emit(format!("{t0} = icmp eq i64 %tid, 0"));
+            if_then(&mut km, &t0, |km| {
+                for_range(km, "0", &singles, |km, b| {
+                    let off = km.f.imul(b, &lanes.to_string());
+                    let r0 = km.f.iadd(&done_wide, &off);
+                    scan_group(km, &sck, lanes, 1, &r0, &lpv, &vps);
+                });
+                let lpa = [lp1.clone()];
+                for_range(km, &done, &rows, |km, r| scan_group(km, &sck, 1, 1, r, &lpa, &[]));
+                if leap {
+                    leap_hook_calls(km, sc.owned, "%tid", &done_wide, &rows, &hp[0], &hp[1]);
+                }
+            });
+        }
         km.f.lanes = lanes;
         let mut tot = km.f.acc_get(&lpv[0]);
         for a in &lpv[1..] {
@@ -2680,6 +2870,18 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             sums.push(km.f.hsum(km.m, &tot));
         }
         km.f.lanes = 1;
+        // the leftover rows' scalar accumulators
+        let l1 = km.f.acc_get(&lp1);
+        let s = km.f.fadd(&s, &l1);
+        let sums: Vec<String> = sums
+            .iter()
+            .zip(scalars)
+            .map(|(v, n)| {
+                let a = km.padj[n].clone();
+                let x = km.f.acc_get(&a);
+                km.f.fadd(v, &x)
+            })
+            .collect();
         let out_lp = km.f.reg();
         km.f.emit(format!("{out_lp} = getelementptr inbounds i64, ptr %ctx, i64 {CTX_OUT_LP}"));
         let out_lp2 = km.f.reg();
@@ -2694,7 +2896,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let at = km.f.iadd(&base, &j.to_string());
             km.f.store(v, &out_sc2, &at);
         }
-        let mut params = vec!["ptr noalias %theta".to_string(), "ptr noalias %grad".to_string()];
+        // (grad is read by the leap entry point's hook: not noalias there)
+        let gq = if leap { "ptr %grad" } else { "ptr noalias %grad" };
+        let mut params = vec!["ptr noalias %theta".to_string(), gq.to_string()];
         params.extend((0..ncp).map(|i| format!("ptr noalias %kp{i}")));
         for i in 0..pos.len() {
             params.push(format!("ptr noalias %kpv{i}"));
@@ -2727,7 +2931,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
 #[allow(clippy::too_many_arguments)]
 fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
     let pos = pos_vectors(tm);
-    let nslots = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let leap = !g.leap_cov.is_empty();
+    let leap_base = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let nslots = leap_base + if leap { 2 } else { 0 };
     let ctx = g.f.alloca(&format!("[{nslots} x i64]"));
     let out_lp = g.f.alloca(&format!("[{PAR_MAX_THREADS} x double]"));
     let out_sc = g.f.alloca(&format!("[{} x double]", PAR_MAX_THREADS * scalars.len().max(1)));
@@ -2753,6 +2959,11 @@ fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[
         let v = g.pval[n].clone();
         let v = g.f.opnd(&v);
         put(g, CTX_FIXED + cp.len() + 2 * pos.len() + j, "double", &v);
+    }
+    if leap {
+        // the leap entry point's hook and its context
+        put(g, leap_base, "ptr", "%hook");
+        put(g, leap_base + 1, "ptr", "%hctx");
     }
     g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
     let used = g.f.reg();
@@ -2813,6 +3024,13 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
         }
     };
     let r0s: Vec<String> = (0..u).map(|k| g.f.iadd(r0, &(k * l).to_string())).collect();
+    // where each copy's rows live (the scan layout, Mg::cm_row): element
+    // (r0s[k] + lane, col) is at base + col * stride + lane
+    let rbs: Vec<(String, String)> = r0s.iter().map(|r| g.cm_row(r, &rows, &cols)).collect();
+    let flat_at = |g: &mut Mg, col: &str, k: usize| {
+        let o = g.f.imul(col, &rbs[k].1);
+        g.f.iadd(&rbs[k].0, &o)
+    };
     // The adjoints of this group's running sums live in a small contiguous
     // scratch, [col * (u * l) + k * l + lane], reused by every group: it
     // stays in L1, where the full-matrix index would scatter it.
@@ -2863,9 +3081,8 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     let ex_p = if lean { s_p[0].clone() } else { ex_p };
     if split {
         for_range(g, "0", &cols, |g, col| {
-            let base = g.f.imul(col, &rows);
             for k in 0..u as usize {
-                let flat = g.f.iadd(&base, &r0s[k]);
+                let flat = flat_at(g, col, k);
                 let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
                 let at = ad_at(g, col, k);
                 let mut vals = HashMap::new();
@@ -2895,11 +3112,10 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // C: the density and its derivatives at column col (each running
     // sum's adjoint stored); R: the reverse running sums at column col
     let c_col = |g: &mut Mg, col: &str| {
-        let base = g.f.imul(col, &rows);
     for k in 0..u as usize {
         use_row_accs(g, k);
         use_copy_accs(g, k);
-        let flat = g.f.iadd(&base, &r0s[k]);
+        let flat = flat_at(g, col, k);
         let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
         let at = ad_at(g, col, k);
         let mut vals = HashMap::new();
@@ -2954,11 +3170,10 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     }
     };
     let r_col = |g: &mut Mg, col: &str| {
-        let base = g.f.imul(col, &rows);
     for k in 0..u as usize {
         use_row_accs(g, k);
         use_copy_accs(g, k);
-        let flat = g.f.iadd(&base, &r0s[k]);
+        let flat = flat_at(g, col, k);
         let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
         let at = ad_at(g, col, k);
         g.ad_at = Some(at.clone());
@@ -3233,9 +3448,16 @@ fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> b
     true
 }
 
-fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool) {
+fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, leap: bool) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.m.declare("declare void @mint_set_layout(ptr, ptr)");
+    g.m.declare("declare void @mint_set_leap(ptr, ptr)");
+    if leap {
+        let n = &tm.name;
+        g.f.emit(format!("call void @mint_set_leap(ptr @mint_model_{n}_leap, ptr @mint_model_{n}_leap_blocks)"));
+    } else {
+        g.f.emit("call void @mint_set_leap(ptr null, ptr null)");
+    }
     if permute {
         let n = &tm.name;
         g.f.emit(format!("call void @mint_set_layout(ptr @mint_model_{n}_to_internal, ptr @mint_model_{n}_to_user)"));
