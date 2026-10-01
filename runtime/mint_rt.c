@@ -341,10 +341,12 @@ static void leapfrog_into(Nuts *s, const St *z, St *n, double eps) {
   for (int64_t i = 0; i < D; i++) n->p[i] += 0.5 * eps * n->g[i];
 }
 
-// Leaf step of the tree: leapfrog, then in one pass the final momentum,
-// inverse-metric * momentum, kinetic energy and (if rho) rho = momentum.
-// Returns the Hamiltonian.
-static double leaf_into(Nuts *s, const St *z, St *n, double eps, double *rho) {
+// Leaf step of the tree: leapfrog, then in one pass the final momentum and
+// the kinetic energy. The sampler's sums are vectorised (`omp simd
+// reduction`): a fixed order, so draws are reproducible for a given build,
+// but not the strict left-to-right order of scalar code. Returns the Hamiltonian. (A leaf's momentum sum is its
+// own momentum, so nothing is copied for it; see build_tree.)
+static double leaf_into(Nuts *s, const St *z, St *n, double eps) {
   int64_t D = s->D;
   const double *restrict im = s->inv_m;
   if (s->nt > 1) {
@@ -368,11 +370,11 @@ static double leaf_into(Nuts *s, const St *z, St *n, double eps, double *rho) {
       if (t == 0) used = T;
       int64_t lo = D * t / T, hi = D * (t + 1) / T;
       double k = 0;
+      #pragma omp simd reduction(+ : k)
       for (int64_t i = lo; i < hi; i++) {
         double p = n->p[i] + 0.5 * eps * n->g[i];
         n->p[i] = p;
         k += p * p * im[i];
-        rho[i] = p;
       }
       part[t] = k;
     }
@@ -388,11 +390,11 @@ static double leaf_into(Nuts *s, const St *z, St *n, double eps, double *rho) {
   }
   eval(s, n);
   double k = 0;
+  #pragma omp simd reduction(+ : k)
   for (int64_t i = 0; i < D; i++) {
     double p = n->p[i] + 0.5 * eps * n->g[i];
     n->p[i] = p;
     k += p * p * im[i];
-    rho[i] = p;
   }
   return -n->lp + 0.5 * k;
 }
@@ -410,6 +412,33 @@ static int merge_checks(Nuts *s, double *rho, const double *ra, const double *rb
   int64_t D = s->D;
   int nt = s->nt;
   const double *restrict im = s->inv_m;
+  if (ra == beg_p && ra == mid1_p && rb == end_p && rb == mid2_p) {
+    // Merging two single leaves (half of all merges): ra and rb are the
+    // leaves' momenta, and the three checks reduce to the same two sums
+    // (with exactly the same arithmetic as the general loop below).
+    double part2[MAX_NT][2];
+    int used2 = 1;
+#pragma omp parallel num_threads(nt) if (nt > 1)
+    {
+      int t = omp_get_thread_num(), T = omp_get_num_threads();
+      if (t == 0) used2 = T;
+      int64_t lo = D * t / T, hi = D * (t + 1) / T;
+      double a1 = 0, b1 = 0;
+      #pragma omp simd reduction(+ : a1, b1)
+      for (int64_t i = lo; i < hi; i++) {
+        double xa = ra[i], xb = rb[i];
+        double r = xa + xb;
+        rho[i] = r;
+        a1 += (im[i] * xb) * r;
+        b1 += (im[i] * xa) * r;
+      }
+      part2[t][0] = a1, part2[t][1] = b1;
+    }
+    if (used2 < s->team_min) s->team_min = used2;
+    double a = 0, b = 0;
+    for (int t = 0; t < used2; t++) a += part2[t][0], b += part2[t][1];
+    return a > 0 && b > 0;
+  }
   double part[MAX_NT][6];
   int used = 1;
 #pragma omp parallel num_threads(nt) if (nt > 1)
@@ -418,16 +447,20 @@ static int merge_checks(Nuts *s, double *rho, const double *ra, const double *rb
     if (t == 0) used = T;
     int64_t lo = D * t / T, hi = D * (t + 1) / T;
     double a1 = 0, b1 = 0, a2 = 0, b2 = 0, a3 = 0, b3 = 0;
+    #pragma omp simd reduction(+ : a1, b1, a2, b2, a3, b3)
     for (int64_t i = lo; i < hi; i++) {
       double beg_ps = im[i] * beg_p[i], end_ps = im[i] * end_p[i];
-      double r = ra[i] + rb[i];
+      // read both sums before writing rho, which may be one of them (the
+      // trajectory's sum is updated in place)
+      double xa = ra[i], xb = rb[i];
+      double r = xa + xb;
       rho[i] = r;
       a1 += end_ps * r;
       b1 += beg_ps * r;
-      double r2 = ra[i] + mid2_p[i];
+      double r2 = xa + mid2_p[i];
       a2 += (im[i] * mid2_p[i]) * r2;
       b2 += beg_ps * r2;
-      double r3 = rb[i] + mid1_p[i];
+      double r3 = xb + mid1_p[i];
       a3 += end_ps * r3;
       b3 += (im[i] * mid1_p[i]) * r3;
     }
@@ -460,11 +493,15 @@ static void vcopy(double *d, const double *s, int64_t D) { memcpy(d, s, D * size
 // Extends the trajectory from s->edge by 2^depth leapfrog steps. On return
 // *beg and *end reference the subtree's first and last states, *prop its
 // multinomial proposal, and rho has the subtree's summed momenta added.
-static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double *rho, double H0,
-                      double sign, double *log_sum_weight) {
+// The subtree's momentum sum is returned in *rho_out: the leaf's own momentum
+// at depth 0 (the leaf stays referenced as *beg and *end until the parent's
+// merge has used it), and otherwise rho, which the merge fills.
+static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double *rho, const double **rho_out,
+                      double H0, double sign, double *log_sum_weight) {
   if (depth == 0) {
     St *n = st_acquire(s);
-    double h = leaf_into(s, s->edge, n, sign * s->eps, rho);
+    double h = leaf_into(s, s->edge, n, sign * s->eps);
+    *rho_out = n->p;
     st_release(s, s->edge);
     s->edge = n;
     s->n_leapfrog++;
@@ -480,12 +517,15 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
   }
   Level *L = &s->lv[depth];
   int persist = 0;
+  *rho_out = rho;
 
   double lsw_init = -INFINITY;
-  if (!build_tree(s, depth - 1, prop, beg, &L->init_end, L->rho_init, H0, sign, &lsw_init)) goto out;
+  const double *r_init, *r_final;
+  if (!build_tree(s, depth - 1, prop, beg, &L->init_end, L->rho_init, &r_init, H0, sign, &lsw_init)) goto out;
 
   double lsw_final = -INFINITY;
-  if (!build_tree(s, depth - 1, &L->prop_final, &L->final_beg, end, L->rho_final, H0, sign, &lsw_final))
+  if (!build_tree(s, depth - 1, &L->prop_final, &L->final_beg, end, L->rho_final, &r_final, H0, sign,
+                  &lsw_final))
     goto out;
 
   double lsw_subtree = log_sum_exp(lsw_init, lsw_final);
@@ -497,8 +537,7 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
   }
 
   // rho = rho_init + rho_final and the three no-U-turn checks, in one pass
-  persist = merge_checks(s, rho, L->rho_init, L->rho_final, (*beg)->p, (*end)->p, L->final_beg->p,
-                         L->init_end->p);
+  persist = merge_checks(s, rho, r_init, r_final, (*beg)->p, (*end)->p, L->final_beg->p, L->init_end->p);
 out:
   st_set(s, &L->init_end, NULL);
   st_set(s, &L->final_beg, NULL);
@@ -533,18 +572,21 @@ static double transition(Nuts *s, Traj *t) {
   while (s->depth < MAX_DEPTH) {
     int valid;
     double lsw_sub = -INFINITY;
+    // The trajectory so far is one side of the merge and the new subtree the
+    // other; the merge writes their sum back into t->rho in place.
+    const double *r_new, *r_bck, *r_fwd;
     if (rng_uniform(&s->rng) > 0.5) {
       st_set(s, &s->edge, edge_fwd);
-      vcopy(t->rho_bck, t->rho, D);
       st_set(s, &bck_fwd, fwd_fwd);
-      valid = build_tree(s, s->depth, &propose, &fwd_bck, &fwd_fwd, t->rho_fwd, H0, 1.0, &lsw_sub);
+      valid = build_tree(s, s->depth, &propose, &fwd_bck, &fwd_fwd, t->rho_fwd, &r_new, H0, 1.0, &lsw_sub);
       st_set(s, &edge_fwd, s->edge);
+      r_bck = t->rho, r_fwd = r_new;
     } else {
       st_set(s, &s->edge, edge_bck);
-      vcopy(t->rho_fwd, t->rho, D);
       st_set(s, &fwd_bck, bck_bck);
-      valid = build_tree(s, s->depth, &propose, &bck_fwd, &bck_bck, t->rho_bck, H0, -1.0, &lsw_sub);
+      valid = build_tree(s, s->depth, &propose, &bck_fwd, &bck_bck, t->rho_bck, &r_new, H0, -1.0, &lsw_sub);
       st_set(s, &edge_bck, s->edge);
+      r_bck = r_new, r_fwd = t->rho;
     }
     if (!valid) break;
     s->depth++;
@@ -555,8 +597,7 @@ static double transition(Nuts *s, Traj *t) {
     }
     log_sum_weight = log_sum_exp(log_sum_weight, lsw_sub);
 
-    int persist = merge_checks(s, t->rho, t->rho_bck, t->rho_fwd, bck_bck->p, fwd_fwd->p, fwd_bck->p,
-                               bck_fwd->p);
+    int persist = merge_checks(s, t->rho, r_bck, r_fwd, bck_bck->p, fwd_fwd->p, fwd_bck->p, bck_fwd->p);
     if (!persist) break;
   }
   st_set(s, &s->cur, sample);

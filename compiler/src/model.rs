@@ -510,6 +510,8 @@ struct Mg<'a> {
     kscratch: HashMap<usize, String>,
     /// A precomputed exp(eta) for the next PoissonLog density.
     exp_override: Option<String>,
+    /// Fused scan kernel: the adjoint C computed for copy k, for R.
+    pending_ad: HashMap<usize, String>,
 }
 
 impl HasFb for Mg<'_> {
@@ -541,6 +543,7 @@ impl<'a> Mg<'a> {
             elem_acc: HashMap::new(),
             kscratch: HashMap::new(),
             exp_override: None,
+            pending_ad: HashMap::new(),
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -797,7 +800,10 @@ impl<'a> Mg<'a> {
                 });
             }
             M::Bin(op, a, b) => {
-                let (va, vb) = (Self::val(vals, a), Self::val(vals, b));
+                // values are needed by *, / and ^ only (a sum may be swept
+                // without them)
+                let va = || Self::val(vals, a);
+                let vb = || Self::val(vals, b);
                 match op {
                     BinOp::Add => {
                         self.bwd(a, adj, i, vals);
@@ -812,16 +818,16 @@ impl<'a> Mg<'a> {
                     }
                     BinOp::Mul => {
                         if a.active() {
-                            let t = self.f.fmul(adj, &vb);
+                            let t = self.f.fmul(adj, &vb());
                             self.bwd(a, &t, i, vals);
                         }
                         if b.active() {
-                            let t = self.f.fmul(adj, &va);
+                            let t = self.f.fmul(adj, &va());
                             self.bwd(b, &t, i, vals);
                         }
                     }
                     BinOp::Div => {
-                        let q = self.f.fdiv(adj, &vb);
+                        let q = self.f.fdiv(adj, &vb());
                         if a.active() {
                             self.bwd(a, &q, i, vals);
                         }
@@ -845,9 +851,9 @@ impl<'a> Mg<'a> {
                         let d = if k == 1.0 {
                             fconst(1.0)
                         } else if k == 2.0 {
-                            self.f.fmul(&fconst(2.0), &va)
+                            self.f.fmul(&fconst(2.0), &va())
                         } else {
-                            let p = self.f.intrinsic2(self.m, "llvm.pow.f64", &va, &fconst(k - 1.0));
+                            let p = self.f.intrinsic2(self.m, "llvm.pow.f64", &va(), &fconst(k - 1.0));
                             self.f.fmul(&fconst(k), &p)
                         };
                         let t = self.f.fmul(adj, &d);
@@ -1774,6 +1780,16 @@ fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
 const KERNEL_UNROLL: u32 = 2;
 const KERNEL_WIDTH: u32 = 4 * KERNEL_UNROLL;
 
+/// A sum of terms: its backward sweep needs no values of its parts.
+fn additive(e: &M) -> bool {
+    match e {
+        M::Bin(BinOp::Add | BinOp::Sub, a, b) => additive(a) && additive(b),
+        M::Neg(a) => additive(a),
+        M::Const(_) | M::DimV(_) | M::DataS(_) | M::DataV(..) | M::DataM(_) | M::ParamS(_) | M::ParamV(..) | M::ParamM(_) | M::Cumsum { .. } => true,
+        _ => false,
+    }
+}
+
 /// Column-indexed vector parameters of a fused scan statement.
 fn fused_col_params(lhs: &M, args: &[M], fission: bool) -> Vec<String> {
     let mut cp = Vec::new();
@@ -1922,6 +1938,13 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
         // its child's adjoint through the general buffer)
         let alias = split && keys.len() == 1;
         let ad: Vec<String> = ad.iter().enumerate().map(|(j, a)| if alias && j == 0 { scr.clone() } else { a.clone() }).collect();
+        // When the density's argument is a sum of terms (beta + state), its
+        // backward sweep needs no values, so C can reload eta instead of the
+        // running sum: A then stores eta alone and B writes exp(eta) into the
+        // running sum's (unused) slot. With a single running sum, C hands its
+        // adjoint to R in a register.
+        let lean = alias && additive(&args[0]) && !lhs.has_cumsum();
+        let ex_p = if lean { s_p[0].clone() } else { ex_p };
         if split {
             for_range(g, "0", &cols, |g, col| {
                 let base = g.f.imul(col, &rows);
@@ -1936,7 +1959,9 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
                         let s = g.f.fadd(&prev, &v); // sequential in the column index: not a reduction
                         let t = g.f.ty();
                         g.f.emit(format!("store {t} {s}, ptr {}", carry[k][j]));
-                        g.f.store(&s, &s_p[j], &at);
+                        if !lean {
+                            g.f.store(&s, &s_p[j], &at);
+                        }
                         vals.insert(keys[j], s);
                     }
                     let eta = g.fwd(&args[0], &ix, &mut vals);
@@ -1962,7 +1987,14 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
             let ix = Ix { flat: flat.clone(), row: r0s[k].clone(), col: col.to_string() };
             let at = ad_at(g, col, k);
             let mut vals = HashMap::new();
+            if lean {
+                let eta = g.f.load(&eta_p, &at);
+                vals.insert(&args[0] as *const M as usize, eta);
+            }
             for (j, e) in inner.iter().enumerate() {
+                if lean {
+                    break;
+                }
                 let s = if split {
                     g.f.load(&s_p[j], &at)
                 } else {
@@ -1997,7 +2029,11 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
             for (j, key) in keys.iter().enumerate() {
                 let acc = g.node_acc.remove(key).unwrap();
                 let v = g.f.acc_get(&acc);
-                g.f.store(&v, &ad[j], &at);
+                if alias {
+                    g.pending_ad.insert(k, v);
+                } else {
+                    g.f.store(&v, &ad[j], &at);
+                }
             }
         }
         };
@@ -2015,7 +2051,10 @@ fn gen_fused_scan(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], shape: &SShape, n
                 g.elem_acc.insert(n.clone(), acc);
             }
             for j in (0..keys.len()).rev() {
-                let a = g.f.load(&ad[j], &at);
+                let a = match g.pending_ad.remove(&k) {
+                    Some(v) if alias => v,
+                    _ => g.f.load(&ad[j], &at),
+                };
                 let prev = g.f.acc_get(&carry[k][j]);
                 let sum = g.f.fadd(&prev, &a);
                 let t = g.f.ty();

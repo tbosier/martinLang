@@ -1,0 +1,121 @@
+{
+  "source": "bench/compiler_bench.json (11 interleaved repetitions, core 2), whole runs from bench/dynpois/seed_runs.py and results/rust_max_*.json",
+  "gradient_ns": {
+    "dynpois_small": {
+      "program": "max-effort Rust",
+      "median": 4071.3,
+      "min": 4021.3,
+      "max": 4146.6,
+      "runs": [
+        4103.8,
+        4132.0,
+        4067.9,
+        4036.1,
+        4130.6,
+        4146.6,
+        4071.3,
+        4065.9,
+        4065.8,
+        4075.4,
+        4021.3
+      ]
+    },
+    "dynpois_large": {
+      "program": "max-effort Rust",
+      "median": 52161.0,
+      "min": 51643.6,
+      "max": 53380.8,
+      "runs": [
+        52639.5,
+        51975.6,
+        52771.5,
+        52161.0,
+        52378.6,
+        53380.8,
+        52745.9,
+        51643.6,
+        52072.6,
+        51893.9,
+        51726.4
+      ]
+    },
+    "logistic": {
+      "program": "max-effort Rust",
+      "median": 37873.2,
+      "min": 37298.8,
+      "max": 39364.3,
+      "runs": [
+        37322.3,
+        37873.2,
+        39364.3,
+        37298.8,
+        37377.6,
+        38743.9,
+        38015.3,
+        37500.7,
+        37965.8,
+        38519.9,
+        37645.7
+      ]
+    },
+    "linear": {
+      "program": "tuned Rust, same rewrite",
+      "median": 258.5,
+      "min": 258.1,
+      "max": 259.4,
+      "runs": [
+        258.3,
+        258.5,
+        258.7,
+        259.4,
+        258.7,
+        258.1,
+        258.1,
+        258.5,
+        258.6,
+        258.2,
+        258.6
+      ]
+    }
+  },
+  "fit_seconds": {
+    "newton": {
+      "program": "max-effort Rust",
+      "median": 0.208665029,
+      "min": 0.206670995,
+      "max": 0.226959402,
+      "runs": [
+        0.220375165,
+        0.208298327,
+        0.226959402,
+        0.207808155,
+        0.207112856,
+        0.208665029,
+        0.206670995,
+        0.209972669,
+        0.208659891,
+        0.214929627,
+        0.209198424
+      ]
+    }
+  },
+  "whole_run": {
+    "dynpois_small_seconds": {
+      "seeds": {
+        "1": 6.63,
+        "2": 6.59,
+        "3": 6.65
+      }
+    },
+    "dynpois_large_seconds": {
+      "runs": [
+        196.42,
+        220.0,
+        219.8,
+        245.0,
+        280.65
+      ],
+      "note": "same binary, different runs; spread is machine noise"
+    }
+  }
+}
