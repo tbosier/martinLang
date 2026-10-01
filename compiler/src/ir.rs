@@ -639,6 +639,19 @@ pub fn for_range<C: HasFb>(cx: &mut C, lo: &str, hi: &str, body: impl FnOnce(&mu
     f.start_block(&exit);
 }
 
+/// if cond { body } (cond is an i1 register)
+pub fn if_then<C: HasFb>(cx: &mut C, cond: &str, body: impl FnOnce(&mut C)) {
+    let f = cx.fb();
+    let yes = f.label("then");
+    let join = f.label("endif");
+    f.emit(format!("br i1 {cond}, label %{yes}, label %{join}"));
+    f.start_block(&yes);
+    body(cx);
+    let f = cx.fb();
+    f.br(&join);
+    f.start_block(&join);
+}
+
 /// For i in 0..n: store(i, sum_k M[i*c + k] * v[k]).
 /// Rows are processed four at a time so each load of v feeds four FMAs;
 /// LLVM vectorises the four independent reductions.

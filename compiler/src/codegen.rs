@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Func, TExpr, TFn, TProgram, TStmt, TK};
-use crate::ir::{fconst, for_range, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::ir::{fconst, for_range, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
 use crate::model;
 use crate::types::{Dim, Dom, Ty};
 
@@ -229,8 +229,14 @@ const GRAM_CHUNK: u32 = 32;
 enum Prep {
     Scalar(String),
     Buf(String),
-    /// row i of matrix m (c columns) dotted with vector v, computed per element
-    RowDot { m: String, v: String, c: String },
+    /// a per-row value of the current chunk of a fused row loop (X * v), in
+    /// a scratch indexed by the row's position in the chunk
+    Chunk(String),
+}
+
+/// Whether an expression uses log1p, which has no vector form in the IR.
+fn mentions_log1p(e: &TExpr) -> bool {
+    matches!(e.kind, TK::Func(Func::Log1p, _)) || children(e).into_iter().any(mentions_log1p)
 }
 
 pub struct Cg<'a> {
@@ -245,6 +251,8 @@ pub struct Cg<'a> {
     mat_shape: Option<(Dim, Dim)>,
     /// fuse consecutive statements that stream the rows of one matrix
     row_fusion: bool,
+    /// first row of the chunk being emitted by a fused row loop
+    chunk_i0: Option<String>,
 }
 
 impl HasFb for Cg<'_> {
@@ -300,7 +308,7 @@ pub fn compile(p: &TProgram, opts: &Opts) -> String {
 }
 
 fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
-    let mut cg = Cg { m, f: Fb::new(opts.strict_fp), vars: HashMap::new(), dims: HashMap::new(), prog, gram_block: opts.gram_block, mat_shape: None, row_fusion: opts.row_fusion && !opts.strict_fp };
+    let mut cg = Cg { m, f: Fb::new(opts.strict_fp), vars: HashMap::new(), dims: HashMap::new(), prog, gram_block: opts.gram_block, mat_shape: None, row_fusion: opts.row_fusion && !opts.strict_fp, chunk_i0: None };
     let mut params = Vec::new();
     for (k, (name, ty)) in f.params.iter().enumerate() {
         let a = format!("%a{k}");
@@ -932,18 +940,11 @@ impl Cg<'_> {
                     };
                     self.f.load(b, &at)
                 }
-                Prep::RowDot { m, v, c } => {
-                    let (m, v, c) = (m.clone(), v.clone(), c.clone());
-                    let row = self.f.imul(idx, &c);
-                    let acc = self.f.acc_new(&fconst(0.0));
-                    for_range(self, "0", &c, |cg, k| {
-                        let a = cg.f.iadd(&row, k);
-                        let x = cg.f.load(&m, &a);
-                        let y = cg.f.load(&v, k);
-                        let t = cg.f.fmul(&x, &y);
-                        cg.f.acc_add(&acc, &t);
-                    });
-                    self.f.acc_get(&acc)
+                Prep::Chunk(b) => {
+                    let b = b.clone();
+                    let i0 = self.chunk_i0.clone().expect("chunk value outside a fused row loop");
+                    let ii = self.f.iop("sub nsw", idx, &i0);
+                    self.f.load(&b, &ii)
                 }
             };
         }
@@ -1070,9 +1071,11 @@ impl Cg<'_> {
                         Some(w) => cg.ew_elem(w, &prep, &i, None),
                         None => fconst(1.0),
                     };
-                    cg.gram_row(&st, &ab2, &c, &i, ii, &wi);
+                    cg.gram_row(&st, ii, &wi);
                 });
-                cg.gram_chunk(&st, &nrows);
+                let base = cg.f.imul(&i0, &c);
+                let xc = cg.f.gep(&ab2, &base);
+                cg.gram_chunk(&st, &xc, &c, &nrows);
             });
             self.gram_finish(&st, &c, dest);
             return;
@@ -1218,6 +1221,8 @@ impl Cg<'_> {
             dests.push(b);
         }
         let mut prep = HashMap::new();
+        // (v, scratch of the chunk's X * v) for each producer
+        let mut dots: Vec<(String, String)> = Vec::new();
         let mut coef_bufs: Vec<Option<String>> = Vec::new();
         let mut grams: Vec<Option<(String, String, String, String)>> = Vec::new();
         let chunk_buf = |cg: &mut Cg| {
@@ -1229,24 +1234,32 @@ impl Cg<'_> {
             cg.f.frees.push(p.clone());
             p
         };
+        // the per-row values run four rows at a time in vector registers
+        // unless an expression has no vector form
+        let mut vector_ok = true;
         for (r, d) in group.iter().zip(&dests) {
             let (mut cbuf, mut gst) = (None, None);
             match r {
                 RowStmt::Prod { e, mv, .. } => {
-                    // X * v is one dot product per row, computed in the row loop
+                    // X * v is one dot product per row, computed for the whole chunk first
                     let TK::MatVec { v, .. } = &mv.kind else { unreachable!() };
                     let vb = self.gen_buf(v);
-                    prep.insert(*mv as *const TExpr as usize, Prep::RowDot { m: xb.clone(), v: vb, c: c.clone() });
+                    let zb = chunk_buf(self);
+                    dots.push((vb, zb.clone()));
+                    prep.insert(*mv as *const TExpr as usize, Prep::Chunk(zb));
                     self.ew_prepare(e, &mut prep);
+                    vector_ok &= !mentions_log1p(e);
                 }
                 RowStmt::Trans { f, .. } => {
                     self.ew_prepare(f, &mut prep);
                     self.f.memzero(self.m, d, &c);
                     cbuf = Some(chunk_buf(self));
+                    vector_ok &= !mentions_log1p(f);
                 }
                 RowStmt::Gram { w, .. } => {
                     if let Some(w) = w {
                         self.ew_prepare(w, &mut prep);
+                        vector_ok &= !mentions_log1p(w);
                     }
                     gst = Some(self.gram_start(&c));
                 }
@@ -1266,11 +1279,17 @@ impl Cg<'_> {
             let nrows = cg.f.iop("sub nsw", &i1c, &i0);
             let base = cg.f.imul(&i0, &c);
             let xc = cg.f.gep(&xb, &base);
-            // 1: per row, the producers (a dot product each), then the
-            // consumers' coefficients and weights. Each row of X is read from
-            // memory here and is in L1 for everything after. This loop has
-            // inner loops, so LLVM does not vectorise it and Mint's own
-            // (inline) exp is the fast choice in it.
+            cg.chunk_i0 = Some(i0.clone());
+            // 1: the producers' dot products, four rows per pass over v. The
+            // chunk of X is read from memory here and is in L1 or L2 for
+            // everything after.
+            for (vb, zb) in &dots {
+                let zb = zb.clone();
+                rows_dot_blocked(cg, &xc, vb, &c, &nrows, &move |cg: &mut Cg, ii: &str, s: &str| cg.f.store(s, &zb, ii));
+            }
+            // 2: per row, the producers' values, then the consumers'
+            // coefficients and weights, in vector registers four rows at a
+            // time (Mint's own exp), leftover rows one at a time
             let per_row = |cg: &mut Cg, ii: &str| {
                 let i = cg.f.iadd(&i0, ii);
                 for (k, r) in group.iter().enumerate() {
@@ -1288,25 +1307,38 @@ impl Cg<'_> {
                                 Some(w) => cg.ew_elem(w, &prep, &i, None),
                                 None => fconst(1.0),
                             };
-                            cg.gram_row(grams[k].as_ref().unwrap(), &xb, &c, &i, ii, &v);
+                            cg.gram_row(grams[k].as_ref().unwrap(), ii, &v);
                         }
                     }
                 }
             };
             cg.f.scalar_inline_exp = true;
-            for_range(cg, "0", &nrows, |cg, ii| per_row(cg, ii));
+            let done = if vector_ok {
+                let nb = cg.f.iop("ashr", &nrows, "2");
+                for_range(cg, "0", &nb, |cg, b| {
+                    let ii = cg.f.imul(b, "4");
+                    cg.f.lanes = 4;
+                    per_row(cg, &ii);
+                    cg.f.lanes = 1;
+                });
+                cg.f.imul(&nb, "4")
+            } else {
+                "0".to_string()
+            };
+            for_range(cg, &done, &nrows, |cg, ii| per_row(cg, ii));
             cg.f.scalar_inline_exp = false;
-            // 2: the consumers' updates
+            // 3: the consumers' updates
             for (k, r) in group.iter().enumerate() {
                 match r {
                     RowStmt::Trans { .. } => {
                         let cb = coef_bufs[k].clone().unwrap();
                         rows_axpy_blocked(cg, &xc, &c, &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
                     }
-                    RowStmt::Gram { .. } => cg.gram_chunk(grams[k].as_ref().unwrap(), &nrows),
+                    RowStmt::Gram { .. } => cg.gram_chunk(grams[k].as_ref().unwrap(), &xc, &c, &nrows),
                     RowStmt::Prod { .. } => {}
                 }
             }
+            cg.chunk_i0 = None;
         });
         for (k, r) in group.iter().enumerate() {
             if let RowStmt::Gram { .. } = r {
@@ -1344,21 +1376,29 @@ impl Cg<'_> {
 
     // ---- tiled Gram kernel: H = A' diag(w) A, in chunks of rows
     //
-    // Each chunk of GRAM_CHUNK rows is copied into L1 scratch twice, as X
-    // (the rows) and W (the rows scaled by their weights), with the columns
-    // padded with zeros to a multiple of 8 (pp). The upper triangle of the
-    // padded H is then updated tile by tile: a 4 x 8 tile lives in eight
-    // vector registers while the chunk streams through it, so each step is
-    // six loads for eight vector FMAs (the row-by-row form needs a load and a
-    // store of H for every four). Padding makes every tile full-size.
+    // For each chunk of GRAM_CHUNK rows, the rows' weights are collected in
+    // a small scratch (gram_row), then the chunk's weighted rows
+    // W = diag(w) A are written into L1 scratch with the columns padded with
+    // zeros to a multiple of 4 (pp). The upper triangle of the padded H is
+    // updated in strips of four rows: strip j0..j0+3 covers columns j0..pp,
+    // as many 4 x 12 tiles as fit and the rest 4 x 8 (4 x 4 for the last
+    // strip). A tile lives in 12 or 8 vector registers while the chunk
+    // streams through it: per row, three (two) vector loads from W and four
+    // broadcasts from A itself (no copy of A is made) feed 12 (8) FMAs. The
+    // row values of the last strip are clamped to A's last column when c is
+    // not a multiple of 4; those rows of H are padding and never read. Only
+    // the 4 x 4 blocks on the diagonal compute entries below it.
+    //
+    // Each strip also prefetches its share of the next chunk of A, so that
+    // memory traffic overlaps the FMAs instead of stalling the next chunk's
+    // dot products.
 
-    /// Allocates and zeroes the scratch: (X chunk, W chunk, padded H, pp).
+    /// Allocates the scratch and zeroes W and H: (weights, W chunk, padded H, pp).
     fn gram_start(&mut self, c: &str) -> (String, String, String, String) {
         let c = c.to_string();
-        let (xs, ws, hs, pp) = self.f.hoisted(|f| {
-            let pp = f.iop("add nsw", &c, "7");
-            let pp = f.iop("sdiv", &pp, "8");
-            let pp = f.imul(&pp, "8");
+        let (wb, ws, hs, pp) = self.f.hoisted(|f| {
+            let pp = f.iop("add nsw", &c, "3");
+            let pp = f.iop("and", &pp, "-4");
             let n = f.imul(&pp, &GRAM_CHUNK.to_string());
             let hh = f.imul(&pp, &pp);
             let mut al = |n: &str| {
@@ -1366,80 +1406,154 @@ impl Cg<'_> {
                 f.emit(format!("{p} = call ptr @mint_alloc(i64 {n})"));
                 p
             };
-            let (xs, ws, hs) = (al(&n), al(&n), al(&hh));
-            (xs, ws, hs, pp)
+            let (wb, ws, hs) = (al(&GRAM_CHUNK.to_string()), al(&n), al(&hh));
+            (wb, ws, hs, pp)
         });
-        for b in [&xs, &ws, &hs] {
+        for b in [&wb, &ws, &hs] {
             self.f.frees.push(b.clone());
         }
         let n = self.f.imul(&pp, &GRAM_CHUNK.to_string());
         let hh = self.f.imul(&pp, &pp);
-        self.f.memzero(self.m, &xs, &n);
         self.f.memzero(self.m, &ws, &n);
         self.f.memzero(self.m, &hs, &hh);
-        (xs, ws, hs, pp)
+        (wb, ws, hs, pp)
     }
 
-    /// Copies row i of A (row ii of the chunk) and its weighted copy into the scratch.
-    fn gram_row(&mut self, st: &(String, String, String, String), ab: &str, c: &str, i: &str, ii: &str, wi: &str) {
-        let (xs, ws, _, pp) = st;
-        let src = self.f.imul(i, c);
-        let dst = self.f.imul(ii, pp);
-        let wi = wi.to_string();
-        for_range(self, "0", c, |cg, k| {
-            let si = cg.f.iadd(&src, k);
-            let x = cg.f.load(ab, &si);
-            let di = cg.f.iadd(&dst, k);
-            cg.f.store(&x, xs, &di);
-            let y = cg.f.fmul(&wi, &x);
-            cg.f.store(&y, ws, &di);
-        });
+    /// Records the weight of row ii of the chunk (a vector of four rows' weights in vector mode).
+    fn gram_row(&mut self, st: &(String, String, String, String), ii: &str, wi: &str) {
+        let wb = st.0.clone();
+        self.f.store(wi, &wb, ii);
     }
 
-    /// Adds the chunk's rows [0, nrows) to the upper triangle of the padded H.
-    fn gram_chunk(&mut self, st: &(String, String, String, String), nrows: &str) {
-        let (xs, ws, hs, pp) = st.clone();
-        let nj = self.f.iop("sdiv", &pp, "4");
-        for_range(self, "0", &nj, |cg, jb| {
-            let j0 = cg.f.imul(jb, "4");
-            let k_start = cg.f.iop("and", &j0, "-8");
-            let nk = cg.f.iop("sub nsw", &pp, &k_start);
-            let nk = cg.f.iop("sdiv", &nk, "8");
-            for_range(cg, "0", &nk, |cg, kb| {
-                let k0 = cg.f.imul(kb, "8");
-                let k0 = cg.f.iadd(&k0, &k_start);
-                let k1 = cg.f.iadd(&k0, "4");
-                cg.f.lanes = 4;
-                let acc: Vec<String> = (0..8).map(|_| cg.f.acc_new(&fconst(0.0))).collect();
-                for_range(cg, "0", nrows, |cg, ii| {
-                    let row = cg.f.imul(ii, &pp);
-                    let a0 = cg.f.iadd(&row, &k0);
-                    let a1 = cg.f.iadd(&row, &k1);
-                    let xa = cg.f.load(&xs, &a0);
-                    let xb = cg.f.load(&xs, &a1);
-                    for jj in 0..4 {
-                        let j = cg.f.iadd(&j0, &jj.to_string());
-                        let wi = cg.f.iadd(&row, &j);
-                        let b = cg.f.load_scalar(&ws, &wi);
-                        let b = cg.f.splat(&b);
-                        let t0 = cg.f.fmul(&b, &xa);
-                        cg.f.acc_add(&acc[2 * jj], &t0);
-                        let t1 = cg.f.fmul(&b, &xb);
-                        cg.f.acc_add(&acc[2 * jj + 1], &t1);
-                    }
-                });
-                for jj in 0..4 {
-                    let j = cg.f.iadd(&j0, &jj.to_string());
-                    let hrow = cg.f.imul(&j, &pp);
-                    for (h, k) in [(0, &k0), (1, &k1)] {
-                        let v = cg.f.acc_get(&acc[2 * jj + h]);
-                        let at = cg.f.iadd(&hrow, k);
-                        cg.f.add_to(&hs, &at, &v);
-                    }
-                }
-                cg.f.lanes = 1;
+    /// Adds the chunk's rows [0, nrows) (A's rows from xc, c columns) to the
+    /// upper triangle of the padded H.
+    fn gram_chunk(&mut self, st: &(String, String, String, String), xc: &str, c: &str, nrows: &str) {
+        let (wb, ws, hs, pp) = st.clone();
+        let (xc, c) = (xc.to_string(), c.to_string());
+        // W = diag(w) A for the chunk (the padding columns stay zero)
+        for_range(self, "0", nrows, |cg, ii| {
+            let wi = cg.f.load(&wb, ii);
+            let src = cg.f.imul(ii, &c);
+            let dst = cg.f.imul(ii, &pp);
+            for_range(cg, "0", &c, |cg, k| {
+                let si = cg.f.iadd(&src, k);
+                let x = cg.f.load(&xc, &si);
+                let y = cg.f.fmul(&wi, &x);
+                let di = cg.f.iadd(&dst, k);
+                cg.f.store(&y, &ws, &di);
             });
         });
+        // strips whose four rows are all real columns of A, then the one
+        // that reaches into the padding (when c is not a multiple of 4)
+        let nj = self.f.iop("ashr", &pp, "2");
+        let nfull = self.f.iop("sdiv", &c, "4");
+        let cm1 = self.f.iop("sub nsw", &c, "1");
+        for_range(self, "0", &nfull, |cg, jb| cg.gram_strip(&xc, &c, &ws, &hs, &pp, &nj, jb, None, nrows));
+        for_range(self, &nfull, &nj, |cg, jb| cg.gram_strip(&xc, &c, &ws, &hs, &pp, &nj, jb, Some(&cm1), nrows));
+    }
+
+    /// Strip jb of the tiled Gram update: rows 4 jb .. 4 jb + 4 of H, from
+    /// the diagonal to the end. With `clamp` (A's last column), row values
+    /// past it are read from it instead.
+    #[allow(clippy::too_many_arguments)]
+    fn gram_strip(&mut self, xc: &str, c: &str, ws: &str, hs: &str, pp: &str, nj: &str, jb: &str, clamp: Option<&str>, nrows: &str) {
+        // The next chunk of A is 4 c cache lines (GRAM_CHUNK c doubles) and
+        // there are at least c / 4 strips, so GRAM_CHUNK / 2 lines per strip
+        // cover it. Prefetches past the end of A are harmless hints.
+        self.m.declare("declare void @llvm.prefetch.p0(ptr, i32, i32, i32)");
+        let pf_n = GRAM_CHUNK / 2;
+        let next = self.f.imul(c, &GRAM_CHUNK.to_string());
+        let first = self.f.imul(jb, &(pf_n * 8).to_string());
+        let first = self.f.iadd(&first, &next);
+        for t in 0..pf_n {
+            let off = self.f.iadd(&first, &(t * 8).to_string());
+            let a = self.f.reg();
+            self.f.emit(format!("{a} = getelementptr double, ptr {xc}, i64 {off}"));
+            self.f.emit(format!("call void @llvm.prefetch.p0(ptr {a}, i32 0, i32 2, i32 1)"));
+        }
+        let j0 = self.f.imul(jb, "4");
+        let js: Vec<String> = (0..4)
+            .map(|jj| {
+                let j = self.f.iadd(&j0, &jj.to_string());
+                let Some(cm1) = clamp else { return j };
+                let over = self.f.reg();
+                self.f.emit(format!("{over} = icmp sgt i64 {j}, {cm1}"));
+                let r = self.f.reg();
+                self.f.emit(format!("{r} = select i1 {over}, i64 {cm1}, i64 {j}"));
+                r
+            })
+            .collect();
+        // The strip is m groups of four columns wide. m = 3 n12 + 2 n8, with
+        // n8 = 0, 1 or 2 by m mod 3 (m = 1: a single 4 x 4 tile).
+        let m = self.f.iop("sub nsw", nj, jb);
+        let is1 = self.f.reg();
+        self.f.emit(format!("{is1} = icmp eq i64 {m}, 1"));
+        let q = self.f.iop("udiv", &m, "3");
+        let r = self.f.iop("urem", &m, "3");
+        let r1 = self.f.reg();
+        self.f.emit(format!("{r1} = icmp eq i64 {r}, 1"));
+        let qm = self.f.iop("sub nsw", &q, "1");
+        let qq = self.f.reg();
+        self.f.emit(format!("{qq} = select i1 {r1}, i64 {qm}, i64 {q}"));
+        let n12 = self.f.reg();
+        self.f.emit(format!("{n12} = select i1 {is1}, i64 0, i64 {qq}"));
+        let n4 = self.f.reg();
+        self.f.emit(format!("{n4} = zext i1 {is1} to i64"));
+        let used = self.f.imul(&n12, "3");
+        let used = self.f.iadd(&used, &n4);
+        let rest = self.f.iop("sub nsw", &m, &used);
+        let n8 = self.f.iop("ashr", &rest, "1");
+        for_range(self, "0", &n12, |cg, t| {
+            let k0 = cg.f.imul(t, "12");
+            let k0 = cg.f.iadd(&k0, &j0);
+            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, 3, nrows);
+        });
+        let k8 = self.f.imul(&n12, "12");
+        let k8 = self.f.iadd(&k8, &j0);
+        for_range(self, "0", &n8, |cg, t| {
+            let k0 = cg.f.imul(t, "8");
+            let k0 = cg.f.iadd(&k0, &k8);
+            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, 2, nrows);
+        });
+        if_then(self, &is1, |cg| cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &j0, 1, nrows));
+    }
+
+    /// H[j0..j0+4, k0..k0+4 nv] += the sum over the chunk's rows of A[i, js] W[i, k0..].
+    #[allow(clippy::too_many_arguments)]
+    fn gram_tile(&mut self, xc: &str, c: &str, ws: &str, hs: &str, pp: &str, js: &[String], j0: &str, k0: &str, nv: usize, nrows: &str) {
+        self.f.lanes = 4;
+        let acc: Vec<String> = (0..4 * nv).map(|_| self.f.acc_new(&fconst(0.0))).collect();
+        for_range(self, "0", nrows, |cg, ii| {
+            let wrow = cg.f.imul(ii, pp);
+            let wrow = cg.f.iadd(&wrow, k0);
+            let xrow = cg.f.imul(ii, c);
+            let vs: Vec<String> = (0..nv)
+                .map(|v| {
+                    let at = cg.f.iadd(&wrow, &(4 * v).to_string());
+                    cg.f.load(ws, &at)
+                })
+                .collect();
+            for jj in 0..4 {
+                let at = cg.f.iadd(&xrow, &js[jj]);
+                let b = cg.f.load_scalar(xc, &at);
+                let b = cg.f.splat(&b);
+                for v in 0..nv {
+                    let t = cg.f.fmul(&b, &vs[v]);
+                    cg.f.acc_add(&acc[jj * nv + v], &t);
+                }
+            }
+        });
+        for jj in 0..4 {
+            let j = self.f.iadd(j0, &jj.to_string());
+            let hrow = self.f.imul(&j, pp);
+            let hrow = self.f.iadd(&hrow, k0);
+            for v in 0..nv {
+                let s = self.f.acc_get(&acc[jj * nv + v]);
+                let at = self.f.iadd(&hrow, &(4 * v).to_string());
+                self.f.add_to(hs, &at, &s);
+            }
+        }
+        self.f.lanes = 1;
     }
 
     /// dest (c x c) = the upper triangle of the padded H, mirrored.
