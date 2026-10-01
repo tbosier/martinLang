@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Dist, Func, SShape, TExpr, TModel, TModelStmt, TK};
 use crate::codegen::{scalar_func, Opts};
-use crate::ir::{fconst, for_range, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::ir::{fconst, for_range, for_range_md, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
 use crate::types::{Dim, Dom, Ty};
 
 pub fn data_global(model: &str, name: &str) -> String {
@@ -508,8 +508,13 @@ struct Mg<'a> {
     elem_acc: HashMap<String, String>,
     /// Fused scan kernels: per-group scratch (keyed by the first running sum).
     kscratch: HashMap<usize, String>,
-    /// A precomputed exp(eta) for the next PoissonLog density.
+    /// A precomputed exp(eta) for the next PoissonLog density, or
+    /// exp(-|eta|) for the next BernoulliLogit density.
     exp_override: Option<String>,
+    /// A precomputed log(1 + exp(-|eta|)) for the next BernoulliLogit density.
+    log_override: Option<String>,
+    /// A precomputed 1/(1 + exp(-|eta|)) for the next BernoulliLogit density.
+    q_override: Option<String>,
     /// Fused scan kernel: the adjoint C computed for copy k, for R.
     pending_ad: HashMap<usize, String>,
 }
@@ -543,6 +548,8 @@ impl<'a> Mg<'a> {
             elem_acc: HashMap::new(),
             kscratch: HashMap::new(),
             exp_override: None,
+            log_override: None,
+            q_override: None,
             pending_ad: HashMap::new(),
         };
         for d in &tm.dims {
@@ -884,11 +891,8 @@ impl<'a> Mg<'a> {
                         self.f.fmul(&y, &t)
                     }
                     Func::Abs => {
-                        let c = self.f.reg();
-                        self.f.emit(format!("{c} = fcmp olt double {x}, {}", fconst(0.0)));
-                        let r = self.f.reg();
-                        self.f.emit(format!("{r} = select i1 {c}, double {}, double {}", fconst(-1.0), fconst(1.0)));
-                        r
+                        let c = self.f.fcmp("olt", &x, &fconst(0.0));
+                        self.f.select(&c, &fconst(-1.0), &fconst(1.0))
                     }
                 };
                 let t = self.f.fmul(adj, &d);
@@ -922,28 +926,40 @@ impl<'a> Mg<'a> {
             Dist::BernoulliLogit => {
                 // log p(y | eta) = y*eta - log(1 + exp(eta)), evaluated stably
                 let eta = &a[0];
-                let abs = self.f.intrinsic1(self.m, "llvm.fabs.f64", eta);
-                let na = self.f.fneg(&abs);
-                let e = self.f.intrinsic1(self.m, "llvm.exp.f64", &na);
-                // log(1 + e) rather than log1p(e): e = exp(-|eta|) is in (0, 1], so the
-                // absolute error is at most ~1e-16, and llvm.log has a vector form.
-                // --strict-fp keeps libm's log1p.
-                let l1p = if self.f.strict {
-                    self.f.intrinsic1(self.m, "log1p", &e)
-                } else {
-                    let onep = self.f.fadd(&one, &e);
-                    self.f.intrinsic1(self.m, "llvm.log.f64", &onep)
+                let e = match self.exp_override.take() {
+                    Some(e) => e,
+                    None => self.bl_exp(eta),
+                };
+                // In vector code with Mint's log: log1p(e) from Mint's log1p on
+                // [0, 1], with q = 1/(1 + e) shared with the sigmoid
+                let mint_l1p = self.f.lanes > 1 && self.f.inline_log && self.m.inline_log;
+                let l1p = match self.log_override.take() {
+                    Some(l) => l,
+                    None if mint_l1p => {
+                        let u = self.f.fadd(&one, &e);
+                        let q = self.f.fdiv(&one, &u);
+                        self.q_override = Some(q.clone());
+                        self.f.log1p01(self.m, &e, &q)
+                    }
+                    None => self.bl_log(&e),
                 };
                 let pos = self.f.intrinsic2(self.m, "llvm.maxnum.f64", eta, &fconst(0.0));
                 let softplus = self.f.fadd(&pos, &l1p);
                 let ye = self.f.fmul(x, eta);
                 let lp = self.f.fsub(&ye, &softplus);
-                let den = self.f.fadd(&one, &e);
-                let c = self.f.reg();
-                self.f.emit(format!("{c} = fcmp oge double {eta}, {}", fconst(0.0)));
-                let num = self.f.reg();
-                self.f.emit(format!("{num} = select i1 {c}, double {one}, double {e}"));
-                let sig = self.f.fdiv(&num, &den);
+                let c = self.f.fcmp("oge", eta, &fconst(0.0));
+                let sig = match self.q_override.take() {
+                    // sigmoid(eta) = q for eta >= 0, e q otherwise
+                    Some(q) => {
+                        let eq = self.f.fmul(&e, &q);
+                        self.f.select(&c, &q, &eq)
+                    }
+                    None => {
+                        let den = self.f.fadd(&one, &e);
+                        let num = self.f.select(&c, &one, &e);
+                        self.f.fdiv(&num, &den)
+                    }
+                };
                 let deta = self.f.fsub(x, &sig);
                 (lp, vec![fconst(0.0), deta])
             }
@@ -969,6 +985,25 @@ impl<'a> Mg<'a> {
                 let drate = self.f.fsub(&inv, x);
                 (lp, vec![dx, drate])
             }
+        }
+    }
+
+    /// exp(-|eta|), BernoulliLogit's exponential.
+    fn bl_exp(&mut self, eta: &str) -> String {
+        let abs = self.f.intrinsic1(self.m, "llvm.fabs.f64", eta);
+        let na = self.f.fneg(&abs);
+        self.f.intrinsic1(self.m, "llvm.exp.f64", &na)
+    }
+
+    /// log(1 + e) for e = exp(-|eta|) in (0, 1]: log rather than log1p, since
+    /// the absolute error is then at most ~1e-16 and log has a vector form.
+    /// --strict-fp keeps libm's log1p.
+    fn bl_log(&mut self, e: &str) -> String {
+        if self.f.strict {
+            self.f.intrinsic1(self.m, "log1p", e)
+        } else {
+            let onep = self.f.fadd(&fconst(1.0), e);
+            self.f.intrinsic1(self.m, "llvm.log.f64", &onep)
         }
     }
 
@@ -1429,6 +1464,12 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             gen_fused_scan(&mut g, *dist, lhs, args, shape, &nodes, &guests, &own, &lp);
             continue;
         }
+        if opts.fission_kernel && !opts.strict_fp && *fission && fission_kernel_ok(lhs, args, &nodes) {
+            let SShape::Vec(nd) = shape else { unreachable!() };
+            let n = g.dim(nd);
+            gen_fission_kernel(&mut g, *dist, lhs, args, &nodes, &n, &lp);
+            continue;
+        }
         // before the loop: materialise each node (children first)
         for node in &nodes {
             let key = *node as *const M as usize;
@@ -1438,7 +1479,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                     let (mp, vp, c) = g.matvec_parts(node);
                     let n = g.dim(rows);
                     let fw2 = fw.clone();
-                    rows_dot_blocked(&mut g, &mp, &vp, &c, &n, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
+                    rows_dot_blocked(&mut g, &mp, &vp, &c, "0", &n, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
                 }
                 M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
                     // Column-major: column c of the running sum is column c-1
@@ -1602,7 +1643,7 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                         _ => unreachable!(),
                     };
                     let ad2 = ad.clone();
-                    rows_axpy_blocked(&mut g, &mp, &c, &n, &move |g: &mut Mg, i: &str| g.f.load(&ad2, i), &gp);
+                    rows_axpy_blocked(&mut g, &mp, &c, "0", &n, &move |g: &mut Mg, i: &str| g.f.load(&ad2, i), &gp);
                 }
                 M::Cumsum { inner, shape: SShape::Mat(rd, cd), .. } if g.is_cm(rd, cd) => {
                     // Reverse running sum, column by column from the last, in
@@ -1719,6 +1760,413 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     let r = g.f.acc_get(&lp);
     let header = format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name);
     g.finish(&header, &[format!("ret double {r}")]);
+}
+
+/// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
+/// doubles) are read by the dot products and are still in L1 when the
+/// gradient updates read them again. 32 was faster than 16, 64 and 128 on
+/// the logistic benchmark (p = 20).
+const CHUNK: u32 = 32;
+
+/// Whether a split (fissioned) statement can run as a fission kernel: its
+/// materialised nodes are all matrix-vector products, and every other
+/// operation has a vector form.
+fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
+    fn ok(e: &M) -> bool {
+        match e {
+            M::Func(Func::Log1p, _) | M::Cumsum { .. } => false,
+            M::Func(_, a) | M::Neg(a) => ok(a),
+            M::Bin(_, a, b) => ok(a) && ok(b),
+            _ => true,
+        }
+    }
+    !nodes.is_empty() && nodes.iter().all(|n| matches!(n, M::MatVec { .. })) && ok(lhs) && args.iter().all(ok)
+}
+
+/// A split likelihood over n observations as one loop over chunks of CHUNK
+/// rows. For each chunk:
+///
+///   - the row dot products, four rows at a time, in Mint's vector form;
+///   - the density, its derivatives and the elementwise part of the backward
+///     sweep as Mint's own <4 x double> code with Mint's exp and log inline
+///     (no calls for them, so nothing is spilled around them; a power other
+///     than ^2 still calls the vector math library's pow). For BernoulliLogit
+///     and PoissonLog the density's exp, and BernoulliLogit's log1p, run in
+///     loops of their own first (see run_chunk);
+///   - the row updates of the gradient, four rows at a time, reading the
+///     chunk's rows of X again from L1.
+///
+/// X is read from memory once per gradient instead of twice. The rows left
+/// over (n mod CHUNK) take the same steps in groups of four, and the last
+/// n mod 4 rows in scalar code.
+fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M], n: &str, lp: &str) {
+    const L: u32 = 4;
+    let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
+    let bufs: Vec<(String, Option<String>)> = keys.iter().map(|k| g.split[k].clone()).collect();
+    // row dot products and gradient updates for rows lo..hi: Mint's vector
+    // form when hi - lo is a multiple of 4, LLVM's otherwise
+    let dots = |g: &mut Mg, lo: &str, hi: &str, vec: bool| {
+        for (node, (fw, _)) in nodes.iter().zip(&bufs) {
+            let (mp, vp, c) = g.matvec_parts(node);
+            if vec {
+                dot4_vec(g, &mp, &vp, &c, lo, hi, fw);
+            } else {
+                let fw2 = fw.clone();
+                rows_dot_blocked(g, &mp, &vp, &c, lo, hi, &move |g: &mut Mg, i: &str, s: &str| g.f.store(s, &fw2, i));
+            }
+        }
+    };
+    let axpys = |g: &mut Mg, lo: &str, hi: &str, vec: bool| {
+        for (node, (_, ad)) in nodes.iter().zip(&bufs).rev() {
+            let Some(ad) = ad else { continue };
+            let M::MatVec { vec: v, .. } = node else { unreachable!() };
+            let M::ParamV(p, _) = &**v else { unreachable!() };
+            let (mp, _, c) = g.matvec_parts(node);
+            let gp = g.gptr[p].clone();
+            if vec {
+                axpy4_vec(g, &mp, &c, lo, hi, ad, &gp);
+            } else {
+                let ad2 = ad.clone();
+                rows_axpy_blocked(g, &mp, &c, lo, hi, &move |g: &mut Mg, i: &str| g.f.load(&ad2, i), &gp);
+            }
+        }
+    };
+    // one observation (or L of them): each product's adjoint is summed in a
+    // register and stored once, so its buffer needs no zeroing
+    let body = |g: &mut Mg, i: &str, lpa: &str| {
+        let ix = Ix::vec(i);
+        for (k, (_, ad)) in keys.iter().zip(&bufs) {
+            if ad.is_some() {
+                let acc = g.f.acc_new(&fconst(0.0));
+                g.node_acc.insert(*k, acc);
+            }
+        }
+        let mut vals = HashMap::new();
+        let x = g.fwd(lhs, &ix, &mut vals);
+        let a: Vec<String> = args.iter().map(|e| g.fwd(e, &ix, &mut vals)).collect();
+        let (term, partials) = g.lpdf(dist, &x, &a);
+        g.f.acc_add(lpa, &term);
+        g.bwd(lhs, &partials[0], &ix, &vals);
+        for (e, d) in args.iter().zip(&partials[1..]) {
+            g.bwd(e, d, &ix, &vals);
+        }
+        for (k, (_, ad)) in keys.iter().zip(&bufs) {
+            if let Some(ad) = ad {
+                let acc = g.node_acc.remove(k).unwrap();
+                let v = g.f.acc_get(&acc);
+                g.f.store(&v, ad, i);
+            }
+        }
+    };
+    // vector accumulators for the log density and the scalar parameters
+    g.f.lanes = L;
+    let lpv = g.f.acc_new(&fconst(0.0));
+    let scalars: Vec<String> = g.padj.keys().cloned().collect();
+    let vps: HashMap<String, String> = scalars.iter().map(|s| (s.clone(), g.f.acc_new(&fconst(0.0)))).collect();
+    g.f.lanes = 1;
+    let chunk = CHUNK.to_string();
+    // L1 scratch for the density's own exp (PoissonLog's exp(eta),
+    // BernoulliLogit's exp(-|eta|)) when the linear predictor is cheap to
+    // evaluate twice, and for BernoulliLogit's log1p(e) and 1/(1 + e)
+    let cheap = !has_func(&args[0]);
+    let scratch = |g: &mut Mg, on: bool| if on { Some(g.f.alloca(&format!("[{CHUNK} x double]"))) } else { None };
+    let scr_e = scratch(g, cheap && matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog));
+    let scr_l = scratch(g, scr_e.is_some() && dist == Dist::BernoulliLogit);
+    let scr_q = scratch(g, scr_l.is_some() && g.m.inline_log);
+    // The elementwise part and the gradient updates of `rows` rows from lo,
+    // whose dot products are in the buffers.
+    let run_chunk = |g: &mut Mg, lo: &str, rows: u32| {
+        let hi = g.f.iadd(lo, &rows.to_string());
+        let nv = (rows / L).to_string();
+        g.f.lanes = L;
+        g.vpadj = vps.clone();
+        g.f.inline_log = true;
+        // The density's exp, then its log, each in a loop of its own over the
+        // chunk, into L1 scratch: each iteration is then a short dependency
+        // chain, and several overlap (measured on the logistic gradient: exp
+        // and log1p in one loop, 16% slower; everything in one loop, 12%).
+        if let Some(se) = &scr_e {
+            for_range(g, "0", &nv, |g, j| {
+                let o = g.f.imul(j, &L.to_string());
+                let i = g.f.iadd(lo, &o);
+                let eta = g.fwd(&args[0], &Ix::vec(&i), &mut HashMap::new());
+                let e = if dist == Dist::PoissonLog { g.f.intrinsic1(g.m, "llvm.exp.f64", &eta) } else { g.bl_exp(&eta) };
+                g.f.store(&e, se, &o);
+            });
+        }
+        if let (Some(se), Some(sl)) = (&scr_e, &scr_l) {
+            for_range(g, "0", &nv, |g, j| {
+                let o = g.f.imul(j, &L.to_string());
+                let e = g.f.load(se, &o);
+                let l = match &scr_q {
+                    // 1/(1 + e) once, for the sigmoid and for Mint's log1p
+                    Some(sq) => {
+                        let u = g.f.fadd(&fconst(1.0), &e);
+                        let q = g.f.fdiv(&fconst(1.0), &u);
+                        g.f.store(&q, sq, &o);
+                        g.f.log1p01(g.m, &e, &q)
+                    }
+                    None => g.bl_log(&e),
+                };
+                g.f.store(&l, sl, &o);
+            });
+        }
+        for_range(g, "0", &nv, |g, j| {
+            let o = g.f.imul(j, &L.to_string());
+            let i = g.f.iadd(lo, &o);
+            if let Some(se) = &scr_e {
+                let e = g.f.load(se, &o);
+                g.exp_override = Some(e);
+            }
+            if let Some(sl) = &scr_l {
+                let l = g.f.load(sl, &o);
+                g.log_override = Some(l);
+            }
+            if let Some(sq) = &scr_q {
+                let q = g.f.load(sq, &o);
+                g.q_override = Some(q);
+            }
+            body(g, &i, &lpv);
+        });
+        g.vpadj.clear();
+        g.f.inline_log = false;
+        g.f.lanes = 1;
+        axpys(g, lo, &hi, true);
+    };
+    let nb = g.f.iop("sdiv", n, &chunk);
+    for_range(g, "0", &nb, |g, b| {
+        let lo = g.f.imul(b, &chunk);
+        let hi = g.f.iadd(&lo, &chunk);
+        dots(g, &lo, &hi, true);
+        run_chunk(g, &lo, CHUNK);
+    });
+    // the rows left over: groups of four in the same vector code, then
+    // single rows in scalar code
+    let full = g.f.imul(&nb, &chunk);
+    let rest = g.f.iop("sub nsw", n, &full);
+    let quads = g.f.iop("sdiv", &rest, &L.to_string());
+    for_range(g, "0", &quads, |g, q| {
+        let o = g.f.imul(q, &L.to_string());
+        let lo = g.f.iadd(&full, &o);
+        let hi = g.f.iadd(&lo, &L.to_string());
+        dots(g, &lo, &hi, true);
+        run_chunk(g, &lo, L);
+    });
+    let q4 = g.f.imul(&quads, &L.to_string());
+    let done = g.f.iadd(&full, &q4);
+    dots(g, &done, n, false);
+    for_range(g, &done, n, |g, i| body(g, i, lp));
+    axpys(g, &done, n, false);
+    g.f.lanes = L;
+    let v = g.f.acc_get(&lpv);
+    let s = g.f.hsum(g.m, &v);
+    let mut sums = Vec::new();
+    for p in &scalars {
+        let v = g.f.acc_get(&vps[p]);
+        sums.push((p.clone(), g.f.hsum(g.m, &v)));
+    }
+    g.f.lanes = 1;
+    g.f.acc_add(lp, &s);
+    for (p, v) in sums {
+        let acc = g.padj[&p].clone();
+        g.f.acc_add(&acc, &v);
+    }
+}
+
+/// The lanes k0 + l < c (l = 0..3) as a <4 x i1> mask.
+fn tail_mask(g: &mut Mg, k0: &str, c: &str) -> String {
+    let splat = |g: &mut Mg, x: &str| {
+        let a = g.f.reg();
+        g.f.emit(format!("{a} = insertelement <4 x i64> poison, i64 {x}, i64 0"));
+        let r = g.f.reg();
+        g.f.emit(format!("{r} = shufflevector <4 x i64> {a}, <4 x i64> poison, <4 x i32> zeroinitializer"));
+        r
+    };
+    let ks = splat(g, k0);
+    let cs = splat(g, c);
+    let idx = g.f.reg();
+    g.f.emit(format!("{idx} = add <4 x i64> {ks}, <i64 0, i64 1, i64 2, i64 3>"));
+    let m = g.f.reg();
+    g.f.emit(format!("{m} = icmp slt <4 x i64> {idx}, {cs}"));
+    m
+}
+
+/// A <4 x double> load of p[idx..idx+4] with the lanes outside `mask` zero.
+fn masked_load(g: &mut Mg, p: &str, idx: &str, mask: &str) -> String {
+    g.m.declare("declare <4 x double> @llvm.masked.load.v4f64.p0(ptr, i32, <4 x i1>, <4 x double>)");
+    let a = g.f.gep(p, idx);
+    let r = g.f.reg();
+    g.f.emit(format!("{r} = call <4 x double> @llvm.masked.load.v4f64.p0(ptr {a}, i32 8, <4 x i1> {mask}, <4 x double> zeroinitializer)"));
+    r
+}
+
+/// Runs `body(k)` for k = 0, 4, .. below c rounded down to a multiple of 4,
+/// then `tail(k, mask)` once if c is not a multiple of 4.
+fn vec_cols(g: &mut Mg, c: &str, body: &mut dyn FnMut(&mut Mg, &str), tail: &mut dyn FnMut(&mut Mg, &str, &str)) {
+    let c4 = g.f.iop("sdiv", c, "4");
+    // no runtime unrolling: for short rows (p = 20 is 5 iterations) an
+    // unrolled copy plus its remainder loop cost more than they save
+    let md = g.m.loop_as_written();
+    for_range_md(g, "0", &c4, Some(&md), |g, kb| {
+        let k = g.f.imul(kb, "4");
+        body(g, &k);
+    });
+    let k0 = g.f.imul(&c4, "4");
+    let has = g.f.reg();
+    g.f.emit(format!("{has} = icmp slt i64 {k0}, {c}"));
+    let t = g.f.label("tail");
+    let e = g.f.label("tail_done");
+    g.f.emit(format!("br i1 {has}, label %{t}, label %{e}"));
+    g.f.start_block(&t);
+    let mask = tail_mask(g, &k0, c);
+    tail(g, &k0, &mask);
+    g.f.br(&e);
+    g.f.start_block(&e);
+}
+
+/// fw[i] = M[i, :] . v for rows lo..hi (hi - lo a multiple of 4), four rows
+/// at a time in Mint's vector form: one accumulator per row, vectorised
+/// along the columns (a masked tail when c is not a multiple of 4), so each
+/// load of v feeds four FMAs; then a 4 x 4 transpose-and-add leaves the four
+/// dot products in one vector, stored with one instruction. (Eight rows per
+/// group measured the same.)
+fn dot4_vec(g: &mut Mg, mp: &str, vp: &str, c: &str, lo: &str, hi: &str, fw: &str) {
+    let r = 4usize;
+    let len = g.f.iop("sub nsw", hi, lo);
+    let groups = g.f.iop("sdiv", &len, &r.to_string());
+    for_range(g, "0", &groups, |g, gi| {
+        g.f.lanes = 4;
+        let o = g.f.imul(gi, &r.to_string());
+        let i0 = g.f.iadd(lo, &o);
+        let rows: Vec<String> = (0..r)
+            .map(|l| {
+                let i = g.f.iadd(&i0, &l.to_string());
+                g.f.imul(&i, c)
+            })
+            .collect();
+        let accs: Vec<String> = (0..r).map(|_| g.f.acc_new(&fconst(0.0))).collect();
+        let (rows2, accs2) = (rows.clone(), accs.clone());
+        vec_cols(
+            g,
+            c,
+            &mut |g: &mut Mg, k: &str| {
+                let b = g.f.load(vp, k);
+                for l in 0..r {
+                    let idx = g.f.iadd(&rows[l], k);
+                    let x = g.f.load(mp, &idx);
+                    let t = g.f.fmul(&x, &b);
+                    g.f.acc_add(&accs[l], &t);
+                }
+            },
+            &mut |g: &mut Mg, k: &str, mask: &str| {
+                let b = masked_load(g, vp, k, mask);
+                for l in 0..r {
+                    let idx = g.f.iadd(&rows2[l], k);
+                    let x = masked_load(g, mp, &idx, mask);
+                    let t = g.f.fmul(&x, &b);
+                    g.f.acc_add(&accs2[l], &t);
+                }
+            },
+        );
+        let a: Vec<String> = accs.iter().map(|acc| g.f.acc_get(acc)).collect();
+        let fl = g.f.rflags;
+        let shuf = |g: &mut Mg, x: &str, y: &str, m: &str| {
+            let r = g.f.reg();
+            g.f.emit(format!("{r} = shufflevector <4 x double> {x}, <4 x double> {y}, <4 x i32> <{m}>"));
+            r
+        };
+        let add = |g: &mut Mg, x: &str, y: &str| {
+            let r = g.f.reg();
+            g.f.emit(format!("{r} = fadd {fl}<4 x double> {x}, {y}"));
+            r
+        };
+        for q in 0..r / 4 {
+            let a = &a[4 * q..4 * q + 4];
+            // h01 = [a0_01, a1_01, a0_23, a1_23], h23 likewise for a2, a3
+            let e01 = shuf(g, &a[0], &a[1], "i32 0, i32 4, i32 2, i32 6");
+            let o01 = shuf(g, &a[0], &a[1], "i32 1, i32 5, i32 3, i32 7");
+            let h01 = add(g, &e01, &o01);
+            let e23 = shuf(g, &a[2], &a[3], "i32 0, i32 4, i32 2, i32 6");
+            let o23 = shuf(g, &a[2], &a[3], "i32 1, i32 5, i32 3, i32 7");
+            let h23 = add(g, &e23, &o23);
+            let lo2 = shuf(g, &h01, &h23, "i32 0, i32 1, i32 4, i32 5");
+            let hi2 = shuf(g, &h01, &h23, "i32 2, i32 3, i32 6, i32 7");
+            let s = add(g, &lo2, &hi2);
+            let at = g.f.iadd(&i0, &(4 * q).to_string());
+            g.f.store(&s, fw, &at);
+        }
+        g.f.lanes = 1;
+    });
+}
+
+/// gp[:] += sum_i ad[i] M[i, :] for rows lo..hi (hi - lo a multiple of 4),
+/// four rows per pass over gp, in Mint's vector form (a masked tail when c
+/// is not a multiple of 4).
+fn axpy4_vec(g: &mut Mg, mp: &str, c: &str, lo: &str, hi: &str, ad: &str, gp: &str) {
+    let r = 4usize;
+    g.m.declare("declare void @llvm.masked.store.v4f64.p0(<4 x double>, ptr, i32, <4 x i1>)");
+    let len = g.f.iop("sub nsw", hi, lo);
+    let groups = g.f.iop("sdiv", &len, &r.to_string());
+    for_range(g, "0", &groups, |g, gi| {
+        g.f.lanes = 4;
+        let o = g.f.imul(gi, &r.to_string());
+        let i0 = g.f.iadd(lo, &o);
+        let rows: Vec<String> = (0..r)
+            .map(|l| {
+                let i = g.f.iadd(&i0, &l.to_string());
+                g.f.imul(&i, c)
+            })
+            .collect();
+        let mut cs: Vec<String> = Vec::new();
+        for q in 0..r / 4 {
+            let at = g.f.iadd(&i0, &(4 * q).to_string());
+            let cv = g.f.load(ad, &at);
+            for l in 0..4 {
+                let x = g.f.reg();
+                g.f.emit(format!("{x} = shufflevector <4 x double> {cv}, <4 x double> poison, <4 x i32> splat (i32 {l})"));
+                cs.push(x);
+            }
+        }
+        // a balanced sum of the R products
+        let sum = |g: &mut Mg, xs: Vec<String>| {
+            let mut t: Vec<String> = xs.iter().zip(&cs).map(|(x, c)| g.f.fmul(c, x)).collect();
+            while t.len() > 1 {
+                t = t.chunks(2).map(|p| g.f.fadd(&p[0], &p[1])).collect();
+            }
+            t.pop().unwrap()
+        };
+        let rows2 = rows.clone();
+        vec_cols(
+            g,
+            c,
+            &mut |g: &mut Mg, k: &str| {
+                let xs: Vec<String> = rows
+                    .iter()
+                    .map(|r| {
+                        let idx = g.f.iadd(r, k);
+                        g.f.load(mp, &idx)
+                    })
+                    .collect();
+                let s = sum(g, xs);
+                g.f.add_to(gp, k, &s);
+            },
+            &mut |g: &mut Mg, k: &str, mask: &str| {
+                let xs: Vec<String> = rows2
+                    .iter()
+                    .map(|r| {
+                        let idx = g.f.iadd(r, k);
+                        masked_load(g, mp, &idx, mask)
+                    })
+                    .collect();
+                let s = sum(g, xs);
+                let old = masked_load(g, gp, k, mask);
+                let nw = g.f.fadd(&old, &s);
+                let a = g.f.gep(gp, k);
+                g.f.emit(format!("call void @llvm.masked.store.v4f64.p0(<4 x double> {nw}, ptr {a}, i32 8, <4 x i1> {mask})"));
+            },
+        );
+        g.f.lanes = 1;
+    });
 }
 
 /// A matrix-shaped statement whose only materialised nodes are running sums

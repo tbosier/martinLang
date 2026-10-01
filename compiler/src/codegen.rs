@@ -33,6 +33,12 @@ pub struct Opts {
     pub row_fusion: bool,
     /// run scan statements as one fused, row-blocked loop nest
     pub scan_fusion: bool,
+    /// run a split likelihood (loop fission) as one loop over chunks of rows,
+    /// with the elementwise pass emitted as Mint's own vector code
+    pub fission_kernel: bool,
+    /// Mint's own vector log in the fission kernel instead of the vector
+    /// math library's
+    pub inline_log: bool,
 }
 
 #[derive(Clone)]
@@ -293,6 +299,7 @@ pub fn declare_runtime(m: &mut Module) {
 pub fn compile(p: &TProgram, opts: &Opts) -> String {
     let mut m = Module::default();
     m.inline_exp = opts.inline_exp && !opts.strict_fp;
+    m.inline_log = opts.inline_log && !opts.strict_fp;
     #[cfg(target_arch = "x86_64")]
     {
         m.avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
@@ -1029,7 +1036,7 @@ impl Cg<'_> {
             // dest[i] = sum_k M[i,k] v[k], four rows at a time sharing loads of v
             let vb = self.gen_buf(v);
             let d = dest.clone();
-            rows_dot_blocked(self, &mb, &vb, &c, &r, &move |cg: &mut Cg, i: &str, s: &str| cg.f.store(s, &d, i));
+            rows_dot_blocked(self, &mb, &vb, &c, "0", &r, &move |cg: &mut Cg, i: &str, s: &str| cg.f.store(s, &d, i));
         } else {
             // dest[k] = sum_i M[i,k] v[i], row by row (four rows per pass over
             // dest) so M is read in storage order; v's elementwise expression is
@@ -1038,7 +1045,7 @@ impl Cg<'_> {
             let mut prep = HashMap::new();
             self.ew_prepare(v, &mut prep);
             let coef = |cg: &mut Cg, i: &str| cg.ew_elem(v, &prep, i, None);
-            rows_axpy_blocked(self, &mb, &c, &r, &coef, &dest);
+            rows_axpy_blocked(self, &mb, &c, "0", &r, &coef, &dest);
         }
     }
 
@@ -1303,7 +1310,7 @@ impl Cg<'_> {
             // everything after.
             for (vb, zb) in &dots {
                 let zb = zb.clone();
-                rows_dot_blocked(cg, &xc, vb, &c, &nrows, &move |cg: &mut Cg, ii: &str, s: &str| cg.f.store(s, &zb, ii));
+                rows_dot_blocked(cg, &xc, vb, &c, "0", &nrows, &move |cg: &mut Cg, ii: &str, s: &str| cg.f.store(s, &zb, ii));
             }
             // 2: per row, the producers' values, then the consumers'
             // coefficients and weights, in vector registers four rows at a
@@ -1350,7 +1357,7 @@ impl Cg<'_> {
                 match r {
                     RowStmt::Trans { .. } => {
                         let cb = coef_bufs[k].clone().unwrap();
-                        let axpy = |cg: &mut Cg| rows_axpy_blocked(cg, &xc, &c, &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
+                        let axpy = |cg: &mut Cg| rows_axpy_blocked(cg, &xc, &c, "0", &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
                         match (fold_t, &no_fold) {
                             (Some(t), Some(nf)) if t == k => if_then(cg, nf, axpy),
                             _ => axpy(cg),

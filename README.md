@@ -165,7 +165,8 @@ Useful environment variables for compiled programs:
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
-and `--strict-fp` (strict IEEE evaluation order, no vector math).
+`--no-fission-kernel`, `--no-inline-log`, and `--strict-fp` (strict IEEE
+evaluation order, no vector math).
 
 ## The language in one page
 

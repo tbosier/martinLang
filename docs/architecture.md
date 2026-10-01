@@ -208,9 +208,36 @@ the single loop is split into three passes:
    of the backward sweep;
 3. the row axpys for the gradient.
 
-The middle pass has no inner loop, so LLVM vectorises it, including `exp` and
-`log` through glibc's vector math library. The scratch vectors live in a
-per-thread workspace, which keeps parallel chains safe.
+With `--no-fission-kernel` these are three whole passes over the n
+observations, and LLVM vectorises the middle one, calling glibc's vector
+`exp` and `log` (each call spills every vector register). By default, when
+the only materialised nodes are matrix-vector products and every operation
+has a vector form (everything but `log1p`), the statement runs as a
+**fission kernel** instead (`gen_fission_kernel` in `model.rs`): one loop
+over chunks of 32 rows, each taking the three steps in Mint's own
+`<4 x double>` code:
+
+1. the dot products, four rows at a time: one accumulator per row along the
+   columns (a masked tail when p is not a multiple of 4), then a 4 x 4
+   transpose-and-add that leaves the four results in one vector;
+2. the density and its derivatives on four observations at a time, with
+   Mint's `exp` and `log` inline, so they make no calls (a power other than
+   `^2` still calls glibc's vector `pow`). The density's own `exp`
+   (BernoulliLogit's exp(-|eta|), PoissonLog's exp(eta)) and BernoulliLogit's
+   `log1p` each run in a loop of their own over the chunk first, into L1
+   scratch: an iteration is then a short dependency chain, and several
+   overlap;
+3. the gradient updates, four rows at a time, reading the chunk's 32 rows of
+   X again from L1.
+
+X is read from memory once per gradient instead of twice. The rows left over
+take the same steps four at a time, and the last n mod 4 in scalar code. The
+scratch vectors live in a per-thread workspace, which keeps parallel chains
+safe. On the logistic benchmark the gradient went from 33.4 to 23.7 µs
+(fastest of 28 interleaved runs each, on a loaded machine; see
+`docs/compiler-round.md`). With X small enough for L2, the dot products took
+about 23 cycles per four rows (640 bytes of X), close to the 20 cycles it
+takes to bring those bytes from L2 into L1 at 32 bytes per cycle.
 
 **Sufficient statistics** (on by default; off with `--no-suffstats`). This
 applies to a `Normal` likelihood whose outcome is data, whose scale is one
@@ -252,8 +279,9 @@ groups of 8 series, two vectors of four:
 Mint emits this as `<4 x double>` IR itself (`Fb::lanes`); LLVM's loop
 vectoriser does not produce vector lanes across rows with the loop over time.
 Series left over run through the same generator with one lane, and so do
-statements with an operation that has no vector form yet (BernoulliLogit's
-stable softplus, `abs`, `log1p`).
+statements with BernoulliLogit, `abs` or `log1p`. (`log1p` has no vector
+form yet; BernoulliLogit and `abs` have one now, used by the fission kernel,
+but the scan kernel has not been switched to it or measured with it.)
 
 Around the kernel:
 
@@ -315,19 +343,38 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
 - With `-fveclib=libmvec`, `exp` and `log` in loops LLVM vectorises call
   glibc's 4-lane versions, which glibc documents as accurate to within 4 ulp.
   The scalar versions are under 1 ulp.
-- In vector code Mint emits itself (the scan kernel) and in the fused row
-  loop, `exp` is Mint's own (`ir.rs`, `mint_exp_fast`): at most 2 ulp over
-  3e7 test inputs, with NaN, infinities, overflow and subnormal results as in
-  libm. `--no-inline-exp` uses `llvm.exp` everywhere.
+- In vector code Mint emits itself (the scan kernel, the fission kernel) and
+  in the fused row loop, `exp` is Mint's own (`ir.rs`, `mint_exp_fast`): at
+  most 2 ulp over 3e7 test inputs, with NaN, infinities, overflow and
+  subnormal results as in libm. `--no-inline-exp` uses `llvm.exp` everywhere.
+- In the fission kernel, `log` is Mint's own too (`ir.rs`, `mint_log`):
+  x = 2^k z with z in about [0.684, 1.371), z/c - 1 = r from a 128-entry
+  table of 1/c and log c (two gathers; the step that holds 1 has c = 1, so
+  there is no cancellation near 1), and a degree-7 polynomial for
+  log1p(r). Worst error found against long double `logl`, 4.3e6 inputs over
+  every binade (subnormals included), around 1 and around every table step:
+  1.5 ulp. 0, -0, negatives, infinities and NaN give what libm gives.
+  `tests/run.sh` checks it as emitted. `--no-inline-log` calls glibc's
+  vector `log` there instead.
 - The tiled Gram kernel and row fusion change the order of summation (per
   tile and per chunk); both are off under `--strict-fp`. The tiled kernel
   also groups each product as `X[i,j] * (w[i] * X[i,k])`, where the untiled
   one computes `(w[i] * X[i,j]) * X[i,k]`. The two differ by more than
   rounding only when `w[i] * X[i,k]` leaves the normal range of doubles
   (below about 2e-308 or above 1.8e308) while the full product does not.
-- In `BernoulliLogit`, `log1p(e)` is computed as `log(1 + e)` with
-  e = exp(-|eta|) in (0, 1], because `log` has a vector version. That costs an
-  absolute error of up to about 1e-16 per observation.
+- In `BernoulliLogit`, e = exp(-|eta|) is in (0, 1]. In scalar code and with
+  `--no-fission-kernel`, `log1p(e)` is computed as `log(1 + e)`, because `log`
+  has a vector version; that costs an absolute error of up to about 1e-16
+  per observation. In the fission kernel's vector code (every row but the
+  last n mod 4, which run in scalar code) it is Mint's own `log1p` on [0, 1]
+  (`mint_log1p01`), which takes q = 1/(1 + e) (computed once, for the
+  sigmoid too): m = round(256 (1 - q)), 1 - m/256 is exact, and
+  r = e (1 - m/256) - m/256 is one fused multiply-add on the exact e, so
+  1 + e is never rounded. The bound is about 2 ulp (at the first table
+  step, where the result is half the table entry); the test over 4.5e6
+  inputs found 1.93 ulp, an independent reproduction 1.97, and
+  `tests/run.sh` fails above 2.1. The sigmoid there is q for eta >= 0 and
+  e q otherwise, one rounding more than e/(1 + e).
 - There are no `nnan` or `ninf` assumptions: NaN and infinity behave as in
   IEEE.
 - `--strict-fp` turns all of this off, including the `log1p` substitution.

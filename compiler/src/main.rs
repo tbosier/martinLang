@@ -13,6 +13,10 @@
 //!        --no-inline-exp     call the vector math library's exp
 //!        --no-scan-fusion    materialise running sums in separate passes
 //!        --no-row-fusion     run statements that stream one matrix separately
+//!        --no-fission-kernel  split likelihoods as three whole passes, the
+//!                            elementwise one vectorised by LLVM
+//!        --no-inline-log     call the vector math library's log in the
+//!                            fission kernel
 
 mod ast;
 mod check;
@@ -80,7 +84,7 @@ fn runtime_object() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion]");
+    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log]");
     exit(2);
 }
 
@@ -92,7 +96,7 @@ fn main() {
     let cmd = args[0].as_str();
     let path = &args[1];
     let mut out: Option<String> = None;
-    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true };
+    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true, fission_kernel: true, inline_log: true };
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -109,6 +113,8 @@ fn main() {
             "--no-inline-exp" => opts.inline_exp = false,
             "--no-scan-fusion" => opts.scan_fusion = false,
             "--no-row-fusion" => opts.row_fusion = false,
+            "--no-fission-kernel" => opts.fission_kernel = false,
+            "--no-inline-log" => opts.inline_log = false,
             _ => usage(),
         }
         k += 1;
