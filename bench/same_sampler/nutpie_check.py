@@ -26,7 +26,13 @@ Measured per run:
     the same ArviZ code on both samplers' constrained draws, and the lowest
     bulk ESS per 1000 gradients.
 
+With --chains 1 --pin, each run is one chain pinned to the least busy core
+(chosen afresh before each run): the cleaner measurement of the sampler's
+overhead per gradient, since four chains on a loaded machine add contention
+that has nothing to do with either sampler.
+
 usage: python bench/same_sampler/nutpie_check.py --seeds 1 2 3
+       python bench/same_sampler/nutpie_check.py --chains 1 --pin --seeds 1 2 3 4 5 --out results/nutpie_1chain.json
 """
 import argparse
 import json
@@ -44,8 +50,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
 ap.add_argument("--problems", default="dynpois_small,logistic,eight_schools")
 ap.add_argument("--out", default="results/nutpie.json")
+ap.add_argument("--chains", type=int, default=4)
+ap.add_argument("--pin", action="store_true")
 args = ap.parse_args()
-CHAINS, WARMUP, DRAWS = 4, 1000, 1000
+CHAINS, WARMUP, DRAWS = args.chains, 1000, 1000
+PIN = None  # the CPU of the current run (with --pin)
 
 
 def diagnostics(x):
@@ -65,7 +74,7 @@ def run_mint(problem, seed):
     os.makedirs(tmp, exist_ok=True)
     path = os.path.join(tmp, f"nutpie_check_{problem}_{seed}.draws")
     argv, env = common.command(problem, "stan", DRAWS, WARMUP, CHAINS, seed)
-    out, wall = common.run(argv, dict(env, MINT_DRAWS=path))
+    out, wall = common.run(argv, dict(env, MINT_DRAWS=path), pin=PIN)
     r = common.parse_run(out)
     hdr = np.fromfile(path, dtype="<u8", count=3)
     C, N, D = (int(v) for v in hdr)
@@ -87,10 +96,14 @@ def run_nutpie(problem, seed):
     model = CompiledStanModel(code="", library=_lib.StanLibrary(so), dims=None, _coords=None,
                               model_name=problem, model=None, data=None)
     model = model.with_data(**{k: np.asarray(v) for k, v in data.items()})
+    if PIN is not None:
+        os.sched_setaffinity(0, {int(PIN)})
     t = time.perf_counter()
     tr = nutpie.sample(model, draws=DRAWS, tune=WARMUP, chains=CHAINS, cores=CHAINS, seed=seed,
                        progress_bar=False, save_warmup=True)
     wall = time.perf_counter() - t
+    if PIN is not None:
+        os.sched_setaffinity(0, set(range(os.cpu_count())))
     post = tr.posterior
     # every variable flattened in Stan's order (as BridgeStan's param_constrain writes it)
     parts = []
@@ -115,7 +128,7 @@ if os.path.exists(gpath):
 
 out_path = os.path.join(common.ROOT, "bench", "same_sampler", args.out)
 res = {"what": "Mint's NUTS vs nutpie's NUTS on the same BridgeStan gradient", "versions": {},
-       "settings": {"chains": CHAINS, "warmup": WARMUP, "draws": DRAWS}, "runs": []}
+       "settings": {"chains": CHAINS, "warmup": WARMUP, "draws": DRAWS, "pinned": args.pin}, "runs": []}
 import nutpie  # noqa: E402
 import bridgestan  # noqa: E402
 res["versions"] = {"nutpie": nutpie.__version__, "bridgestan": bridgestan.__version__}
@@ -125,6 +138,9 @@ for seed in args.seeds:
     rng.shuffle(jobs)
     for problem, sampler in jobs:
         before = {"loadavg": common.loadavg(), "cpu_busy_percent": common.cpu_busy(1.0)}
+        if args.pin:
+            PIN, _ = common.quiet_cpus(1, before["cpu_busy_percent"])
+            before["pinned_cpu"] = PIN
         r = run_mint(problem, seed) if sampler == "mint" else run_nutpie(problem, seed)
         r.update({"problem": problem, "sampler": sampler, "seed": seed, "before": before,
                   "us_per_gradient_per_chain": 1e6 * r["wall_seconds"] * CHAINS / r["gradients"],
