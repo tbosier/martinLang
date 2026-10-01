@@ -201,6 +201,13 @@ marginal.
 
 Each has a completion test fixed in advance.
 
+0. **Streaming draws.** The runtime keeps every draw of every parameter in
+   memory today (chains x draws x parameters). It will instead keep running
+   means and variances (and ESS and R-hat inputs) for everything, and full
+   draws only for the quantities a program asks for (hyperparameters,
+   forecasts). Completion test: memory independent of the number of latent
+   parameters at fixed reported output, and the same summaries as the
+   stored-draws path on the existing benchmarks.
 1. **Kalman collapse, Gaussian observations.** Exact small-instance checks
    pass; on S = 100, the posterior of the scales and the held-out forecasts
    agree with the reference within the stated rule; simulation-based
