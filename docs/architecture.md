@@ -352,6 +352,56 @@ these models' log densities are near -1e16 and finite differences fail for
 every build). The measurements are in
 [compiler-round.md](compiler-round.md).
 
+### Narrow data
+
+Data reaches a model through `sample()`, and the generated `init` already
+copies some of it (the scan layout's transposed matrices). It also looks at
+the values: for each data vector or matrix that Mint's own vector kernels
+load (the vectorised scan kernel and the statements it absorbs, and the
+fission kernel), the runtime's `mint_narrow` finds the narrowest of int8,
+int16 and float that holds every value exactly, bit for bit (an integer type
+rejects -0.0, float rejects NaN and keeps infinities, -0.0 and float
+subnormals), and makes a copy in that type. The kernels then load the copy
+and convert in registers (`vpmovsxbd` + `vcvtdq2pd`, or `vcvtps2pd`). Since
+the converted values are the doubles the kernel would have loaded, the
+arithmetic is unchanged and so are the results: the log density, the
+gradient and the draws are byte-identical to the build without it.
+`--no-narrow-data` turns it off and gives the IR of a build without it.
+
+The choice depends on the data, so it is made at run time. `logp` is
+generated in up to four variants (variant 0 reads only doubles), `init`
+records which one this call's data allows, and `sample` hands that variant's
+function pointer to the sampler, so a gradient pays nothing for the choice.
+Each candidate gets the types worth trying for it: a BernoulliLogit outcome
+is checked to be 0 or 1, so only int8; a PoissonLog outcome is checked to be
+counts; other data may be small integers or values exact in float. When the
+variants would exceed four, the less likely types go first (small integers
+in real-valued data, then float and int16 for counts). The logistic model's
+X and y therefore get {double, float} and {double, int8}, the dynamic
+Poisson model's y all four. Each variant is a full copy of `logp` for clang
+to compile: the dynamic Poisson model now takes about 0.55 s to build
+instead of 0.22 s, and the logistic model 0.4 s instead of 0.14 s.
+
+Only vector code (lanes > 1) reads the narrow copy. Scalar loops (leftover
+rows, the fission kernel's last n mod 4 rows, every statement that is not a
+vector kernel) keep reading doubles: LLVM vectorises those, and its choice of
+vector width and interleaving, and with it the order of a reassociated sum,
+could change with the type it loads. `MINT_NARROW=0` makes the runtime pick
+variant 0, `MINT_NARROW=int16` or `float` skips the narrower types, and
+`MINT_NARROW_REPORT=1` prints each choice.
+
+In the benchmark data the counts of the dynamic Poisson model (0 to 76) and
+the 0/1 outcomes of the logistic model narrow to int8; the real-valued
+matrices of the logistic model and Newton's method are not exact in float
+(0 of 10^5 and 0 of 10^7 values). Newton's method is a function, not a
+model, and has no such step. `tests/run.sh` builds 35 cases (the fission
+and scan kernel test models with the original data, with every value
+rounded to float, and at the boundary of each type; the dynamic Poisson and
+logistic models) with and without the rewrite and requires byte-identical
+output under every `MINT_NARROW` setting, on one and three kernel threads,
+plus identical raw draws of four short sampling runs, and checks that each
+case picked the type it is meant to exercise.
+
 ### What was tried and removed
 
 Three restructurings of scan statements were implemented and measured, and all

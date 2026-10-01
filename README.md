@@ -167,12 +167,24 @@ Useful environment variables for compiled programs:
   chain's threads on the CPUs of one L3 cache.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+- `MINT_NARROW=0` keeps a model's kernels on the double data (see below);
+  `MINT_NARROW_REPORT=1` prints which narrow copy each data buffer got.
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
-`--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`, and `--strict-fp`
-(strict IEEE evaluation order, no vector math).
+`--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`,
+`--no-narrow-data`, and `--strict-fp` (strict IEEE evaluation order, no
+vector math).
+
+**Narrow data.** When `sample()` starts, the generated code checks each data
+vector or matrix that the model's vector kernels read, and if every value is
+exactly an int8, int16 or float, the kernels read a copy in that type and
+convert in registers. The results are byte-identical either way. In the
+benchmark data the time-series counts and the logistic 0/1 outcomes narrow
+to int8, which made the time-series gradient about 6% faster; the
+real-valued matrices are not exact in float and stay double. See
+[architecture.md](docs/architecture.md#narrow-data).
 
 ## The language in one page
 
