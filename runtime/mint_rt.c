@@ -231,6 +231,243 @@ static double rng_normal(Rng *r) {
   }
 }
 
+// ---------------------------------------------------------------- Kalman
+// The collapsed likelihood of a latent Gaussian random walk observed with
+// Gaussian noise (see `detect_kalman` in compiler/src/model.rs). For each of
+// G independent series and t = 0..T-1:
+//
+//   x[t] = x[t-1] + e[t],  e[t] ~ N(d[t], q[t])   (x[-1] = 0; q is a variance)
+//   y[t] = a[t] + c x[t] + noise,  noise ~ N(0, r[t])   (r is a variance)
+//
+// mint_kalman_ll returns log p(y | a, d, q, r) with the x integrated out,
+// without the -0.5 log(2 pi) per observation (Mint drops constants), and
+// overwrites a, d, q and r with the gradient of that log density with
+// respect to each of them. Every array is time-major, element (g, t) at
+// t * G + g, so the loops over series are contiguous and vectorise. ws holds
+// 3 G T + 6 G doubles.
+//
+// Forward (per series): mp = m + d, Pp = P + q, F = c^2 Pp + r,
+// v = y - a - c mp, ll += -0.5 log F - 0.5 v^2 / F, K = c Pp / F,
+// m' = mp + K v, P' = Pp r / F (the update in a form that stays positive).
+// Reverse: the adjoint of each line, in the opposite order, with the
+// adjoints of m' and P' carried from the step after (zero after the last).
+//
+// sum_t log F[t] is taken as the log of a running product per series whose
+// binary exponent is moved into an integer counter at every step (exact),
+// so the loop needs no log call; if any F is outside [2^-1022, 2^1022] the
+// sum is recomputed with log (a zero, infinite or NaN F then gives NaN).
+// The forward pass stores 1/F, so the reverse pass divides by nothing.
+
+static inline double kal_split(double x, int64_t *e) {
+  uint64_t b;
+  memcpy(&b, &x, sizeof b);
+  *e += (int64_t)((b >> 52) & 0x7ff) - 1023;
+  b = (b & 0x800fffffffffffffull) | 0x3ff0000000000000ull;
+  memcpy(&x, &b, sizeof b);
+  return x;
+}
+
+double mint_kalman_ll(int64_t G, int64_t T, double c, const double *restrict y, double *restrict a,
+                      double *restrict d, double *restrict q, double *restrict r, double *restrict ws) {
+  // per element: Pp, 1/F and v, for the reverse pass
+  double *restrict PPs = ws, *restrict IFs = ws + G * T, *restrict VVs = ws + 2 * G * T;
+  double *restrict m = ws + 3 * G * T, *restrict P = m + G, *restrict prod = P + G;
+  double *restrict mb = prod + G, *restrict pb = mb + G;
+  int64_t *restrict ex = (int64_t *)(pb + G);
+  double c2 = c * c, quad = 0.0;
+  int bad = 0;
+  for (int64_t g = 0; g < G; g++) m[g] = 0.0, P[g] = 0.0, prod[g] = 1.0, ex[g] = 0;
+  for (int64_t t = 0; t < T; t++) {
+    const int64_t o = t * G;
+#pragma omp simd reduction(+ : quad) reduction(| : bad)
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double mp = m[g] + d[i], Pp = P[g] + q[i];
+      double F = c2 * Pp + r[i];
+      double v = y[i] - a[i] - c * mp;
+      double iF = 1.0 / F;
+      quad += v * v * iF;
+      bad |= !(F >= 0x1p-1022 && F <= 0x1p+1022);  // so that prod * F stays normal
+      double K = c * Pp * iF;
+      m[g] = mp + K * v;
+      P[g] = Pp * r[i] * iF;
+      prod[g] = kal_split(prod[g] * F, &ex[g]);
+      PPs[i] = Pp, IFs[i] = iF, VVs[i] = v;
+    }
+  }
+  double logdet = 0.0;
+  if (!bad) {
+    int64_t esum = 0;
+    for (int64_t g = 0; g < G; g++) logdet += log(prod[g]), esum += ex[g];
+    logdet += (double)esum * 0.69314718055994530942;
+  } else {
+    for (int64_t i = 0; i < G * T; i++) logdet += log(c2 * PPs[i] + r[i]);  // F (r is still the input)
+  }
+  for (int64_t g = 0; g < G; g++) mb[g] = 0.0, pb[g] = 0.0;
+  for (int64_t t = T - 1; t >= 0; t--) {
+    const int64_t o = t * G;
+#pragma omp simd
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double Pp = PPs[i], iF = IFs[i], v = VVs[i], rr = r[i];
+      double K = c * Pp * iF;
+      double mbar = mb[g], pbar = pb[g];
+      double Kb = mbar * v;
+      double vb = mbar * K - v * iF;
+      double mpb = mbar;
+      // P' = Pp r / F
+      double Ppb = pbar * rr * iF;
+      double rb = pbar * Pp * iF;
+      double Fb = -pbar * Pp * rr * iF * iF;
+      // K = c Pp / F
+      Ppb += Kb * c * iF;
+      Fb -= Kb * K * iF;
+      // ll = -0.5 log F - 0.5 v^2 / F
+      Fb += 0.5 * iF * (v * v * iF - 1.0);
+      // v = y - a - c mp
+      double ab = -vb;
+      mpb -= c * vb;
+      // F = c^2 Pp + r
+      Ppb += c2 * Fb;
+      rb += Fb;
+      // Pp = P + q, mp = m + d
+      mb[g] = mpb, pb[g] = Ppb;
+      a[i] = ab, d[i] = mpb, q[i] = Ppb, r[i] = rb;
+    }
+  }
+  return -0.5 * (logdet + quad);
+}
+
+// The same when q and r are the same for every series (they depend on time
+// at most: the compiler proved it from the expressions), so that q and r
+// hold T values: the variances (the Riccati recursion: Pp, F, K, P) are
+// then computed once per time step instead of once per series, and only
+// the means are filtered per series. Gradients: a and d per element as
+// above, q[t] and r[t] summed over the series. ws holds G T + 2 G + 3 T
+// doubles.
+double mint_kalman_ll_shared(int64_t G, int64_t T, double c, const double *restrict y, double *restrict a,
+                             double *restrict d, double *restrict q, double *restrict r, double *restrict ws) {
+  double *restrict VVs = ws, *restrict m = ws + G * T, *restrict mb = m + G;
+  double *restrict PPt = mb + G, *restrict IFt = PPt + T, *restrict Kt = IFt + T;
+  double c2 = c * c, P = 0.0, logdet = 0.0, quad = 0.0;
+  for (int64_t t = 0; t < T; t++) {
+    double Pp = P + q[t], F = c2 * Pp + r[t], iF = 1.0 / F;
+    PPt[t] = Pp, IFt[t] = iF, Kt[t] = c * Pp * iF;
+    P = Pp * r[t] * iF;
+    logdet += log(F);
+  }
+  for (int64_t g = 0; g < G; g++) m[g] = 0.0, mb[g] = 0.0;
+  for (int64_t t = 0; t < T; t++) {
+    const int64_t o = t * G;
+    const double K = Kt[t];
+    double vv = 0.0;
+#pragma omp simd reduction(+ : vv)
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double mp = m[g] + d[i];
+      double v = y[i] - a[i] - c * mp;
+      m[g] = mp + K * v;
+      vv += v * v;
+      VVs[i] = v;
+    }
+    quad += vv * IFt[t];
+  }
+  double pbar = 0.0;  // adjoint of the filtered variance P[t] (shared)
+  for (int64_t t = T - 1; t >= 0; t--) {
+    const int64_t o = t * G;
+    const double K = Kt[t], iF = IFt[t], Pp = PPt[t], rr = r[t];
+    double Kb = 0.0, vv = 0.0;
+#pragma omp simd reduction(+ : Kb, vv)
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double mbar = mb[g], v = VVs[i];
+      Kb += mbar * v;
+      vv += v * v;
+      double vb = mbar * K - v * iF;
+      mb[g] = mbar - c * vb;
+      a[i] = -vb, d[i] = mbar - c * vb;
+    }
+    // the shared recursion's adjoints, as in mint_kalman_ll, summed over series
+    double Ppb = pbar * rr * iF + Kb * c * iF;
+    double rb = pbar * Pp * iF;
+    double Fb = -pbar * Pp * rr * iF * iF - Kb * K * iF + 0.5 * iF * (vv * iF - (double)G);
+    Ppb += c2 * Fb;
+    rb += Fb;
+    pbar = Ppb;
+    q[t] = Ppb, r[t] = rb;
+  }
+  return -0.5 * ((double)G * logdet + quad);
+}
+
+// Forward filtering, backward sampling: one draw of the latent paths given
+// the same inputs (not modified), written as increments e[t] = x[t] - x[t-1]
+// (time-major like the inputs). rng is the sampler's per-chain stream for
+// these draws (an Rng). With `shared`, q and r hold T values as for
+// mint_kalman_ll_shared. ws as for mint_kalman_ll.
+void mint_kalman_ffbs(int64_t G, int64_t T, double c, const double *restrict y, const double *restrict a,
+                      const double *restrict d, const double *restrict q, const double *restrict r,
+                      int64_t shared, double *restrict ws, void *rng, double *restrict e) {
+#define KQ(i) q[shared ? (i) / G : (i)]
+#define KR(i) r[shared ? (i) / G : (i)]
+  double *restrict Ms = ws, *restrict Ps = ws + G * T;
+  double *restrict m = ws + 3 * G * T, *restrict P = m + G, *restrict x = P + G;
+  double c2 = c * c;
+  for (int64_t g = 0; g < G; g++) m[g] = 0.0, P[g] = 0.0;
+  for (int64_t t = 0; t < T; t++) {
+    const int64_t o = t * G;
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double mp = m[g] + d[i], Pp = P[g] + KQ(i);
+      double F = c2 * Pp + KR(i);
+      double v = y[i] - a[i] - c * mp;
+      double iF = 1.0 / F;
+      m[g] = mp + c * Pp * iF * v;
+      P[g] = Pp * KR(i) * iF;
+      Ms[i] = m[g], Ps[i] = P[g];
+    }
+  }
+  Rng *R = rng;
+  for (int64_t t = T - 1; t >= 0; t--) {
+    const int64_t o = t * G;
+    for (int64_t g = 0; g < G; g++) {
+      int64_t i = o + g;
+      double mean = Ms[i], var = Ps[i];
+      if (t < T - 1) {
+        // x[t] | x[t+1], y[0..t]: Pp1 = P[t] + q[t+1], J = P[t] / Pp1
+        double q1 = KQ(i + G), Pp1 = var + q1;
+        if (Pp1 > 0.0) {
+          double J = var / Pp1;
+          mean += J * (x[g] - mean - d[i + G]);
+          var = var * q1 / Pp1;
+        } else {
+          var = 0.0;
+        }
+      }
+      double xt = mean + sqrt(var > 0.0 ? var : 0.0) * rng_normal(R);
+      if (t < T - 1) e[i + G] = x[g] - xt;
+      x[g] = xt;
+    }
+  }
+  for (int64_t g = 0; g < G; g++) e[g] = x[g];
+#undef KQ
+#undef KR
+}
+
+// A model with collapsed parameters (mintc's Kalman collapse): NUTS runs
+// over the remaining D parameters, and for each kept draw `fn` writes the
+// whole constrained draw (d_out values, in the user's order, the collapsed
+// ones drawn by mint_kalman_ffbs from the rng it is given). Registered by
+// the generated sample function before it calls mint_sample (0 / NULL: no
+// collapse; the Rust baselines never set it).
+typedef void (*mint_collapse_fn)(const double *unc, double *out, void *rng);
+static mint_collapse_fn model_collapse;
+static int64_t model_d_out, model_n_latent;
+void mint_set_collapsed(int64_t d_out, mint_collapse_fn fn, int64_t n_latent) {
+  model_collapse = fn;
+  model_d_out = d_out;
+  model_n_latent = n_latent;
+}
+
 // ---------------------------------------------------------------- NUTS
 // Multinomial NUTS with the generalised no-U-turn criterion, diagonal metric
 // and Stan's windowed warmup (step-size dual averaging plus metric windows).
@@ -1508,7 +1745,8 @@ typedef struct {
   mint_leap_blocks_fn leap_blocks;
   int leap_mode;  // 0: off, 2: on, 3: on with exact sums
   mint_constrain_fn constrain;
-  int64_t D, draws, warmup;
+  mint_collapse_fn collapse;  // non-NULL: writes d_out-long draws instead of constrain
+  int64_t D, d_out, draws, warmup;
   uint64_t seed;
   int chain;
   int threads_per_chain;
@@ -1544,6 +1782,10 @@ static void *run_chain(void *arg) {
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
   rng_seed(&s->rng, job->seed * 0x9E3779B97F4A7C15ull + (uint64_t)job->chain + 1);
+  // a separate stream for the draws of collapsed parameters, so that the
+  // sampler's own stream (and so its draws) do not depend on them
+  Rng crng;
+  rng_seed(&crng, (job->seed * 0x9E3779B97F4A7C15ull + (uint64_t)job->chain + 1) ^ 0xC2B2AE3D27D4EB4Full);
   for (int d = 0; d <= MAX_DEPTH; d++) {
     Level *L = &s->lv[d];
     L->rho_init = mint_alloc(D);
@@ -1664,7 +1906,10 @@ static void *run_chain(void *arg) {
                            (long long)it, (long long)s->n_grad, s->eps);
       }
     } else {
-      job->constrain(q, job->out + (it - warmup) * D);
+      if (job->collapse)
+        job->collapse(q, job->out + (it - warmup) * job->d_out, &crng);
+      else
+        job->constrain(q, job->out + (it - warmup) * D);
       total_leapfrog += s->n_leapfrog;
       job->divergent += s->divergent;
     }
@@ -1758,8 +2003,22 @@ void mint_set_layout(mint_permute_fn to_internal, mint_permute_fn to_user) {
 
 // The benchmark point is defined in the user's order, so every implementation
 // evaluates the same point whatever its internal layout.
+// MINT_THETA=FILE (a .f64 file of D values, unconstrained, in the user's
+// order) replaces it, for tests that need the log density elsewhere.
 static void bench_point(double *theta, int64_t D) {
   for (int64_t i = 0; i < D; i++) theta[i] = 0.05 * (double)((i * 37) % 11 - 5) / 5.0;
+  const char *tf = getenv("MINT_THETA");
+  if (tf) {
+    int64_t n;
+    double *v = mint_read_vector(tf, &n);
+    if (n != D) {
+      fprintf(stderr, "mint runtime error: MINT_THETA has %lld values, the model has %lld parameters\n",
+              (long long)n, (long long)D);
+      exit(1);
+    }
+    memcpy(theta, v, (size_t)D * sizeof(double));
+    free(v);
+  }
   if (layout_to_internal) {
     double *t = mint_alloc(D);
     layout_to_internal(theta, t);
@@ -1934,7 +2193,8 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
 }
 
 typedef struct {
-  int64_t D, draws, chains, nparams;
+  int64_t D, draws, chains, nparams;  // D: values per draw (with any collapsed parameters)
+  int64_t D_sampled, n_latent;        // the dimension NUTS ran in; latent scalars collapsed
   char **labels;  // D labels
   char **block_name;
   int64_t *block_start, *block_len;  // per parameter: first flat index, element count
@@ -2075,10 +2335,13 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   const char *lenv = getenv("MINT_FUSED_LEAPFROG");
   int leap_mode = !lenv ? 2 : strcmp(lenv, "0") == 0 ? 0 : strcmp(lenv, "exact") == 0 ? 3 : 2;
 
+  // With collapsed parameters each draw has more values than NUTS's D.
+  int64_t D_out = model_collapse ? model_d_out : D;
   MintPosterior *post = calloc(1, sizeof *post);
-  post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;
-  post->draw = mint_alloc(chains * draws * D);
-  post->labels = calloc((size_t)D, sizeof(char *));
+  post->D = D_out, post->draws = draws, post->chains = chains, post->nparams = nparams;
+  post->D_sampled = D, post->n_latent = model_collapse ? model_n_latent : 0;
+  post->draw = mint_alloc(chains * draws * D_out);
+  post->labels = calloc((size_t)D_out, sizeof(char *));
   int64_t k = 0;
   post->block_name = calloc((size_t)nparams, sizeof(char *));
   post->block_start = calloc((size_t)nparams, sizeof(int64_t));
@@ -2089,18 +2352,18 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     post->block_start[j] = k;
     post->block_len[j] = sizes[j] < 0 ? 1 : sizes[j];
     if (sizes[j] < 0) {
-      if (k < D) post->labels[k] = strdup(names[j]);
+      if (k < D_out) post->labels[k] = strdup(names[j]);
       k++;
       continue;
     }
     for (int64_t i = 0; i < sizes[j]; i++) {
       char buf[128];
       snprintf(buf, sizeof buf, "%s[%lld]", names[j], (long long)(i + 1));
-      if (k < D) post->labels[k] = strdup(buf);
+      if (k < D_out) post->labels[k] = strdup(buf);
       k++;
     }
   }
-  if (k != D) mint_panic("sample: parameter sizes do not add up to the model dimension");
+  if (k != D_out) mint_panic("sample: parameter sizes do not add up to the model dimension");
 
   // Threads per chain for the sampler's D-length passes. Splitting only pays
   // off when D is large; the default gives each chain about (physical cores /
@@ -2142,7 +2405,9 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .leap_blocks = model_leap_blocks,
                          .leap_mode = leap_mode,
                          .constrain = constrain,
+                         .collapse = model_collapse,
                          .D = D,
+                         .d_out = D_out,
                          .draws = draws,
                          .warmup = warmup,
                          .seed = (uint64_t)seed,
@@ -2151,7 +2416,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .l3 = n_l3 > 1 ? &l3[c % n_l3] : NULL,
                          .cfg = &cfg,
                          .pool = pool_p,
-                         .out = post->draw + c * draws * D};
+                         .out = post->draw + c * draws * D_out};
     if (chains == 1) {
       run_chain(&jobs[c]);
     } else if (pthread_create(&th[c], NULL, run_chain, &jobs[c]) != 0) {
@@ -2185,9 +2450,9 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   if (dump) {  // raw constrained draws: u64 chains, draws, D, then chains x draws x D f64
     FILE *f = fopen(dump, "wb");
     if (!f) mint_panic("cannot open MINT_DRAWS file");
-    uint64_t hdr[3] = {(uint64_t)chains, (uint64_t)draws, (uint64_t)D};
+    uint64_t hdr[3] = {(uint64_t)chains, (uint64_t)draws, (uint64_t)D_out};
     fwrite(hdr, sizeof hdr[0], 3, f);
-    fwrite(post->draw, sizeof(double), (size_t)(chains * draws * D), f);
+    fwrite(post->draw, sizeof(double), (size_t)(chains * draws * D_out), f);
     fclose(f);
   }
   return post;
@@ -2283,6 +2548,11 @@ void mint_print_posterior(MintPosterior *p) {
           !p->n_fused ? "runtime" : p->leapfrog == 2 ? "fused-exact" : "fused");
   if (p->n_fused) fprintf(stderr, " (%lld of %lld gradients)", (long long)p->n_fused, (long long)p->n_grad);
   fprintf(stderr, "\n");
+  if (p->D_sampled != p->D)
+    fprintf(stderr,
+            "collapsed: NUTS sampled %lld of the %lld parameters; %lld latent scalars were integrated out by a Kalman "
+            "filter and drawn for each kept draw by forward filtering, backward sampling\n",
+            (long long)p->D_sampled, (long long)p->D, (long long)p->n_latent);
 }
 
 // Posterior mean of flat component j (0-based), used by generated code.

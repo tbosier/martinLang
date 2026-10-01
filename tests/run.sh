@@ -14,11 +14,17 @@ bad()  { echo "FAIL  $1"; fail=1; }
 mkdir -p build
 clang -O3 -march=native -fopenmp -c runtime/mint_rt.c -o build/mint_rt.o || { echo "FAIL  runtime build"; exit 1; }
 
-# build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary
+# build SRC OUT [flags...]: removes OUT first so a failed build cannot leave a stale binary.
+# Every build gets $DEFAULT_FLAGS first. Until the Kalman section at the end
+# that is --no-collapse: several scan-kernel, parallel-kernel, fused-leapfrog
+# and narrow-data test models are Gaussian random walks, which the Kalman
+# collapse would otherwise integrate out, and they are there to test the
+# code that samples them as written.
+DEFAULT_FLAGS=--no-collapse
 build() {
   local src=$1 out=$2; shift 2
   rm -f "build/$out"
-  $M build "$src" -o "build/$out" "$@" 2>build/$out.log || { bad "build $src $*"; cat build/$out.log; return 1; }
+  $M build "$src" -o "build/$out" $DEFAULT_FLAGS "$@" 2>build/$out.log || { bad "build $src $*"; cat build/$out.log; return 1; }
 }
 build_rust() {
   rm -f "build/rs_$1"
@@ -637,5 +643,80 @@ serial=$(MINT_THREADS_PER_CHAIN=1 ./build/eight_schools 2>/dev/null)
 limited=$(MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/eight_schools 2>/dev/null)
 [ -n "$serial" ] && [ "$serial" = "$limited" ] && pass "sampler follows a reduced OpenMP team" \
   || bad "reduced OpenMP team changed the draws"
+
+
+# ---- Kalman collapse. A latent Gaussian random walk observed with Gaussian
+# noise is integrated out; NUTS samples the rest, and the walk is drawn back
+# by forward filtering, backward sampling. Exact: on small panels (2 x 5,
+# 3 x 7, 9 x 4) the compiled log density and gradient equal a dense
+# Gaussian computation (the walk integrated out analytically in numpy) and
+# pass finite differences, for six models (centred and non-centred, a shared
+# drift, per-series scales, every filter input depending on parameters, and
+# a second matrix in the scan layout). Statistical: the draws of every
+# quantity (remaining parameters and every innovation) agree with full NUTS
+# (--no-collapse) within Monte Carlo error, three seeds each, on four of
+# those models.
+DEFAULT_FLAGS=
+python3 tests/kalman/check_marginal.py $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'
+[ ${PIPESTATUS[0]} -eq 0 ] || fail=1
+python3 tests/kalman/compare_posterior.py $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'
+[ ${PIPESTATUS[0]} -eq 0 ] || fail=1
+
+# What is not collapsed, and why: the model must still build (it is sampled
+# as written) and mintc must say why. --no-collapse turns the collapse off.
+not_collapsed() { # label why model-body
+  printf 'model W {\n    data y: Matrix[G, T]\n    param s: Positive\n    param innov: Matrix[G, T]\n    s ~ Normal(0, 1)\n%s\n}\nfn main() {\n    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")\n    print(sample(W(y), draws = 10, warmup = 10, chains = 1))\n}\n' "$3" > build/kal_not_$1.mint
+  out=$($M build build/kal_not_$1.mint -o build/kal_not_$1 2>&1) || { bad "kalman eligibility $1: build failed"; echo "$out"; return; }
+  if grep -qF "collapsed innov" <<<"$out" || ! grep -qF -- "innov was not integrated out: $2" <<<"$out"; then
+    bad "kalman eligibility $1"; echo "$out"
+  else
+    pass "kalman eligibility: $1 is sampled as written ($2)"
+  fi
+}
+not_collapsed nonlinear "the observation's mean must be" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(exp(cumsum(innov, T)), s)'
+not_collapsed squared "inside the running sum it must enter linearly" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov .* innov, T), s)'
+not_collapsed reused "it appears in 3 statements" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov, T), s)
+    y ~ Normal(innov, 1)'
+not_collapsed poisson "its observation is PoissonLog, not Normal" '    innov ~ Normal(0, 0.1)
+    y ~ PoissonLog(cumsum(innov, T))'
+not_collapsed prior_depends "its prior must be" '    innov ~ Normal(0.1 * cumsum(innov, T), 0.1)
+    y ~ Normal(cumsum(innov, T), s)'
+not_collapsed other_scan "the other terms contain a running sum" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov, T) + cumsum(y, T), s)'
+# (a scale that depends on the walk: only a vector can say so, since the
+# checker proves exp(...) Positive for vectors, not matrices)
+printf 'model V {\n    data y: Vector[T]\n    param innov: Vector[T]\n    innov ~ Normal(0, 0.1)\n    y ~ Normal(cumsum(innov), exp(innov))\n}\nfn main() {\n    let y: Vector[T] = read("data/linear_y.f64")\n    print(sample(V(y), draws = 10, warmup = 10, chains = 1))\n}\n' > build/kal_not_scale.mint
+out=$($M build build/kal_not_scale.mint -o build/kal_not_scale 2>&1) && ! grep -qF "collapsed innov" <<<"$out" \
+  && grep -qF "innov was not integrated out: the observation's scale depends on it" <<<"$out" \
+  && pass "kalman eligibility: scale is sampled as written (the observation's scale depends on it)" \
+  || { bad "kalman eligibility scale"; echo "$out"; }
+# A collapse next to a fused scan kernel (tests/scan/twoowned.mint: w is
+# integrated out; u, which shares its running sum, stays a NUTS parameter and
+# now also gets gradient from the filter, after every kernel, so no kernel
+# may own it): with the fused leapfrog, one fused leaf must match the
+# runtime's, and the gradient must pass finite differences.
+sed "s/NG/13/" tests/scan/twoowned.mint > build/kal_twoowned.mint
+if build build/kal_twoowned.mint kal_twoowned --fused-leapfrog; then
+  grep -qF "collapsed w (G x T latent scalars)" build/kal_twoowned.log && grep -qF "u was not integrated out" build/kal_twoowned.log \
+    && pass "kalman next to a fused scan kernel: w collapsed, u kept" || { bad "kalman twoowned: collapse report"; cat build/kal_twoowned.log; }
+  for t in 1 3; do
+    out=$(MINT_KERNEL_THREADS=$t MINT_LEAP_TEST=1 ./build/kal_twoowned 2>&1)
+    grep -q "leap-test: ok" <<<"$out" && pass "kalman next to a fused scan kernel: fused leaf matches ($t kernel threads)" \
+      || { bad "kalman twoowned leap test ($t kernel threads)"; echo "$out" | tail -3; }
+  done
+  gradcheck kal_twoowned "kalman next to a fused scan kernel"
+fi
+build examples/random_walk_panel.mint rwp_full --no-collapse && ! grep -q "collapsed" build/rwp_full.log \
+  && MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp_full | python3 -c "
+import sys; g = sys.stdin.read().split('grad:')[1].split(); sys.exit(0 if len(g) == 20 + 3 + 20 * 150 else 1)" \
+  && pass "--no-collapse: no collapse, NUTS sees all 3,023 parameters" || bad "--no-collapse"
+build examples/random_walk_panel.mint rwp && grep -qF "collapsed innov (G x T latent scalars)" build/rwp.log \
+  && out=$(./build/rwp 2>&1) && grep -qF "NUTS sampled 23 of the 3023 parameters; 3000 latent scalars" <<<"$out" \
+  && grep -qE "^innov +2997 more entries" <<<"$out" \
+  && pass "random_walk_panel: NUTS samples 23 parameters, the 3,000 innovations come back as draws" \
+  || { bad "random_walk_panel collapse"; cat build/rwp.log; echo "$out" | tail -5; }
 
 exit $fail
