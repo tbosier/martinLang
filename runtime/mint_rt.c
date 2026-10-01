@@ -315,6 +315,7 @@ typedef struct {
   Level lv[MAX_DEPTH + 1];
   int64_t n_leapfrog;
   int64_t n_grad;
+  int64_t n_fused;  // leaves that ran through the fused leapfrog
   double sum_metro;
   int divergent;
   int depth;
@@ -447,7 +448,8 @@ static void leapfrog_into(Nuts *s, const St *z, St *n, double eps) {
 // each thread's range starts at a multiple of LN and the threads' totals are
 // added in thread order. The result therefore does not depend on how a pass
 // is blocked or fused, or on the compiler's vectorisation; it does depend on
-// the number of threads.
+// the number of threads. The fused leapfrog (leaf_fused) sums in another
+// order: see there.
 #define LN 8
 #define CHUNK 512  // block of the fused leaf pass, a multiple of LN
 
@@ -781,9 +783,10 @@ static double leaf_finish(Nuts *s, St *n, double eps) {
 // with the leaf work on each fused scan kernel's rows done by the kernel's
 // threads through the hook (leaf_slab), and on the rest of theta here,
 // after it. The partial sums are added in slot order: the kernel's
-// threads, the kernel's calling thread, the rest. That order differs from
-// leaf_pass's, so the draws differ from the runtime's own leapfrog by
-// rounding. With s->leap_exact the hooks and the rest take only the
+// threads, the kernel's calling thread, the rest. Within a hook call the
+// lanes run along each run of rows, from the run's first element (not by
+// index modulo LN). That order differs from leaf_pass's, so the draws
+// differ from the runtime's own leapfrog by rounding. With s->leap_exact the hooks and the rest take only the
 // half-steps, and a leaf pass then sums in leaf_pass's order, which gives
 // exactly the runtime's draws (for testing). Returns the Hamiltonian.
 static void leaf_fused_run(Nuts *s, LeafJob *J) {
@@ -795,6 +798,7 @@ static void leaf_fused_run(Nuts *s, LeafJob *J) {
   memset(s->part[SLOT_REST], 0, (size_t)nsum * sizeof(double));
   n->lp = s->leap(n->q, n->g, leaf_slab, J);
   s->n_grad++;
+  s->n_fused++;
   {
     double k[LN] = {0};
     double acc[MAX_DEPTH + 2][6][LN];
@@ -824,6 +828,8 @@ static double leaf_fused(Nuts *s, St *n, double eps) {
 
 // The ranges of theta that no fused-leapfrog block covers, into s->other.
 static void leap_other(Nuts *s, mint_leap_blocks_fn blocks) {
+  // the generated code writes at most MAX_LEAP_BLOCKS blocks (LEAP_MAX_BLOCKS
+  // in compiler/src/model.rs)
   int64_t D = s->D, blk[2 * MAX_LEAP_BLOCKS];
   int64_t nb = blocks(blk);
   if (nb < 1 || nb > MAX_LEAP_BLOCKS) mint_panic("internal error: fused leapfrog blocks");
@@ -1231,7 +1237,7 @@ typedef struct {
   int team_min;
   double *out;  // draws x D, constrained
   double step_size;
-  int64_t n_grad, divergent;
+  int64_t n_grad, divergent, n_fused;
   double mean_leapfrog;
 } ChainJob;
 
@@ -1357,6 +1363,7 @@ static void *run_chain(void *arg) {
   }
   job->step_size = s->eps;
   job->n_grad = s->n_grad;
+  job->n_fused = s->n_fused;
   job->team_min = s->team_min;
   if (bound) restore_team(s->nt);
   job->mean_leapfrog = job->draws ? (double)total_leapfrog / (double)job->draws : 0;
@@ -1555,7 +1562,11 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
     d[5] = memcmp(&na->lp, &nb->lp, sizeof(double)) != 0;
     double big = 0, worst = 0;
     for (int j = 0; j < 7; j++) big = fmax(big, fabs(sums[0][j]));
-    for (int j = 0; j < 7; j++) worst = fmax(worst, fabs(sums[0][j] - sums[1][j]) / big);
+    for (int j = 0; j < 7; j++) {
+      double e = fabs(sums[0][j] - sums[1][j]) / big;
+      if (!isfinite(sums[0][j]) || !isfinite(sums[1][j]) || isnan(e)) e = INFINITY;  // fmax drops NaN
+      worst = fmax(worst, e);
+    }
     printf("leap-test: threads=%d eps=%g elements that differ: gradient %lld, momentum %lld, next momentum %lld, "
            "next position %lld, merged momentum %lld; logp differs %lld; kinetic energy %.17g fused %.17g; "
            "largest sum difference %.3g of the largest sum\n",
@@ -1615,7 +1626,8 @@ typedef struct {
   int64_t n_grad, divergent;
   double *step_size, *mean_leapfrog;
   int threads_per_chain, team_min, grad_metric;
-  int leapfrog;  // whether the fused leapfrog ran (1), with exact sums (2), or not (0)
+  int leapfrog;     // the fused leapfrog was enabled (1), with exact sums (2), or not (0)
+  int64_t n_fused;  // leaves that ran through it
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -1823,6 +1835,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   for (int64_t c = 0; c < chains; c++) {
     if (jobs[c].team_min < post->team_min) post->team_min = jobs[c].team_min;
     post->n_grad += jobs[c].n_grad;
+    post->n_fused += jobs[c].n_fused;
     post->divergent += jobs[c].divergent;
     post->step_size[c] = jobs[c].step_size;
     post->mean_leapfrog[c] = jobs[c].mean_leapfrog;
@@ -1923,9 +1936,12 @@ void mint_print_posterior(MintPosterior *p) {
   printf("\n");
   fprintf(stderr, "sampling took %.6f s (%.0f ns per gradient incl. sampler); preparation took %.6f s\n",
           p->seconds, 1e9 * p->seconds / (double)(p->n_grad ? p->n_grad : 1), prep_seconds);
-  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s leapfrog=%s\n",
+  // the leapfrog as it ran: "fused" only when leaves went through it
+  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s leapfrog=%s",
           p->threads_per_chain, p->team_min, p->grad_metric ? "grad" : "stan",
-          p->leapfrog == 2 ? "fused (exact sums)" : p->leapfrog ? "fused" : "runtime");
+          !p->n_fused ? "runtime" : p->leapfrog == 2 ? "fused-exact" : "fused");
+  if (p->n_fused) fprintf(stderr, " (%lld of %lld gradients)", (long long)p->n_fused, (long long)p->n_grad);
+  fprintf(stderr, "\n");
 }
 
 // Posterior mean of flat component j (0-based), used by generated code.

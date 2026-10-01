@@ -159,6 +159,9 @@ A `model` block becomes four LLVM functions:
   Positive parameters.
 - `init` computes the precomputed statistics.
 - `sample` calls the runtime's NUTS.
+- With a fused scan kernel that owns a matrix parameter, also `leap`, the
+  log density with a hook for the sampler (see the fused leapfrog in the
+  Runtime section), and `leap_blocks`.
 
 The gradient is produced by reverse-mode differentiation *at compile time*,
 per observation:
@@ -467,6 +470,50 @@ is checked against the exact formula at both sizes.
   (`OMP_DYNAMIC`) or a chain gets a smaller team than asked for, and each
   thread's previous mask is restored when the chain ends.
   `MINT_CHAIN_AFFINITY=0` turns it off.
+- **Fused leapfrog** (`--no-fused-leapfrog` in the compiler,
+  `MINT_FUSED_LEAPFROG=0` at run time). The leaf pass splits D into
+  contiguous ranges, but the fused scan kernel splits a column-major
+  matrix parameter by groups of eight rows, so every thread's kernel rows
+  are spread over the whole parameter: each leapfrog, the gradient the
+  kernel threads wrote crossed to the other cores for the leaf pass, and
+  the position the leaf pass wrote crossed back for the next gradient, with
+  two fork/joins per leaf. When a fused scan kernel owns a matrix
+  parameter, the compiler now also emits `leap(theta, grad, hook, hctx)`,
+  the log density with a hook: each kernel thread, once its groups are
+  done (their gradient is final), calls the runtime's `leaf_slab` on its
+  own rows of every column, and the leaf work on those elements (second
+  half-step, the next leaf's first half-step, kinetic energy, merges) runs
+  there, in the kernel's parallel region, on data that thread wrote and will
+  read again. `leap_blocks` tells the runtime which parts of theta the hooks
+  cover (at most 64 parameters; any further ones are left to the runtime);
+  the calling thread does the rest (the other parameters, 401 elements on
+  the large model) after the gradient. So in the leaves that take this path
+  each element of a covered parameter is touched by one core only, and the
+  leaf's work needs no parallel region besides the kernel's (one per fused
+  scan statement). Not every leaf takes it: the first leaf after the end of
+  a trajectory's new subtree has no half-step taken ahead, and its first
+  half-step is still a parallel pass split by index ranges (`leaf_start`),
+  as before. The runtime uses the fused leapfrog when a chain has more than
+  one thread (`MINT_FUSED_LEAPFROG=1` also for serial chains) and reports
+  how many gradients went through it. Every stored value has exactly the
+  arithmetic of the unfused leaf pass (it is the same C code); the sums
+  (kinetic energy, the merges' checks) are added in another order: lanes
+  along each thread's run of rows in each column, from the run's first
+  element, the threads' totals in thread order, then the calling thread's
+  rows, then the other parameters. Draws therefore differ by rounding from
+  the unfused path and then diverge; the fixed-order guarantee below holds
+  for the unfused path. `MINT_FUSED_LEAPFROG=exact` does only the
+  half-steps in the hooks and the sums in a leaf pass of the usual order;
+  its draws are bit-identical to `=0`. `tests/run.sh` checks that on a scan
+  test model (nested, 61 series) and the small dynamic Poisson model, each
+  with 1 and 3 threads per chain, and on the large model with 3; there it
+  also checks that the default fused path ran and is deterministic. With
+  `MINT_LEAP_TEST` it compares one fused leaf with a merge against the
+  unfused one (state bit-identical, sums to 1e-12 of the largest) on 1 and
+  3 kernel threads, for each scan test model that has a covered parameter
+  (all but two: a running sum of data only, and a matrix shared by two scan
+  statements, which neither kernel owns), at 7 to 61 series; one of them
+  has three covered parameters in two kernels.
 - **Fixed summation order.** Every sum over D in the leaf passes (kinetic
   energy, no-U-turn checks) is accumulated in 8 lanes
   (element i in lane i mod 8, each lane in index order, lanes combined in a
@@ -479,7 +526,7 @@ is checked against the exact formula at both sizes.
   bit-identical draws to the unfused one with the same sums (Stan's control
   flow, separate merges) on eight schools (which has divergent transitions),
   logistic and linear regression and the dynamic Poisson model, serial and
-  with 3 threads per chain; `tests/run.sh` does not re-check that.
+  with 3 threads per chain; `tests/run.sh` does not re-check that. (The fused leapfrog, above, sums in another order.)
 - **Speedups.** A whole 4-chain, 1000 + 1000 run went from 15.3 s to 8.3 s at
   3,171 dimensions (1.8x) and from 1448 s to 278 to 325 s at 37,901 dimensions
   (4.5 to 5.2x, depending on the run; 2.1x from the reference-counted states

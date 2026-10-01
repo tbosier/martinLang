@@ -299,7 +299,7 @@ par_check() { # NAME SOURCE par|serial
     || bad "parallel scan kernel $n: 1 thread differs from --no-parallel-kernel"
   [ "$want" = par ] && close_grad build/par_${n}_t3.out build/par_${n}_t1.out "parallel scan kernel $n: 3 threads match 1 thread"
 }
-for m in nested mixed nested_sq colreuse twohosts layout_draws bernoulli datascan; do
+for m in nested mixed nested_sq colreuse twohosts twoowned layout_draws bernoulli datascan; do
   want=par
   case $m in bernoulli|datascan) want=serial ;; esac
   for G in 7 13 20 61; do
@@ -343,11 +343,14 @@ fi
 # bit-identical and the kinetic energy and merge sums equal to 1e-12, on 1
 # and 3 kernel threads. Models with nothing to cover (a running sum of data
 # only; a matrix parameter shared by two scan statements, which neither
-# kernel owns) and --no-fused-leapfrog builds must not have the entry point. In
-# whole runs, MINT_FUSED_LEAPFROG=exact (the fused leaf work with the sums
-# in the runtime's order) must give exactly the draws of
-# MINT_FUSED_LEAPFROG=0, serial and with 3 threads per chain; the default
-# fused sums must be deterministic.
+# kernel owns) and --no-fused-leapfrog builds must not have the entry point;
+# twoowned has three covered parameters in two kernels. In whole runs
+# (nested at 61 series, the small dynamic Poisson model), with 1 and 3
+# threads per chain, MINT_FUSED_LEAPFROG=exact (the fused leaf work with the
+# sums in the runtime's order) must give exactly the draws of
+# MINT_FUSED_LEAPFROG=0, and the default fused sums must be deterministic,
+# must have run (the sampler reports its count of fused leaves) and must
+# change the draws; on the large model, exact against 0 with 3 threads.
 leap_check() { # NAME leap|none (uses build/par_NAME from the parallel kernel tests)
   local n=$1 want=$2 has=none
   [ -x build/par_$n ] || { bad "fused leapfrog $n: no binary"; return; }
@@ -360,7 +363,7 @@ leap_check() { # NAME leap|none (uses build/par_NAME from the parallel kernel te
       || { bad "fused leapfrog $n, $t kernel threads: leaf differs"; echo "$out"; }
   done
 }
-for m in nested mixed nested_sq colreuse twohosts layout_draws bernoulli datascan; do
+for m in nested mixed nested_sq colreuse twohosts twoowned layout_draws bernoulli datascan; do
   want=leap
   case $m in datascan|twohosts) want=none ;; esac
   for G in 7 13 20 61; do leap_check ${m}_$G $want; done
@@ -384,13 +387,21 @@ for m in nested dps; do
       "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=exact"
     draws_same "fused leapfrog $m, $t threads per chain: deterministic" leap_$m \
       "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=1" "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=1"
+    # the fused path really ran: the sampler counts its leaves, and its
+    # summation order changes the draws
+    out=$(MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=1 MINT_DRAWS=build/leap_f.draws ./build/leap_$m 2>&1 >/dev/null)
+    MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=0 MINT_DRAWS=build/leap_u.draws ./build/leap_$m > /dev/null 2>&1
+    grep -q "leapfrog=fused (" <<<"$out" && [ -s build/leap_f.draws ] && ! cmp -s build/leap_f.draws build/leap_u.draws \
+      && pass "fused leapfrog $m, $t threads per chain: ran, and its sums change the draws" \
+      || { bad "fused leapfrog $m, $t threads per chain: did not run"; echo "$out"; }
+    rm -f build/leap_f.draws build/leap_u.draws
   done
 done
 if [ -f bench/dynpois/data_large/y.f64 ] && [ -x build/par_dynpois_run ]; then
   draws_same "fused leapfrog, large model, 3 threads per chain: exact sums give the runtime's draws" par_dynpois_run \
     "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=exact"
   out=$(MINT_THREADS_PER_CHAIN=3 ./build/par_dynpois_run 2>&1 >/dev/null)
-  grep -q "leapfrog=fused$" <<<"$out" && pass "fused leapfrog is the default with 3 threads per chain" \
+  grep -q "leapfrog=fused (" <<<"$out" && pass "fused leapfrog is the default with 3 threads per chain" \
     || { bad "fused leapfrog is not the default with 3 threads per chain"; echo "$out"; }
   out=$(MINT_THREADS_PER_CHAIN=1 ./build/par_dynpois_run 2>&1 >/dev/null)
   grep -q "leapfrog=runtime$" <<<"$out" && pass "runtime leapfrog is the default with 1 thread per chain" \

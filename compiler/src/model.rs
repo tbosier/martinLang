@@ -1357,7 +1357,8 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     }
     if leap {
         for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
-            if matches!(t, Ty::Matrix(..)) && owned.values().filter(|v| v.contains(n)).count() == 1 {
+            // (at most LEAP_MAX_BLOCKS; any further parameter is left to the runtime)
+            if matches!(t, Ty::Matrix(..)) && owned.values().filter(|v| v.contains(n)).count() == 1 && g.leap_cov.len() < LEAP_MAX_BLOCKS {
                 g.leap_cov.push((n.clone(), off.clone()));
             }
         }
@@ -1833,6 +1834,10 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     g.finish(&header, &[format!("ret double {r}")]);
     true
 }
+
+/// Most parameters the leap entry point covers: the size of the runtime's
+/// buffer for `leap_blocks` (MAX_LEAP_BLOCKS in runtime/mint_rt.c).
+const LEAP_MAX_BLOCKS: usize = 64;
 
 /// `leap_blocks(out)`: (offset, length) in theta of each parameter the leap
 /// entry point covers (see `gen_logp`); returns their number.
