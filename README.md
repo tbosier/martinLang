@@ -11,7 +11,8 @@ rewrite, and an LLVM IR emitter). LLVM turns that IR into machine code. Like
 most languages, Mint also has a small runtime library, written in C and
 compiled once. It supplies file I/O, printing, a Cholesky solve and the NUTS
 sampler that repeatedly calls your compiled model. Building a program takes
-60 to 160 ms.
+60 to 200 ms, or up to about 0.6 s for a model that gets narrow-data
+variants (below).
 
 ## What the prototype shows
 
@@ -177,14 +178,19 @@ Compiler switches, each turning one optimisation off (for measuring it):
 `--no-narrow-data`, and `--strict-fp` (strict IEEE evaluation order, no
 vector math).
 
-**Narrow data.** When `sample()` starts, the generated code checks each data
-vector or matrix that the model's vector kernels read, and if every value is
-exactly an int8, int16 or float, the kernels read a copy in that type and
-convert in registers. The results are byte-identical either way. In the
-benchmark data the time-series counts and the logistic 0/1 outcomes narrow
-to int8, which made the time-series gradient about 6% faster; the
-real-valued matrices are not exact in float and stay double. See
-[architecture.md](docs/architecture.md#narrow-data).
+**Narrow data.** When `sample()` starts, the generated code checks the data
+vectors and matrices that the model's vector kernels read (up to a limit of
+four variants of the model code), and where every value is exactly an int8,
+int16 or float, the kernels read a copy in that type and convert in
+registers. In every test the log density, gradient and draws are
+byte-identical with and without the copies. In the benchmark data the
+time-series counts and the logistic 0/1 outcomes narrow to int8: the
+time-series gradient became 5 to 6% faster (1 to 2 points of that come
+from a change made at the same time that also applies without the copies)
+and a whole run of the small model 3% faster; the logistic gradient did not change measurably, because its
+real-valued X is not exact in float and stays double. It costs build time:
+those two models now take 0.56 and 0.37 s to build instead of 0.22 and
+0.14 s. See [architecture.md](docs/architecture.md#narrow-data).
 
 ## The language in one page
 
