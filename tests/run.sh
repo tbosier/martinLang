@@ -292,7 +292,7 @@ fi
 # kernel's padding (p not a multiple of 4), fused and unfused.
 if build tests/rowfuse/hessian.mint rf_h_opt && build tests/rowfuse/hessian.mint rf_h_nrf --no-row-fusion \
    && build tests/rowfuse/hessian.mint rf_h_ref --no-row-fusion --no-gram-blocking; then
-  for np in "1003 1" "1003 3" "1003 4" "1003 5" "1003 13" "1003 24" "1003 50" "37 9" "3000 71"; do
+  for np in "0 5" "20 2" "1003 1" "1003 3" "1003 4" "1003 5" "1003 13" "1003 24" "1003 50" "37 9" "3000 71"; do
     python3 tests/rowfuse/make_data.py $np
     python3 - $np <<'PY' && pass "fused, tiled gradient and Hessian match the untiled ones (n p = $np)" || bad "fused, tiled gradient or Hessian differ (n p = $np)"
 import re, subprocess, sys
@@ -301,6 +301,9 @@ def values(b, label):
     out = subprocess.run(["./build/" + b], capture_output=True, text=True, check=True).stdout
     line = out[out.index(label + " "):].split("\n" + ("H " if label == "g" else "\0"))[0]
     return [float(x) for x in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", line[2:])]
+# normwise: each difference relative to the largest entry, as summation
+# reordering allows (entries much smaller than the largest are not checked
+# to their own precision)
 ok = True
 for label, size in (("g", p), ("H", p * p)):
     ref = values("rf_h_ref", label)
@@ -314,6 +317,21 @@ for label, size in (("g", p), ("H", p * p)):
             print(f"      {b} {label}: relative difference {d:.3g}")
 sys.exit(0 if ok else 1)
 PY
+  done
+  python3 tests/rowfuse/make_data.py
+fi
+# A fused loop whose per-row values cannot be vectorised (log1p), with an
+# a Gram weight other than Newton's and both consumers in the result.
+if build tests/rowfuse/fallback.mint rf_f_opt && build tests/rowfuse/fallback.mint rf_f_ref --no-row-fusion --no-gram-blocking; then
+  for np in "20 2" "1003 13" "1003 50"; do
+    python3 tests/rowfuse/make_data.py $np
+    a=$(./build/rf_f_opt | sed -n 's/^g \[\(.*\)\]/\1/p'); b=$(./build/rf_f_ref | sed -n 's/^g \[\(.*\)\]/\1/p')
+    python3 -c "
+import sys
+a = [float(x) for x in '$a'.split(',')]; b = [float(x) for x in '$b'.split(',')]
+s = max(abs(x) for x in b)
+sys.exit(0 if len(a) == len(b) == ${np#* } and max(abs(x - y) for x, y in zip(a, b)) / s < 1e-9 else 1)" \
+      && pass "fused loop with scalar per-row values matches the unfused build (n p = $np)" || bad "fused loop with scalar per-row values differs (n p = $np)"
   done
   python3 tests/rowfuse/make_data.py
 fi

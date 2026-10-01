@@ -1155,7 +1155,8 @@ impl Cg<'_> {
     // and each statement streams all of X. When consecutive statements only
     // stream the rows of the same X and only use earlier producers of the
     // group elementwise, they run as one loop over chunks of rows: each
-    // chunk of X is read from memory once and used by all of them from L1.
+    // chunk of X is read from memory once and used by all of them from cache
+    // (L1, or L2 for wide X).
 
     fn stmt_list(&mut self, body: &[TStmt]) {
         let mut k = 0;

@@ -122,7 +122,8 @@ them.
 - Elementwise expression trees are fused into one loop. Only non-elementwise
   subterms (products, solves, calls) are materialised. The weights of
   `X' * diag(mu .* (1 - mu)) * X` and the vector of `X' * (mu - y)` are
-  computed inside the kernel's row loop and never stored.
+  computed inside the kernel's row loop and never stored as whole vectors
+  (only per chunk of rows, in the fused loop).
 - The Gram kernel computes the upper triangle only and mirrors it at the end.
   It works on chunks of 32 rows. The weighted rows W = diag(w) X go into L1
   scratch padded with zeros to a multiple of 4 columns, and H is updated in
@@ -131,9 +132,10 @@ them.
   12 FMAs) and 4 x 8 tiles. Only the 4 x 4 blocks on the diagonal compute
   entries below it. Each strip prefetches its share of the next chunk of X.
   When p is not a multiple of 4 and the fused loop also computes `X' * r`, r
-  goes in W's first padding column, so that product comes out of the Gram
-  kernel at no extra cost. `--no-gram-blocking` restores the older row-by-row
-  kernel.
+  goes in W's first padding column and that product comes out of the Gram
+  kernel's otherwise wasted lanes, instead of a pass of its own (one store per
+  row and a copy of p values at the end remain). `--no-gram-blocking`
+  restores the older row-by-row kernel.
 - **Row fusion** (`--no-row-fusion`; off under `--strict-fp`). Consecutive
   `let`s in a `repeat` body that stream the rows of one matrix run as one
   loop over chunks of rows: a producer (an elementwise function of `X * w`,
@@ -318,7 +320,11 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   3e7 test inputs, with NaN, infinities, overflow and subnormal results as in
   libm. `--no-inline-exp` uses `llvm.exp` everywhere.
 - The tiled Gram kernel and row fusion change the order of summation (per
-  tile and per chunk); both are off under `--strict-fp`.
+  tile and per chunk); both are off under `--strict-fp`. The tiled kernel
+  also groups each product as `X[i,j] * (w[i] * X[i,k])`, where the untiled
+  one computes `(w[i] * X[i,j]) * X[i,k]`. The two differ by more than
+  rounding only when `w[i] * X[i,k]` leaves the normal range of doubles
+  (below about 2e-308 or above 1.8e308) while the full product does not.
 - In `BernoulliLogit`, `log1p(e)` is computed as `log(1 + e)` with
   e = exp(-|eta|) in (0, 1], because `log` has a vector version. That costs an
   absolute error of up to about 1e-16 per observation.
