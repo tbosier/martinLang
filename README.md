@@ -165,13 +165,13 @@ Useful environment variables for compiled programs:
   `MINT_BENCH_GRAD` and `MINT_GRADCHECK` (default 1).
 - `MINT_CHAIN_AFFINITY=0` stops the runtime from keeping each threaded
   chain's threads on the CPUs of one L3 cache.
-- `MINT_FUSED_LEAPFROG=0` turns off the fused leapfrog (the sampler's
-  leaf work done by the fused scan kernel's threads on their own rows; on
-  by default when a chain has more than one thread). `=1` turns it on for
-  serial chains too, and `=exact` keeps the runtime's summation order, which
-  gives exactly the draws of `=0` (for testing). `MINT_LEAP_TEST=1` checks
-  one fused leaf against the runtime's own and exits; `=K` also times K
-  leaves of each.
+- `MINT_FUSED_LEAPFROG=1` turns on the fused leapfrog (the sampler's
+  leapfrog updates done inside the fused scan kernel; off by default,
+  because it measured no faster than the runtime's own pass, see
+  [compiler-round.md](docs/compiler-round.md)). `=exact` also keeps the
+  runtime's summation order, which gives exactly the draws of the default
+  (for testing). `MINT_LEAP_TEST=1` checks one fused leaf against the
+  runtime's own and exits; `=K` also times K leaves of each.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
 

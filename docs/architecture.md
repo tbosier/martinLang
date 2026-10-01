@@ -483,51 +483,47 @@ is checked against the exact formula at both sizes.
   (`OMP_DYNAMIC`) or a chain gets a smaller team than asked for, and each
   thread's previous mask is restored when the chain ends.
   `MINT_CHAIN_AFFINITY=0` turns it off.
-- **Fused leapfrog** (`--no-fused-leapfrog` in the compiler,
-  `MINT_FUSED_LEAPFROG=0` at run time). The leaf pass splits D into
-  contiguous ranges across the chain's threads, while the fused scan kernel
-  splits the scanned matrix parameter by groups of series. So each
-  leapfrog, the gradient the kernel threads had written was read by other
-  cores for the leaf pass, the position the leaf pass wrote was read by
-  other cores for the next gradient, and each leaf took two parallel
-  regions. When a fused scan kernel owns a matrix parameter, the compiler
-  now also emits `leap(theta, grad, hook, hctx)`, the log density with a
-  hook: each kernel thread, as soon as its groups are done (their gradient
-  is then final), calls the runtime's `leaf_block` on its own rows, which in
-  the scan layout are one contiguous range of the parameter (thread 0 also
-  takes the rows left over after the groups, which it runs too). The leaf
-  work on that range (second half-step, the next leaf's first half-step,
-  kinetic energy, merges) runs there, on the core that has just written its
-  gradient and read its position, and that will read the next position in
-  the next leaf. `leap_blocks` tells the runtime which parts of theta the
-  hooks cover (at most 64 parameters; any others are left to the runtime);
-  the calling thread does the rest of theta (401 elements on the large
-  model) after the gradient. So in the leaves that take this path each
-  element of a covered parameter is touched by one core only, and the leaf
-  needs no parallel region besides the kernel's (one per fused scan
-  statement). Not every leaf takes it: the first leaf after the end of a
+- **Fused leapfrog** (off by default; `MINT_FUSED_LEAPFROG=1` at run
+  time, and `--no-fused-leapfrog` in the compiler stops it being emitted).
+  When a fused scan kernel owns a matrix parameter, the compiler also emits
+  `leap(theta, grad, hook, hctx)`, the log density with a hook: each kernel
+  thread, as soon as its groups are done (their gradient is then final),
+  calls the runtime's `leaf_block` on its own rows, which in the scan layout
+  are one contiguous range of the parameter (thread 0 also takes the rows
+  left over after the groups, which it runs too). The whole leaf work on
+  that range (second half-step, the next leaf's first half-step, kinetic
+  energy, merges) runs there, on the core that has just written its
+  gradient, with the runtime's own code, so every stored value has exactly
+  the unfused arithmetic. `leap_blocks` tells the runtime which parts of
+  theta are covered (at most 64 parameters); the calling thread does the
+  leaf work on the rest (401 elements on the large model) after the
+  gradient. A leaf then needs no parallel region besides the kernel's. The
+  kinetic energy and the merges' sums are added in another order (lanes
+  counted from the start of each thread's range, the threads in order,
+  then the rest), so the draws differ by rounding from the unfused path and
+  then diverge; `MINT_FUSED_LEAPFROG=exact` does only the half-steps in the
+  hooks and the sums in a leaf pass of the runtime's order, and its draws
+  are bit-identical to the default's. It is off by default because it was
+  not faster (`docs/compiler-round.md`): once the scan layout stores each
+  group of series contiguously, the runtime's own leaf pass, split by index
+  ranges, already gives each thread nearly the same elements as its kernel
+  groups (on the large model the ranges differ by 231 and 863 elements at
+  the two boundaries, out of 37,901), so fusing saves only a parallel
+  region, and the hooks, which start after each thread's own groups and
+  leave the rest of theta to one thread, cost about as much. Not every leaf
+  would take the fused path anyway: the first leaf after the end of a
   trajectory's new subtree has no half-step taken ahead, and its first
-  half-step is still a parallel pass split by index ranges (`leaf_start`).
-  The runtime uses the fused leapfrog when a chain has more than one thread
-  (`MINT_FUSED_LEAPFROG=1` also for serial chains) and reports how many
-  gradients went through it. Every stored value has exactly the arithmetic
-  of the unfused leaf pass (it is the same C code); the sums (kinetic
-  energy, the merges' checks) are added in another order: lanes counted
-  from the start of each thread's range, the threads' totals in thread
-  order, then the rest of theta. Draws therefore differ by rounding from
-  the unfused path and then diverge; the fixed-order guarantee below holds
-  for the unfused path. `MINT_FUSED_LEAPFROG=exact` does only the
-  half-steps in the hooks and the sums in a leaf pass of the usual order;
-  its draws are bit-identical to `=0`. `tests/run.sh` checks that on a scan
-  test model (nested, 61 series) and the small dynamic Poisson model, each
-  with 1 and 3 threads per chain, and on the large model with 3; it also
-  checks that the default fused path ran, is deterministic and changes the
-  draws. With `MINT_LEAP_TEST` it compares one fused leaf with a merge
-  against the unfused one (state bit-identical, sums to 1e-12 of the
-  largest) on 1 and 3 kernel threads, for each scan test model that has a
-  covered parameter (all but two: a running sum of data only, and a matrix
-  shared by two scan statements, which neither kernel owns), at 7 to 61
-  series; one of them has three covered parameters in two kernels.
+  half-step is still a parallel pass (`leaf_start`). `tests/run.sh` checks
+  the exact mode's draws against the default's on a scan test model
+  (nested, 61 series) and the small dynamic Poisson model, each with 1 and
+  3 threads per chain, and on the large model with 3; that `=1` ran, is
+  deterministic and changes the draws; and, with `MINT_LEAP_TEST`, one
+  fused leaf with a merge against the unfused one (state bit-identical,
+  sums to 1e-12 of the largest) on 1 and 3 kernel threads, for each scan
+  test model that has a covered parameter (all but two: a running sum of
+  data only, and a matrix shared by two scan statements, which neither
+  kernel owns), at 7 to 61 series; one of them has three covered
+  parameters in two kernels.
 - **Fixed summation order.** Every sum over D in the leaf passes (kinetic
   energy, no-U-turn checks) is accumulated in 8 lanes
   (element i in lane i mod 8, each lane in index order, lanes combined in a

@@ -348,9 +348,10 @@ fi
 # (nested at 61 series, the small dynamic Poisson model), with 1 and 3
 # threads per chain, MINT_FUSED_LEAPFROG=exact (the fused leaf work with the
 # sums in the runtime's order) must give exactly the draws of
-# MINT_FUSED_LEAPFROG=0, and the default fused sums must be deterministic,
-# must have run (the sampler reports its count of fused leaves) and must
-# change the draws; on the large model, exact against 0 with 3 threads.
+# MINT_FUSED_LEAPFROG=0, and with MINT_FUSED_LEAPFROG=1 the fused sums must
+# be deterministic, must have run (the sampler reports its count of fused
+# leaves) and must change the draws; on the large model, exact against 0
+# with 3 threads. The fused leapfrog is off by default.
 leap_check() { # NAME leap|none (uses build/par_NAME from the parallel kernel tests)
   local n=$1 want=$2 has=none
   [ -x build/par_$n ] || { bad "fused leapfrog $n: no binary"; return; }
@@ -401,11 +402,14 @@ if [ -f bench/dynpois/data_large/y.f64 ] && [ -x build/par_dynpois_run ]; then
   draws_same "fused leapfrog, large model, 3 threads per chain: exact sums give the runtime's draws" par_dynpois_run \
     "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=exact"
   out=$(MINT_THREADS_PER_CHAIN=3 ./build/par_dynpois_run 2>&1 >/dev/null)
-  grep -q "leapfrog=fused (" <<<"$out" && pass "fused leapfrog is the default with 3 threads per chain" \
-    || { bad "fused leapfrog is not the default with 3 threads per chain"; echo "$out"; }
-  out=$(MINT_THREADS_PER_CHAIN=1 ./build/par_dynpois_run 2>&1 >/dev/null)
-  grep -q "leapfrog=runtime$" <<<"$out" && pass "runtime leapfrog is the default with 1 thread per chain" \
-    || { bad "runtime leapfrog is not the default with 1 thread per chain"; echo "$out"; }
+  grep -q "leapfrog=runtime$" <<<"$out" && pass "the fused leapfrog is off by default" \
+    || { bad "the fused leapfrog is not off by default"; echo "$out"; }
+  out=$(MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=yes ./build/par_dynpois_run 2>&1 >/dev/null)
+  grep -q "leapfrog=runtime$" <<<"$out" && pass "MINT_FUSED_LEAPFROG=yes (neither 1 nor exact) leaves it off" \
+    || { bad "MINT_FUSED_LEAPFROG=yes turned the fused leapfrog on"; echo "$out"; }
+  out=$(MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=1 ./build/par_dynpois_run 2>&1 >/dev/null)
+  grep -q "leapfrog=fused (" <<<"$out" && pass "MINT_FUSED_LEAPFROG=1 runs the fused leapfrog on the large model" \
+    || { bad "MINT_FUSED_LEAPFROG=1 did not run the fused leapfrog on the large model"; echo "$out"; }
 fi
 
 # ---- the scan layout reaches the draws: a matrix parameter pinned to the

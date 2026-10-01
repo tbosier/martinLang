@@ -1223,7 +1223,7 @@ typedef struct {
   mint_logp_fn f;
   mint_leap_fn leap;
   mint_leap_blocks_fn leap_blocks;
-  int leap_mode;  // 0: off, 1: on when the chain has more than one thread, 2: on, 3: on with exact sums
+  int leap_mode;  // 0: off, 2: on, 3: on with exact sums
   mint_constrain_fn constrain;
   int64_t D, draws, warmup;
   uint64_t seed;
@@ -1250,7 +1250,7 @@ static void *run_chain(void *arg) {
   kernel_nt = kernel_threads(s->nt);
   int bound = job->l3 && s->nt > 1 && bind_team(s->nt, job->l3);
   s->f = job->f;
-  if (job->leap && (job->leap_mode >= 2 || (job->leap_mode == 1 && s->nt > 1))) {
+  if (job->leap && job->leap_mode >= 2) {
     leap_other(s, job->leap_blocks);
     s->leap = job->leap;
     s->leap_exact = job->leap_mode == 3;
@@ -1746,11 +1746,13 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   const char *ltest = getenv("MINT_LEAP_TEST");
   if (ltest) leap_test(f, D, atoll(ltest));
   kernel_nt = 1;
-  // The model's fused leapfrog (when it has one): by default when a chain
-  // runs on more than one thread. MINT_FUSED_LEAPFROG=0 turns it off, =1 on
-  // for every chain, and =exact on with the sums in the runtime's own order.
+  // The model's fused leapfrog (when it has one) is off by default: with the
+  // scan layout's blocks it measured no faster than the runtime's own leaf
+  // pass (docs/compiler-round.md). MINT_FUSED_LEAPFROG=1 turns it on, and
+  // =exact on with the sums in the runtime's own order; any other value is
+  // off.
   const char *lenv = getenv("MINT_FUSED_LEAPFROG");
-  int leap_mode = !lenv ? 1 : strcmp(lenv, "0") == 0 ? 0 : strcmp(lenv, "exact") == 0 ? 3 : 2;
+  int leap_mode = !lenv ? 0 : strcmp(lenv, "1") == 0 ? 2 : strcmp(lenv, "exact") == 0 ? 3 : 0;
 
   MintPosterior *post = calloc(1, sizeof *post);
   post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;
@@ -1826,7 +1828,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   post->mean_leapfrog = mint_alloc(chains);
   post->threads_per_chain = tpc;
   post->team_min = tpc;
-  post->leapfrog = model_leap && (leap_mode >= 2 || (leap_mode == 1 && tpc > 1)) ? (leap_mode == 3 ? 2 : 1) : 0;
+  post->leapfrog = model_leap && leap_mode >= 2 ? (leap_mode == 3 ? 2 : 1) : 0;
   const char *metric_env = getenv("MINT_METRIC");
   post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
   for (int64_t c = 0; c < chains; c++) {
