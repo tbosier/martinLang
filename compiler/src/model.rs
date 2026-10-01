@@ -1328,18 +1328,20 @@ fn first_of(g: &mut Mg, n: &str) -> String {
 /// With `leap`, emits instead `leap(theta, grad, hook, hctx)`, the same
 /// function with a hook for the sampler (the fused leapfrog): the matrix
 /// parameters owned by exactly one fused scan kernel (all their gradient is
-/// summed in its reverse loop) are covered. Each thread of a kernel, once
-/// its groups of rows are done, so that their gradient is final, calls
+/// summed in its reverse loop) are covered (at most LEAP_MAX_BLOCKS). Each
+/// thread of a kernel, once its groups of rows are done, so that their
+/// gradient is final, calls
 ///
-///   hook(hctx, slot, off, rows, cols, r0, r1)
+///   hook(hctx, slot, lo, len)
 ///
-/// for each covered parameter at offset `off` of theta (column-major,
-/// `rows` x `cols`): rows r0..r1 of every column are this thread's. The
-/// runtime then does its leapfrog and tree work on those elements on the
-/// same thread, while they are in its cache, instead of in a pass of its
-/// own split differently across the threads. `slot` is the kernel's thread
-/// index, or PAR_MAX_THREADS for the rows the calling thread runs after the
-/// groups (single vectors and leftover rows). Also emits
+/// for each covered parameter: in the scan layout (Mg::cm_row) the
+/// thread's rows are the one contiguous range theta[lo .. lo + len). The
+/// runtime then does its leaf work on those elements on that thread
+/// (leaf_block in runtime/mint_rt.c). `slot` is the kernel's thread index;
+/// thread 0 (the calling thread) also runs the single vectors and leftover
+/// rows and hands them over as one more range, and when the kernel runs
+/// serially the calling thread hands over the whole parameter as slot 0
+/// (leap_hook_calls). Also emits
 /// `leap_blocks(out)`, which writes (offset, length) of each covered
 /// parameter and returns their number, so the runtime can do the rest of
 /// theta itself. Returns false, emitting nothing, when nothing would be

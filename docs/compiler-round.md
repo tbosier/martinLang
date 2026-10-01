@@ -237,13 +237,16 @@ The goal was faster whole runs of the large dynamic Poisson model (37,901
 parameters, 3 threads per chain), where the sampler's passes over the
 D-length state vectors cost more than the parallel gradient kernel, by
 letting the generated gradient do the leapfrog's elementwise updates. The
-fused leapfrog was built three ways and none was faster than the runtime's
-own pass. What made the runs faster is a change to the scan layout that the
-third attempt needed: the scanned matrix is now stored in blocks of eight
-series (a kernel group), each block column by column, instead of in whole
-columns of G (see "Scan layout" in [architecture.md](architecture.md)).
-The fused leapfrog stays in the compiler and runtime, tested, but off by
-default (`MINT_FUSED_LEAPFROG=1` turns it on).
+fused leapfrog was built five ways (listed under "What did not help") and
+none was faster than the runtime's own pass. What made the runs faster is a
+change to the scan layout that the later attempts needed: the scanned
+matrix is now stored in blocks of eight series (a kernel group), each block
+column by column, instead of in whole columns of G (see "Scan layout" in
+[architecture.md](architecture.md)). The same change moved the parallel
+kernel's single vectors and leftover rows into its thread 0, inside the
+parallel region; only the one-thread gradient timings below separate the
+layout from that. The fused leapfrog stays in the compiler and runtime,
+tested, but is not built by default (`mintc --fused-leapfrog`).
 
 ### Whole runs
 
@@ -251,8 +254,11 @@ The final build against the base build (commit d51f859), interleaved, three
 rounds, `MINT_THREADS_PER_CHAIN=3` for the large model (its default) and 1
 for the small one (its default). Each run waited for the one-minute load
 average to drop below 5 (it was 1.9 to 5.0 at the start of every run;
-other jobs were running throughout). Fused is the final build with
-`MINT_FUSED_LEAPFROG=1`.
+other jobs were running throughout). The binaries were built at commit
+3fccc8f, where every build carried the fused leapfrog and the runtime used
+it only with `MINT_FUSED_LEAPFROG=1` (the fused column); the current
+default build no longer emits it, and its log density, kernels and sampler
+code are the same as in those binaries.
 
 | run | base | final (default) | final, fused leapfrog |
 |---|---|---|---|
@@ -275,7 +281,9 @@ unfused, six runs) and 11.77 to 12.31 s (fused, six runs); full runs 71.00
 to 72.55 s (base, four runs) against 65.21 and 66.08 s (unfused, two runs)
 and 66.51 to 67.64 s (fused, four runs). Over these sets and the table's,
 the fused leapfrog was slower than the unfused path with the same layout in
-12 of 14 interleaved pairs, and faster in 2 (by 1.6% and 0.3%).
+12 of the 14 interleaved pairs on the large model, and faster in 2 (by 1.6%
+and 0.3%). On the small model, where it runs serially, it was slower in all
+8 pairs (by 1 to 7%).
 
 The gradient alone (`MINT_BENCH_GRAD`, load 2.8 to 5.5): large model 50 to
 53 µs (base) against 43 to 45 µs on one thread, 24 to 29 against 17 to
@@ -283,16 +291,21 @@ The gradient alone (`MINT_BENCH_GRAD`, load 2.8 to 5.5): large model 50 to
 make each group's reads and writes one contiguous stream instead of 8
 values every G (2,000 bytes apart on the large model).
 
-Measurements made when the machine was overloaded (load 13 to 47, every
-core busy; the short run took 107 to 202 s instead of 12) were discarded;
-they are in the work log, not here.
+Earlier measurements, taken while the machine was overloaded (load up to
+47, every core busy; the same short run took 14 to 202 s), were
+discarded.
 
 ### What did not help
 
 Each of these was correct (the state after a leapfrog bit-identical to the
-runtime's, checked as `MINT_LEAP_TEST` does now) and was measured with the
-same steady-state leaf benchmark (`MINT_LEAP_TEST=K`: blocks of 20 leaves
-of each kind alternating, fastest block reported, large model):
+runtime's, checked as `MINT_LEAP_TEST` does, though with a looser check on
+the sums than now: relative to the largest sum, which on the large model's
+test state was dominated by a kinetic energy near 6e20) and was measured
+with the same steady-state leaf benchmark (`MINT_LEAP_TEST=K`: blocks of 20
+leaves of each kind alternating, fastest block reported, large model). The
+items were measured hours apart at different loads, so compare the fused
+and unfused figures within an item, not across items (the unfused leaf
+took 42 µs in the first and 30 µs in the second):
 
 - **Element-wise fusion in the column-major layout.** The kernel's forward
   pass took the first half-step where it first reads an element (reading
@@ -317,12 +330,13 @@ of each kind alternating, fastest block reported, large model):
   the barrier (racy, timing only) it was 27.3 against 29.5 µs; the barrier
   cost the gain.
 - **With the blocked layout, the leaf work in each kernel thread on its
-  own contiguous rows, without a barrier** (what `MINT_FUSED_LEAPFROG=1`
-  runs now): 23.3 against 22.8 µs, and the whole runs above. With the
+  own contiguous rows, without a barrier** (what a `--fused-leapfrog`
+  build runs now): 23.3 against 22.8 µs, and the whole runs above. With the
   blocks, the runtime's own pass, split by index ranges, already gives each
   thread nearly the same elements as its kernel groups (the ranges differ
-  by 231 and 863 elements at the two boundaries, out of 37,901), so the
-  fusion saves only a parallel region.
+  by 231 and 863 elements at the two boundaries, out of 37,901), which is
+  our reading of why the fusion gains nothing: it saves a parallel region,
+  and its hooks leave the rest of theta to one thread.
 - **With the blocked layout, element-wise fusion in the reverse pass**
   (second half-step, kinetic energy and the next leaf's first half-step
   where the kernel stores the gradient, now in contiguous streams; the
@@ -332,10 +346,12 @@ of each kind alternating, fastest block reported, large model):
 
 The task's premise, that the sampler's passes are most of the time per
 gradient and memory-bound, held only partly in these measurements: with
-one chain the leaf pass took about 5 to 8 µs of 23 to 30 µs per leaf.
-Fusing it cannot remove its memory traffic (the state still has to be
-read and written), only move it, and every way of moving it into the
-kernel cost about as much as the pass.
+one chain the leaf pass took about 5 to 8 µs of 23 to 30 µs per leaf (the
+leaf time less the kernel's time alone, in the same conditions). Fusing it
+cannot remove the state's own reads and writes; at best it saves rereading
+the gradient and position from beyond L2 and a parallel region, and every
+way tried of moving the pass into the kernel cost about as much as the
+pass.
 
 ### Not done
 

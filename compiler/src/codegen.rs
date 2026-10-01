@@ -41,8 +41,8 @@ pub struct Opts {
     pub inline_log: bool,
     /// split a fused scan kernel's groups of rows across the chain's threads
     pub parallel_kernel: bool,
-    /// emit the fused leapfrog entry point (`leap`): the sampler's position
-    /// and momentum updates inside the fused scan kernels
+    /// also emit the fused leapfrog entry point (`leap`, see model.rs
+    /// gen_logp), which the sampler then uses; off by default
     pub fused_leapfrog: bool,
 }
 

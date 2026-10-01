@@ -475,7 +475,9 @@ static void kern_half1(int64_t lo, int64_t hi, double eps, const double *restric
   }
 }
 
-// Second half-step over [lo, hi) (lo a multiple of LN): the final momentum
+// Second half-step over [lo, hi) (lo a multiple of LN in the leaf pass; the
+// fused leapfrog's hook passes any lo, which changes only the order of the
+// lanes' sums): the final momentum
 // p, its kinetic-energy lanes k, and, when xp is not NULL, the first
 // half-step of the next leapfrog from this state (same arithmetic as
 // kern_half1).
@@ -670,8 +672,8 @@ static void leaf_work(LeafJob *J, int t, int T) {
 }
 
 // The fused leapfrog's hook (see mint_leap_fn): leaf work on
-// theta[lo .. lo + len), with the lanes counted from lo; the totals are
-// added to the slot.
+// theta[lo .. lo + len), in blocks of LN from lo (the last few elements by
+// index modulo LN, as in kern_half2); the totals are added to the slot.
 static void leaf_block(void *ctx, int64_t slot, int64_t lo, int64_t len) {
   LeafJob *J = ctx;
   if (len <= 0) return;
@@ -782,12 +784,14 @@ static double leaf_finish(Nuts *s, St *n, double eps) {
 // with the leaf work on the covered parameters done by the kernel's threads
 // through the hook (leaf_block), and on the rest of theta here, after it.
 // The partial sums are added in slot order: the kernel's threads (each its
-// range of each covered parameter in turn, lanes counted from the range's
+// range of each covered parameter in turn, in blocks of LN from the range's
 // first element; thread 0's rows left over after the groups last), then
-// the rest. That order differs from leaf_pass's, so
-// the draws differ from the runtime's own leapfrog by rounding. With s->leap_exact the hooks and the rest take only the
-// half-steps, and a leaf pass then sums in leaf_pass's order, which gives
-// exactly the runtime's draws (for testing). Returns the Hamiltonian.
+// the rest. That order differs from leaf_pass's, so the draws differ from
+// the runtime's own leapfrog by rounding. With s->leap_exact the hooks and
+// the rest take only the half-steps, and a leaf pass then sums in
+// leaf_pass's order, which gives the runtime's draws (for testing; that
+// relies on leap computing the same gradient as the model's logp, which
+// MINT_LEAP_TEST and tests/run.sh check). The sums end up in s->part[0].
 static void leaf_fused_run(Nuts *s, LeafJob *J) {
   St *n = J->n;
   int nt = (int)kernel_nt;
@@ -816,6 +820,7 @@ static void leaf_fused_run(Nuts *s, LeafJob *J) {
   for (int j = 0; j < nsum; j++) v[j] += s->part[SLOT_OTHER][j];
 }
 
+// Leaf n through the fused leapfrog (leaf_fused_run); returns the Hamiltonian.
 static double leaf_fused(Nuts *s, St *n, double eps) {
   LeafJob J;
   leaf_prepare(s, n, eps, &J);
@@ -1528,9 +1533,15 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
     for (int j = 0; j < 5; j++) v[j][i] = 0.2 * (double)((i * (31 + 6 * j) + j) % 19 - 9) / 9.0;
   }
   s->inv_m = im;
+  // step sizes scaled to the gradient at the benchmark point, so that the
+  // momenta and sums stay of moderate size (and the 1e-12 below means
+  // something)
+  double gmax = 0;
+  for (int64_t i = 0; i < D; i++) gmax = fmax(gmax, fabs(z->g[i]));
+  double escale = 1.0 / fmax(1.0, 0.01 * gmax);
   int bad = 0;
   for (int sgn = 0; sgn < 2; sgn++) {
-    double eps = sgn ? -0.00137 : 0.00213;
+    double eps = (sgn ? -0.00137 : 0.00213) * escale;
     kern_half1(0, D, eps, im, z->p, z->g, z->q, na->p, na->q);
     memcpy(nb->p, na->p, (size_t)D * sizeof(double));
     memcpy(nb->q, na->q, (size_t)D * sizeof(double));
@@ -1557,16 +1568,18 @@ static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
       d[4] += memcmp(&out[0][i], &out[1][i], sizeof(double)) != 0;
     }
     d[5] = memcmp(&na->lp, &nb->lp, sizeof(double)) != 0;
+    // each sum relative to itself, or to 1e-3 of the largest when it is
+    // smaller than that (a sum near zero after cancellation)
     double big = 0, worst = 0;
     for (int j = 0; j < 7; j++) big = fmax(big, fabs(sums[0][j]));
     for (int j = 0; j < 7; j++) {
-      double e = fabs(sums[0][j] - sums[1][j]) / big;
+      double e = fabs(sums[0][j] - sums[1][j]) / fmax(fabs(sums[0][j]), 1e-3 * big);
       if (!isfinite(sums[0][j]) || !isfinite(sums[1][j]) || isnan(e)) e = INFINITY;  // fmax drops NaN
       worst = fmax(worst, e);
     }
     printf("leap-test: threads=%d eps=%g elements that differ: gradient %lld, momentum %lld, next momentum %lld, "
            "next position %lld, merged momentum %lld; logp differs %lld; kinetic energy %.17g fused %.17g; "
-           "largest sum difference %.3g of the largest sum\n",
+           "largest relative sum difference %.3g\n",
            s->nt, eps, (long long)d[0], (long long)d[1], (long long)d[2], (long long)d[3], (long long)d[4],
            (long long)d[5], sums[0][0], sums[1][0], worst);
     bad |= d[0] || d[1] || d[2] || d[3] || d[4] || d[5] || !(worst < 1e-12);
@@ -1746,13 +1759,12 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   const char *ltest = getenv("MINT_LEAP_TEST");
   if (ltest) leap_test(f, D, atoll(ltest));
   kernel_nt = 1;
-  // The model's fused leapfrog (when it has one) is off by default: with the
-  // scan layout's blocks it measured no faster than the runtime's own leaf
-  // pass (docs/compiler-round.md). MINT_FUSED_LEAPFROG=1 turns it on, and
-  // =exact on with the sums in the runtime's own order; any other value is
-  // off.
+  // The model's fused leapfrog, when it has one (only a program built with
+  // mintc --fused-leapfrog does): MINT_FUSED_LEAPFROG=0 turns it off, and
+  // =exact keeps the sums in the runtime's own order; unset or any other
+  // value is on.
   const char *lenv = getenv("MINT_FUSED_LEAPFROG");
-  int leap_mode = !lenv ? 0 : strcmp(lenv, "1") == 0 ? 2 : strcmp(lenv, "exact") == 0 ? 3 : 0;
+  int leap_mode = !lenv ? 2 : strcmp(lenv, "0") == 0 ? 0 : strcmp(lenv, "exact") == 0 ? 3 : 2;
 
   MintPosterior *post = calloc(1, sizeof *post);
   post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;

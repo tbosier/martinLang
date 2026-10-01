@@ -18,8 +18,9 @@
 //!        --no-inline-log     call the vector math library's log in the
 //!                            fission kernel
 //!        --no-parallel-kernel  run fused scan kernels on the calling thread only
-//!        --no-fused-leapfrog  do not emit the fused leapfrog entry point (the
-//!                            sampler then updates positions and momenta itself)
+//!        --fused-leapfrog  also emit the fused leapfrog entry point, which the
+//!                            sampler then uses (off by default: it measured no
+//!                            faster; see docs/compiler-round.md)
 
 mod ast;
 mod check;
@@ -87,7 +88,7 @@ fn runtime_object() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--no-fused-leapfrog]");
+    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--fused-leapfrog]");
     exit(2);
 }
 
@@ -99,7 +100,7 @@ fn main() {
     let cmd = args[0].as_str();
     let path = &args[1];
     let mut out: Option<String> = None;
-    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true, fission_kernel: true, inline_log: true, parallel_kernel: true, fused_leapfrog: true };
+    let mut opts = codegen::Opts { strict_fp: false, suffstats: true, fission: true, vecmath: true, gram_block: 4, scan_layout: true, inline_exp: true, scan_fusion: true, row_fusion: true, fission_kernel: true, inline_log: true, parallel_kernel: true, fused_leapfrog: false };
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -119,7 +120,7 @@ fn main() {
             "--no-fission-kernel" => opts.fission_kernel = false,
             "--no-inline-log" => opts.inline_log = false,
             "--no-parallel-kernel" => opts.parallel_kernel = false,
-            "--no-fused-leapfrog" => opts.fused_leapfrog = false,
+            "--fused-leapfrog" => opts.fused_leapfrog = true,
             _ => usage(),
         }
         k += 1;
