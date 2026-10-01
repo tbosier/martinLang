@@ -20,8 +20,8 @@ R = json.load(open(path))
 
 
 def rng(vals, fmt="{:.3g}"):
-    lo, hi = min(vals), max(vals)
-    return fmt.format(lo) if lo == hi else f"{fmt.format(lo)} to {fmt.format(hi)}"
+    lo, hi = fmt.format(min(vals)), fmt.format(max(vals))
+    return lo if lo == hi else f"{lo} to {hi}"
 
 
 def med(vals):
@@ -36,8 +36,8 @@ for size in R["sizes"]:
     seeds = sorted({r["seed"] for r in runs})
     print(f"\n### G = {G}, T = {T} ({G * T:,} latent scalars), seeds {', '.join(map(str, seeds))}\n")
     print("| | NUTS dimension | gradients per draw | leapfrog per draw | divergences | sampling time (s) "
-          "| lowest ESS, remaining params | per s | per 1000 gradients | sigma_w ESS per s | load average |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+          "| lowest ESS, remaining params | per s | per 1000 gradients | sigma_w ESS per s | highest R-hat of pop, sigma_w, sigma_y | threads per chain | load average |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     by = {}
     for v in ("collapsed", "full", "full_nc"):
         rs = [r for r in runs if r["variant"] == v]
@@ -55,7 +55,13 @@ for size in R["sizes"]:
         name = {"collapsed": "collapsed (Kalman)", "full": "full NUTS, centred", "full_nc": "full NUTS, non-centred"}[v]
         print(f"| {name} | {rs[0]['nuts_dim']:,} | {rng(gpd, '{:.0f}')} | {rng(lpd, '{:.1f}')} | {rng(div, '{}')} "
               f"| {rng([r['sampling_s'] for r in rs])} | {rng(ess, '{:.0f}')} | {rng(eps)} | {rng(epg)} | {rng(sw)} "
+              f"| {rng([r['remaining_rhat_max'] for r in rs], '{:.3f}')} | {rng([r['threads_per_chain'] for r in rs], '{}')} "
               f"| {rng(load, '{:.1f}')} |")
+    if "gradient_ns" in size:
+        gt = size["gradient_ns"]
+        print("\none gradient, one thread (MINT_BENCH_GRAD, 7 alternated repetitions): "
+              + "; ".join(f"{v} {min(t) / 1000:.1f} us (median {med(t) / 1000:.1f})" for v, t in gt.items())
+              + f"; load average after {size['gradient_load'][0]:.1f}")
     if "collapsed" in by:
         for f in ("full", "full_nc"):
             if f not in by:

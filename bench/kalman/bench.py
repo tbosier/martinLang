@@ -20,7 +20,9 @@ the runtime's own report: sampling time (warmup included), gradients,
 leapfrog steps per draw, step sizes, divergences, and the ESS of pop,
 sigma_w, sigma_y and the lowest over beta, plus the load average around each
 run (other jobs share the machine, so wall times are noisy; gradients per
-effective draw are not affected by load). Writes JSON and prints a table.
+effective draw are not affected by load). Then times one gradient of each
+build (MINT_BENCH_GRAD, one thread, 7 alternated repetitions). Writes JSON;
+report.py prints the tables.
 """
 import json
 import os
@@ -129,6 +131,12 @@ def run(binary, G):
     return rec
 
 
+def grad_ns(binary, reps):
+    env = dict(os.environ, MINT_BENCH_GRAD=str(reps))
+    r = subprocess.run([binary], env=env, capture_output=True, text=True)
+    return float(re.search(r"ns_per_eval=(\S+)", r.stdout).group(1))
+
+
 def main():
     os.makedirs(BUILD, exist_ok=True)
     results = {"sizes": [], "cpus": os.cpu_count()}
@@ -152,6 +160,15 @@ def main():
                       flush=True)
                 with open(OUT, "w") as f:
                     json.dump(results | {"sizes": results["sizes"] + [size]}, f, indent=1)
+        # one gradient on one thread, the three builds of seed 1 alternated
+        reps = 20000 if G <= 20 else 2000
+        times = {v: [] for v in ("collapsed", "full", "full_nc")}
+        for _ in range(7):
+            for v in times:
+                times[v].append(grad_ns(os.path.join(BUILD, f"{v}_{G}x{T}_s{SEEDS[0]}"), reps))
+        size["gradient_ns"] = times
+        size["gradient_load"] = os.getloadavg()
+        print(f"G={G} T={T} gradient ns (min of 7): " + ", ".join(f"{v} {min(t):.0f}" for v, t in times.items()), flush=True)
         results["sizes"].append(size)
     with open(OUT, "w") as f:
         json.dump(results, f, indent=1)

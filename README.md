@@ -65,6 +65,20 @@ compiler uses could be written by hand in Rust (see the caveats in
 compiler produces this from a few lines of mathematics, with gradients derived
 for you and with shape, positivity and SPD errors caught before anything runs.
 
+**A latent random walk integrated out by the compiler**
+([details](docs/kalman.md)). In `examples/random_walk_panel.mint`, a panel of
+Gaussian random walks observed with Gaussian noise and unknown scales, mintc
+finds the walk, integrates it out exactly with a Kalman filter per series,
+and NUTS samples the 23 (G = 20) or 253 (G = 250) remaining parameters
+instead of 3,023 or 37,753; the walk is drawn back afterwards. Over three
+seeds, the lowest effective sample size of the remaining parameters per
+gradient was 100 to 146 times that of full NUTS on the non-centred form, and
+400 to 790 times on the centred form as written, though each collapsed
+gradient costs 1.8 to 3.5 times as much. The log density matches a dense
+Gaussian computation to about 1e-15 on small panels, and the posterior
+matches full NUTS within Monte Carlo error. Wall times were taken on a
+machine shared with other jobs (load 16 to 32): see the report.
+
 ## Two examples
 
 Newton's method for L2-regularised logistic regression. The checker proves `H`
@@ -128,7 +142,8 @@ help: declare the parameter as `param sigma: Positive`; Mint then samples log(si
 ```
 
 All examples are in `examples/`: `logistic_newton.mint`, `logistic_bayes.mint`,
-`linear_bayes.mint`, `eight_schools.mint` and `dynamic_poisson.mint`. Programs that must fail to compile
+`linear_bayes.mint`, `eight_schools.mint`, `dynamic_poisson.mint` and
+`random_walk_panel.mint`. Programs that must fail to compile
 are in `examples/errors/`.
 
 ## Quick start
@@ -190,7 +205,8 @@ Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
 `--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`,
-`--no-narrow-data`, `--no-negzero-sums`, and `--strict-fp` (strict IEEE
+`--no-narrow-data`, `--no-negzero-sums`, `--no-collapse` (sample a latent
+random walk with NUTS instead of integrating it out), and `--strict-fp` (strict IEEE
 evaluation order, no vector math). `--fused-leapfrog` turns one on (see
 `MINT_FUSED_LEAPFROG` above).
 
@@ -268,6 +284,8 @@ followed by row-major little-endian f64.
 - [Hierarchical time series against rustmc and Stan](docs/hierarchical.md)
 - [Benchmark report](docs/benchmark.md)
 - [Compiler architecture](docs/architecture.md)
+- [Kalman collapse](docs/kalman.md): the compiler integrates a latent
+  Gaussian random walk out of a model
 - [Next milestone](docs/next-milestone.md): the minimum work needed to test
   whether first-class mathematical types enable useful optimisations in
   general, not only on examples I chose.

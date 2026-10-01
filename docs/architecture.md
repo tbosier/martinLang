@@ -370,6 +370,23 @@ these models' log densities are near -1e16 and finite differences fail for
 every build). The measurements are in
 [compiler-round.md](compiler-round.md).
 
+### Kalman collapse
+
+Before any of this, `gen_model` looks for a matrix (or vector) parameter that
+is a latent Gaussian random walk observed with Gaussian noise: a Normal prior
+and one Normal observation whose mean is affine in `cumsum` of it, with
+nothing else mentioning it (`detect_kalman`; `--no-collapse` turns it off).
+Each one found is integrated out: the parameter and its two statements are
+removed, NUTS samples the reduced model, `logp` adds the marginal log density
+from a Kalman filter per series (`mint_kalman_ll`, or
+`mint_kalman_ll_shared` when the filter's variances are the same for every
+series) with its gradient from the filter's adjoint, and the parameter is
+drawn back for each kept draw by forward filtering, backward sampling. The
+rule, the derivation, the tests and the measurements are in
+[kalman.md](kalman.md). A scan kernel no longer owns the gradient of a
+parameter that a filter's expressions use, since the filter adds to it after
+every kernel.
+
 ### Narrow data
 
 Data reaches a model through `sample()`, and the generated `init` already
@@ -761,6 +778,8 @@ The language subset is small on purpose:
   distributions.
 - Model parameters are `Real`, `Positive`, `Vector[n]`, `Positive[n]` or
   `Matrix[m, n]`.
+- The only latent structure integrated out is a scalar Gaussian random walk
+  per series with Gaussian observations (see [kalman.md](kalman.md)).
 - Distributions are `Normal`, `BernoulliLogit`, `PoissonLog` and
   `Exponential`.
 - Inside a model, a matrix product must be `data_matrix * name`, in a
