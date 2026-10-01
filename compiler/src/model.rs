@@ -14,12 +14,13 @@
 //! Z'Z, Z'y and y'y. These are computed once before sampling, and each
 //! gradient then costs O(q^2) instead of O(n q).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Dist, Func, SShape, TExpr, TModel, TModelStmt, TK};
 use crate::codegen::{scalar_func, Opts};
-use crate::ir::{fconst, for_range, for_range_md, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module, Narrow};
+use crate::explain::{self, ModelRep, ParamRep, Poly, StmtRep};
+use crate::ir::{fconst, for_range, for_range_md, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module, Narrow, ROW_BLOCK};
 use crate::types::{Dim, Dom, Ty};
 
 pub fn data_global(model: &str, name: &str) -> String {
@@ -441,35 +442,54 @@ fn has_func(e: &M) -> bool {
 /// in their own passes, and the elementwise pass has no inner loops, so it
 /// vectorises (including exp and log, through the vector math library).
 fn wants_fission(dist: Dist, lhs: &M, args: &[M]) -> bool {
+    fission_why(dist, lhs, args).is_ok()
+}
+
+/// Why a statement wants loop fission (see `wants_fission`), or why not.
+fn fission_why(dist: Dist, lhs: &M, args: &[M]) -> Result<String, String> {
     let mut mv = Vec::new();
     matvecs(lhs, &mut mv);
     for a in args {
         matvecs(a, &mut mv);
     }
     if mv.is_empty() {
-        return false;
+        return Err("no matrix-vector product".into());
     }
     let scale_indexed = dist == Dist::Normal && args[1].indexed();
-    dist == Dist::BernoulliLogit || dist == Dist::PoissonLog || dist == Dist::Exponential || scale_indexed || has_func(lhs) || args.iter().any(has_func)
+    if dist == Dist::BernoulliLogit || dist == Dist::PoissonLog || dist == Dist::Exponential {
+        Ok(format!("{dist:?} needs exp or log"))
+    } else if scale_indexed {
+        Ok("the scale varies by observation, so the density needs a log per observation".into())
+    } else if has_func(lhs) || args.iter().any(has_func) {
+        Ok("the expression calls a function (exp, log, ...)".into())
+    } else {
+        Err("no transcendental function next to the product".into())
+    }
 }
 
-fn plan_suffstats(dist: Dist, lhs: &M, args: &[M], shape: &SShape) -> Option<SsPlan> {
-    if dist != Dist::Normal || !matches!(shape, SShape::Vec(_)) || lhs.active() || !lhs.indexed() {
-        return None;
+fn plan_suffstats(dist: Dist, lhs: &M, args: &[M], shape: &SShape) -> Result<SsPlan, &'static str> {
+    if dist != Dist::Normal {
+        return Err("not Normal");
+    }
+    if !matches!(shape, SShape::Vec(_)) {
+        return Err("not vector-shaped");
+    }
+    if lhs.active() || !lhs.indexed() {
+        return Err("the outcome is not a data vector");
     }
     if lhs.has_cumsum() || args.iter().any(|a| a.has_cumsum()) {
-        return None;
+        return Err("it contains a running sum");
     }
     let (mu, sigma) = (&args[0], &args[1]);
     if sigma.indexed() {
-        return None;
+        return Err("the scale is not one scalar");
     }
     let mut terms = Vec::new();
     let mut offset = Vec::new();
     if !affine(mu, 1.0, &mut terms, &mut offset) || terms.is_empty() {
-        return None;
+        return Err("the mean is not affine in the parameters with data coefficients");
     }
-    Some(SsPlan { terms, offset })
+    Ok(SsPlan { terms, offset })
 }
 
 /// Per-function view of the model's data, dimensions and parameters.
@@ -533,6 +553,17 @@ struct Mg<'a> {
     leap_cov: Vec<(String, String)>,
     /// The model's parameters (for `leap_blocks_of`).
     leap_tm_params: Vec<(String, Ty)>,
+    /// Write to the explain report: only the first copy of `logp` (not the
+    /// narrow-data variants or the leap entry point, which repeat it).
+    rec: bool,
+    /// The statement being emitted, for `Mg::note`.
+    cur_k: usize,
+    /// The current fused scan kernel's pass structure has been reported.
+    scan_noted: bool,
+    /// The switch that keeps fused scan kernels on one thread, if any.
+    par_off: Option<&'static str>,
+    /// Report lines waiting for the current statement's kernel description.
+    pending: Vec<String>,
 }
 
 impl HasFb for Mg<'_> {
@@ -571,6 +602,11 @@ impl<'a> Mg<'a> {
             par_nt: None,
             leap_cov: Vec::new(),
             leap_tm_params: tm.params.clone(),
+            rec: false,
+            cur_k: 0,
+            scan_noted: false,
+            par_off: None,
+            pending: Vec::new(),
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -1070,11 +1106,159 @@ impl<'a> Mg<'a> {
         let Mg { f, m, .. } = self;
         m.funcs.push(f.finish(header, epi));
     }
+
+    /// Adds a line to the explain report of the current statement.
+    fn note(&mut self, s: impl Into<String>) {
+        if self.rec {
+            note(self.m, self.cur_k, s);
+        }
+    }
+}
+
+/// The transcendental functions in `names` (Module::math), for the report.
+pub fn math_summary(names: &[String]) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let lanes = |v: &str| if v == "f64" || v.is_empty() { "scalar".to_string() } else { format!("{} lanes", v.trim_start_matches('v').trim_end_matches("f64")) };
+        let l = if let Some(rest) = n.strip_prefix("mint_") {
+            let (base, v) = rest.split_once("_v").map(|(b, v)| (b, format!("v{v}"))).unwrap_or((rest, String::new()));
+            let base = if base == "log1p01" { "log1p" } else { base };
+            format!("Mint's {base} ({})", lanes(&v))
+        } else if let Some(rest) = n.strip_prefix("llvm.") {
+            let (base, v) = rest.split_once('.').unwrap_or((rest, "f64"));
+            format!("llvm.{base} ({})", lanes(v))
+        } else {
+            format!("libm {n}")
+        };
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(format!("math: {}", out.join(", ")))
+    }
+}
+
+/// The explain report's entry for the model being compiled (None outside
+/// `mintc explain`).
+fn rep(m: &mut Module) -> Option<&mut ModelRep> {
+    m.log.as_deref_mut().map(|r| r.model())
+}
+
+/// Adds a line to the report of statement k (the k-th `~`).
+fn note(m: &mut Module, k: usize, s: impl Into<String>) {
+    if let Some(r) = rep(m) {
+        r.stmts[k].lines.push(s.into());
+    }
+}
+
+/// Source lines of the `~` statements, in order.
+fn stmt_lines(tm: &TModel) -> Vec<u32> {
+    tm.body.iter().filter_map(|s| if let TModelStmt::Tilde { span, .. } = s { Some(span.line) } else { None }).collect()
+}
+
+/// A lowered expression, for the report.
+fn show_m(e: &M) -> String {
+    match e {
+        M::Const(c) => explain::num(*c),
+        M::DimV(n) | M::DataS(n) | M::DataV(n, _) | M::DataM(n) | M::ParamS(n) | M::ParamV(n, _) | M::ParamM(n) => n.clone(),
+        M::MatVec { mat, vec, .. } => format!("{mat} * {}", show_m(vec)),
+        M::Cumsum { inner, .. } => format!("cumsum({})", show_m(inner)),
+        M::Bin(op, a, b) => format!("({} {} {})", show_m(a), op.symbol(), show_m(b)),
+        M::Neg(a) => format!("-{}", show_m(a)),
+        M::Func(f, a) => format!("{}({})", f.name(), show_m(a)),
+    }
+}
+
+fn narrow_name(k: Narrow) -> &'static str {
+    match k {
+        Narrow::I8 => "int8",
+        Narrow::I16 => "int16",
+        Narrow::F32 => "float",
+    }
+}
+
+/// The columns of Z and their number q for a sufficient-statistics plan.
+fn ss_cols(plan: &SsPlan) -> (Vec<String>, Poly) {
+    let mut q = Poly::default();
+    let mut cols = Vec::new();
+    for t in &plan.terms {
+        let c = |coef: f64| if coef == 1.0 { String::new() } else { format!("{} * ", explain::num(coef)) };
+        match t {
+            Term::Ones { param, coef } => {
+                cols.push(format!("{}1 for {param}", c(*coef)));
+                q.add(&Poly::constant(1));
+            }
+            Term::Col { param, data, coef } => {
+                cols.push(format!("{}{} for {param}", c(*coef), show_m(data)));
+                q.add(&Poly::constant(1));
+            }
+            Term::Block { param, mat, cols: d, coef } => {
+                cols.push(format!("{}{mat} ({d} columns) for {param}", c(*coef)));
+                q.add(&Poly::dims(&[d]));
+            }
+        }
+    }
+    (cols, q)
 }
 
 pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     m.declare("declare noalias ptr @mint_ws_slot(i64, i64)");
     let name = &tm.name;
+    if let Some(r) = m.log.as_deref_mut() {
+        let lets: HashMap<String, TExpr> = tm.body.iter().filter_map(|s| if let TModelStmt::Let { name, value } = s { Some((name.clone(), value.clone())) } else { None }).collect();
+        let mut decl = HashMap::new();
+        for (n, t) in &tm.data {
+            decl.insert(n.clone(), (t.clone(), format!("data declared {}", explain::src_ty(t))));
+        }
+        for (n, t) in &tm.params {
+            decl.insert(n.clone(), (t.clone(), format!("param declared {}", explain::src_ty(t))));
+        }
+        let stmts = tm
+            .body
+            .iter()
+            .filter_map(|s| {
+                let TModelStmt::Tilde { lhs, dist, args, span, .. } = s else { return None };
+                let text = format!("{} ~ {dist:?}({})", explain::show(lhs), args.iter().map(explain::show).collect::<Vec<_>>().join(", "));
+                // the model lets it uses, and the lets those use
+                let mut used = Vec::new();
+                for e in std::iter::once(lhs).chain(args) {
+                    explain::vars_of(e, &mut used);
+                }
+                let mut k = 0;
+                while k < used.len() {
+                    if let Some(v) = lets.get(&used[k]) {
+                        explain::vars_of(v, &mut used);
+                    }
+                    k += 1;
+                }
+                let mut lines: Vec<String> = used.iter().filter_map(|n| lets.get(n).map(|v| format!("with {n} = {}", explain::show(v)))).collect();
+                lines.reverse();
+                // the checker's proof that a scale or rate is Positive (when
+                // it is not a literal)
+                let pos = match dist {
+                    Dist::Normal => Some(("scale", &args[1])),
+                    Dist::Exponential => Some(("rate", &args[0])),
+                    _ => None,
+                };
+                if let Some((what, e)) = pos.filter(|(_, e)| !matches!(e.kind, TK::Num(_))) {
+                    let sc = explain::Scope { lets: &lets, decl: &decl };
+                    let mut chain = Vec::new();
+                    explain::fact_chain(e, &sc, 0, &mut HashSet::new(), &mut chain);
+                    lines.extend(chain.into_iter().enumerate().map(|(i, (d, l))| format!("{}{}{l}", "  ".repeat(d), if i == 0 { format!("{what} ") } else { String::new() })));
+                }
+                Some(StmtRep { line: span.line, text, lines })
+            })
+            .collect();
+        r.models.push(ModelRep {
+            name: name.clone(),
+            data: tm.data.iter().map(|(n, t)| format!("{n}: {}", explain::src_ty(t))).collect(),
+            stmts,
+            ..Default::default()
+        });
+    }
     for d in &tm.dims {
         m.globals.push(format!("{} = internal global i64 0", dim_global(name, d)));
     }
@@ -1095,6 +1279,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                 low.lets.insert(name.clone(), value.clone());
             }
             TModelStmt::Tilde { lhs, dist, args, shape, .. } => {
+                let k = stmts.len();
                 let l = low.lower(lhs, shape).unwrap_or_else(|e| panic_model(tm, &e));
                 let a: Vec<M> = args.iter().map(|x| low.lower(x, shape).unwrap_or_else(|e| panic_model(tm, &e))).collect();
                 if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) && l.active() {
@@ -1104,8 +1289,28 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                     // its support could not be checked before sampling
                     panic_model(tm, "the outcome of BernoulliLogit and PoissonLog cannot contain cumsum");
                 }
-                let ss = if opts.suffstats { plan_suffstats(*dist, &l, &a, shape) } else { None };
+                let try_ss = plan_suffstats(*dist, &l, &a, shape);
+                match (&try_ss, opts.suffstats) {
+                    (Ok(plan), true) => {
+                        let (cols, q) = ss_cols(plan);
+                        note(m, k, format!("sufficient statistics: Normal with a data outcome, one scalar scale and a mean affine in the parameters, so the likelihood depends on the data only through Z'Z, Z'y and y'y; Z = [{}], q = {q}", cols.join(", ")));
+                        if !plan.offset.is_empty() {
+                            let off: Vec<String> = plan.offset.iter().map(|(c, e)| if *c == 1.0 { show_m(e) } else { format!("{} * {}", explain::num(*c), show_m(e)) }).collect();
+                            note(m, k, format!("data-only terms of the mean subtracted from the outcome first: {}", off.join(", ")));
+                        }
+                    }
+                    (Ok(_), false) => note(m, k, "sufficient statistics: off (--no-suffstats)"),
+                    (Err(why), _) if *dist == Dist::Normal && matches!(shape, SShape::Vec(_)) && !l.active() && l.indexed() => note(m, k, format!("sufficient statistics: no, {why}")),
+                    _ => {}
+                }
+                let ss = if opts.suffstats { try_ss.ok() } else { None };
                 let fission = opts.fission && ss.is_none() && matches!(shape, SShape::Vec(_)) && wants_fission(*dist, &l, &a);
+                match fission_why(*dist, &l, &a) {
+                    Ok(why) if fission => note(m, k, format!("loop fission: {why}")),
+                    Ok(_) if !opts.fission && ss.is_none() => note(m, k, "loop fission: off (--no-fission); X * v is a row dot product inside the loop"),
+                    Err(why) if ss.is_none() && why != "no matrix-vector product" => note(m, k, format!("loop fission: no, {why}; X * v is a row dot product inside the loop")),
+                    _ => {}
+                }
                 stmts.push(Stmt::Tilde { dist: *dist, lhs: l, args: a, shape: shape.clone(), ss, fission });
             }
         }
@@ -1125,27 +1330,51 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     }
 
     let mut cm = Vec::new();
-    if opts.scan_layout {
-        let mut mv = Vec::new();
-        for Stmt::Tilde { lhs, args, .. } in &stmts {
-            for e in std::iter::once(lhs).chain(args) {
-                scan_shapes(e, &mut cm);
-                matvec_shapes(e, &mut mv);
-            }
+    let mut scanned = Vec::new();
+    let mut mv = Vec::new();
+    for Stmt::Tilde { lhs, args, .. } in &stmts {
+        for e in std::iter::once(lhs).chain(args) {
+            scan_shapes(e, &mut scanned);
+            matvec_shapes(e, &mut mv);
         }
+    }
+    if opts.scan_layout {
+        cm = scanned.clone();
         cm.retain(|s| !mv.contains(s));
+    }
+    if let Some(r) = rep(m) {
+        for (rd, cd) in &scanned {
+            r.layout.push(if cm.contains(&(rd.clone(), cd.clone())) {
+                format!("Matrix[{rd}, {cd}]: scan layout, because a running sum runs along {cd}: rows in blocks of {CM_BLOCK}, each block stored column by column (the {CM_BLOCK} rows at column 0, then column 1, ...); the last {rd} mod {CM_BLOCK} rows form a block of their own")
+            } else if !opts.scan_layout {
+                format!("Matrix[{rd}, {cd}]: row-major (--no-scan-layout), although a running sum runs along {cd}")
+            } else {
+                format!("Matrix[{rd}, {cd}]: row-major: a matrix-vector product uses the same shape")
+            });
+        }
+        if scanned.is_empty() {
+            r.layout.push("row-major throughout (no running sum over a matrix)".into());
+        }
     }
 
     // Narrow data: `init` picks, per sample() call, a variant of `logp`
     // whose vector kernels read a narrow copy of each data buffer whose
     // values it holds exactly (variant 0 reads only doubles).
-    let cands = narrow_candidates(tm, &stmts, opts, &cm, m.avx2);
+    let mut nlog = Vec::new();
+    let cands = narrow_candidates(tm, &stmts, opts, &cm, m.avx2, &mut nlog);
     for (n, _) in &cands {
         m.globals.push(format!("{} = internal global ptr null", narrow_global(name, n)));
     }
     let nv: usize = cands.iter().map(|(_, k)| k.len() + 1).product();
     if nv > 1 {
         m.globals.push(format!("@mint_model_{name}_variant = internal global i64 0"));
+        nlog.push(format!("{nv} variants of logp are compiled (variant 0 reads only doubles); init records which one the data allows, and sample() passes that one to the sampler"));
+    }
+    if let Some(r) = rep(m) {
+        if nlog.is_empty() {
+            r.other.push("narrow data: none, no data is read by Mint's own vector kernels".into());
+        }
+        r.narrow = nlog;
     }
     gen_init(m, tm, &stmts, opts, &cm, &cands);
     gen_logp(m, tm, &stmts, opts, &cm, false);
@@ -1176,12 +1405,7 @@ const MAX_NARROW_VARIANTS: usize = 4;
 /// fused scan kernel, with the statements it absorbs, and the fission
 /// kernel), each with the narrow types to try for it, narrowest first.
 /// Which one is used, if any, is decided at run time from the values.
-fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], avx2: bool) -> Vec<(String, Vec<Narrow>)> {
-    // Off under --strict-fp, and without AVX2 (the barrier in Fb::opaque
-    // needs a vector register for <4 x double>; programs are built for the host).
-    if !opts.narrow_data || opts.strict_fp || !avx2 {
-        return Vec::new();
-    }
+fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], avx2: bool, log: &mut Vec<String>) -> Vec<(String, Vec<Narrow>)> {
     fn leaves(e: &M, out: &mut Vec<String>) {
         match e {
             // a column-indexed vector in a kernel whose lanes run along rows
@@ -1227,6 +1451,22 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
             }
         }
     }
+    // Off under --strict-fp, and without AVX2 (the barrier in Fb::opaque
+    // needs a vector register for <4 x double>; programs are built for the host).
+    if !opts.narrow_data || opts.strict_fp || !avx2 {
+        let read: Vec<&String> = tm.data.iter().map(|(n, _)| n).filter(|n| names.contains(n)).collect();
+        if !read.is_empty() {
+            let why = if !opts.narrow_data {
+                "--no-narrow-data"
+            } else if opts.strict_fp {
+                "--strict-fp"
+            } else {
+                "the host has no AVX2"
+            };
+            log.push(format!("off ({why}); the vector kernels read {} as doubles", read.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        return Vec::new();
+    }
     // (name, types, whether the model makes it integer-valued)
     // MINTC_NARROW_VARIANTS overrides the limit (for tests that need more
     // types per buffer than the default allows)
@@ -1255,20 +1495,39 @@ fn narrow_candidates(tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]
     // integers in real-valued data, then float and int16 for counts),
     // then whole candidates, real-valued ones first.
     let count = |c: &[(String, Vec<Narrow>, bool)]| c.iter().fold(1usize, |a, (_, k, _)| a.saturating_mul(k.len() + 1));
+    let mut dropped: Vec<(String, Narrow)> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     for (ints, drop) in [(false, Narrow::I16), (false, Narrow::I8), (true, Narrow::F32), (true, Narrow::I16)] {
         if count(&cands) <= max_variants {
             break;
         }
-        for (_, ks, i) in cands.iter_mut() {
-            if *i == ints && ks.len() > 1 {
+        for (n, ks, i) in cands.iter_mut() {
+            if *i == ints && ks.len() > 1 && ks.contains(&drop) {
                 ks.retain(|k| *k != drop);
+                dropped.push((n.clone(), drop));
             }
         }
     }
     while count(&cands) > max_variants {
         let at = cands.iter().rposition(|c| !c.2).unwrap_or(cands.len() - 1);
+        removed.push(format!("{}: stays double (at most {max_variants} variants of logp)", cands[at].0));
         cands.remove(at);
     }
+    for (n, ks, _) in &cands {
+        let tries: Vec<&str> = ks.iter().map(|k| narrow_name(*k)).collect();
+        let what = stmts.iter().find_map(|s| {
+            let Stmt::Tilde { dist, lhs, .. } = s;
+            match (dist, lhs) {
+                (Dist::BernoulliLogit, M::DataV(x, _) | M::DataM(x)) if x == n => Some(" (a BernoulliLogit outcome, checked to be 0 or 1, so int8 only)"),
+                (Dist::PoissonLog, M::DataV(x, _) | M::DataM(x)) if x == n => Some(" (a PoissonLog outcome, checked to be counts)"),
+                _ => None,
+            }
+        });
+        let skipped: Vec<&str> = dropped.iter().filter(|(d, _)| d == n).map(|(_, k)| narrow_name(*k)).collect();
+        let skipped = if skipped.is_empty() { String::new() } else { format!("; {} not tried (at most {max_variants} variants of logp)", skipped.join(" and ")) };
+        log.push(format!("{n}: tries {}; the vector kernels read a copy in the first type that holds every value exactly, else the doubles{}{skipped}", tries.join(", then "), what.unwrap_or("")));
+    }
+    log.extend(removed);
     cands.into_iter().map(|(n, k, _)| (n, k)).collect()
 }
 
@@ -1328,10 +1587,14 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         transpose(&mut g, &src, &dst, &rd, &cd);
         g.f.emit(format!("store ptr {dst}, ptr {}", data_global(&tm.name, n)));
         g.data_p.insert(n.clone(), dst);
+        if let Some(r) = rep(g.m) {
+            r.layout.push(format!("data {n}: copied into the scan layout when sample() starts"));
+        }
     }
     // BernoulliLogit and PoissonLog outcomes are data; check their support once.
-    for s in stmts {
+    for (k, s) in stmts.iter().enumerate() {
         let Stmt::Tilde { dist: d @ (Dist::BernoulliLogit | Dist::PoissonLog), lhs, shape, .. } = s else { continue };
+        note(g.m, k, format!("the outcome is checked to be {} when sample() starts", if *d == Dist::BernoulliLogit { "0 or 1" } else { "whole numbers >= 0" }));
         let msg = g.m.string(&format!("model {}", tm.name));
         let checker = if *d == Dist::BernoulliLogit { "mint_check_binary" } else { "mint_check_count" };
         for_shape(&mut g, shape, |g, ix| {
@@ -1350,6 +1613,8 @@ fn gen_init(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     }
     for (k, s) in stmts.iter().enumerate() {
         let Stmt::Tilde { lhs, shape: SShape::Vec(len), ss: Some(plan), .. } = s else { continue };
+        let (_, qs) = ss_cols(plan);
+        note(g.m, k, format!("init computes Z'Z ({} x {}, one triangle, mirrored), Z'y ({qs} values) and y'y once per sample() call, in one pass over the {len} observations", explain::factor(&qs), explain::factor(&qs)));
         let name = tm.name.clone();
         let q = ss_q(&mut g, plan);
         let qq = g.f.imul(&q, &q);
@@ -1544,7 +1809,13 @@ fn first_of(g: &mut Mg, n: &str) -> String {
 fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], leap: bool) -> bool {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
+    g.rec = !leap && g.m.variant.is_empty() && g.m.log.is_some();
     let (layout, _total) = g.layout(tm);
+    let lines = stmt_lines(tm);
+    // explain: why a statement over a host's shape stays out of it, and why
+    // a matrix parameter of the host's shape is not owned
+    let mut absorb_why: HashMap<usize, String> = HashMap::new();
+    let mut own_why: HashMap<usize, Vec<String>> = HashMap::new();
 
     // Statement fusion. An element-wise statement over the same column-major
     // shape as a fused scan (a prior on the scanned matrix, say) is absorbed
@@ -1567,9 +1838,11 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                     continue;
                 }
                 if uses_axes(l2) || a2.iter().any(uses_axes) {
+                    absorb_why.entry(t).or_insert(format!("not absorbed into the fused scan kernel of line {}: it reads row- or column-indexed vectors", lines[h]));
                     continue;
                 }
                 if vec_host && kernel_lanes(*d2, l2, a2, *f2) == 1 {
+                    absorb_why.entry(t).or_insert(format!("not absorbed into the fused scan kernel of line {}: it has no vector form", lines[h]));
                     continue;
                 }
                 absorbed[t] = Some(h);
@@ -1587,6 +1860,26 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 let in_scans_only = !mentions_outside_scans(lhs, n) && !args.iter().any(|a| mentions_outside_scans(a, n));
                 if only_here && in_scans_only {
                     owned.entry(h).or_default().push(n.clone());
+                } else if mentions(lhs, n) || args.iter().any(|a| mentions(a, n)) {
+                    let why = if !only_here {
+                        let other: Vec<String> = stmts
+                            .iter()
+                            .enumerate()
+                            .filter(|(t, s2)| {
+                                let Stmt::Tilde { lhs: l2, args: a2, .. } = s2;
+                                *t != h && absorbed[*t] != Some(h) && (mentions(l2, n) || a2.iter().any(|a| mentions(a, n)))
+                            })
+                            .map(|(t, _)| lines[t].to_string())
+                            .collect();
+                        if other.len() == 1 {
+                            format!("line {} also uses it", other[0])
+                        } else {
+                            format!("lines {} also use it", other.join(", "))
+                        }
+                    } else {
+                        "it is used outside the running sums".to_string()
+                    };
+                    own_why.entry(h).or_default().push(format!("gradient of {n} accumulated in memory, not owned: {why}"));
                 }
             }
         }
@@ -1597,6 +1890,13 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             if matches!(t, Ty::Matrix(..)) && owned.values().filter(|v| v.contains(n)).count() == 1 && g.leap_cov.len() < LEAP_MAX_BLOCKS {
                 g.leap_cov.push((n.clone(), off.clone()));
             }
+        }
+        if let Some(r) = rep(g.m) {
+            r.other.push(if g.leap_cov.is_empty() {
+                "fused leapfrog (--fused-leapfrog): not emitted, no matrix parameter is owned by exactly one fused scan kernel".to_string()
+            } else {
+                format!("fused leapfrog (--fused-leapfrog): the leap entry point hands the sampler's leaf work on {} to the kernel threads", g.leap_cov.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "))
+            });
         }
         if g.leap_cov.is_empty() {
             return false;
@@ -1631,6 +1931,13 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     }
     // Fused scan kernels whose groups of rows can be split across the
     // chain's threads: the requested thread count is read once per call.
+    g.par_off = if !opts.parallel_kernel {
+        Some("--no-parallel-kernel")
+    } else if opts.strict_fp {
+        Some("--strict-fp")
+    } else {
+        None
+    };
     if opts.parallel_kernel && opts.scan_fusion && !opts.strict_fp {
         let any = stmts.iter().enumerate().any(|(k, s)| {
             let Stmt::Tilde { dist, lhs, args, shape, ss: None, fission } = s else { return false };
@@ -1748,29 +2055,80 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
 
     for (k, s) in stmts.iter().enumerate() {
         let Stmt::Tilde { dist, lhs, args, shape, ss, fission } = s;
-        if absorbed[k].is_some() {
+        g.cur_k = k;
+        let math0 = g.m.math.len();
+        if let Some(h) = absorbed[k] {
+            g.note(format!("absorbed into the fused scan kernel of line {}: it runs in that kernel's reverse loop, with no pass of its own", lines[h]));
             continue; // emitted inside its host's kernel
+        }
+        if let Some(w) = absorb_why.get(&k) {
+            g.note(w.clone());
         }
         if let Some(plan) = ss {
             let n = match shape {
                 SShape::Vec(n) => n,
                 _ => unreachable!(),
             };
+            let (_, q) = ss_cols(plan);
+            g.note(format!("each gradient: O(q^2) = O({}^2) arithmetic on the precomputed statistics, no loop over the {n} observations", explain::factor(&q)));
             gen_ss_logp(&mut g, tm, k, plan, &args[1], n, &lp);
+            let used = g.m.math[math0..].to_vec();
+            if let Some(l) = math_summary(&used) {
+                g.note(l);
+            }
             continue;
         }
         let nodes = stmt_globals(lhs, args, *fission);
-        if fused_scan_rows(&g, lhs, args, shape, *fission).is_some() && opts.scan_fusion {
+        let scan = fused_scan_why(&g.cm, lhs, args, shape, *fission);
+        if scan.is_ok() && opts.scan_fusion {
             let guests: Vec<&Stmt> = stmts.iter().enumerate().filter(|(t, _)| absorbed[*t] == Some(k)).map(|(_, s)| s).collect();
             let own = owned.get(&k).cloned().unwrap_or_default();
+            if g.rec {
+                // reported by gen_fused_scan after its own description
+                for (t, _) in stmts.iter().enumerate().filter(|(t, _)| absorbed[*t] == Some(k)) {
+                    let text = rep(g.m).map(|r| r.stmts[t].text.clone()).unwrap_or_default();
+                    g.pending.push(format!("absorbed: line {} ({text}), in the reverse loop", lines[t]));
+                }
+                for n in &own {
+                    g.pending.push(format!("owned gradient: {n}; every contribution happens in this kernel's reverse loop, so it is summed in a register and stored once, never zeroed"));
+                }
+                g.pending.extend(own_why.get(&k).into_iter().flatten().cloned());
+            }
             gen_fused_scan(&mut g, tm, k, *dist, lhs, args, shape, &nodes, &guests, &own, &lp);
+            let used = g.m.math[math0..].to_vec();
+            if let Some(l) = math_summary(&used) {
+                g.note(l);
+            }
             continue;
+        }
+        if matches!(shape, SShape::Mat(..)) && nodes.iter().any(|n| matches!(n, M::Cumsum { .. })) {
+            match &scan {
+                Ok(_) => g.note("fused scan kernel: off (--no-scan-fusion)"),
+                Err(why) => g.note(format!("not a fused scan kernel: {why}")),
+            }
         }
         if opts.fission_kernel && !opts.strict_fp && *fission && fission_kernel_ok(lhs, args, &nodes) {
             let SShape::Vec(nd) = shape else { unreachable!() };
             let n = g.dim(nd);
-            gen_fission_kernel(&mut g, *dist, lhs, args, &nodes, &n, &lp);
+            gen_fission_kernel(&mut g, *dist, lhs, args, &nodes, &n, nd, &lp);
+            if g.rec {
+                let used = g.m.math[math0..].to_vec();
+                if let Some(l) = math_summary(&used) {
+                    g.note(l);
+                }
+            }
             continue;
+        }
+        if *fission {
+            g.note(match fission_kernel_why_not(lhs, args, &nodes) {
+                _ if !opts.fission_kernel => "fission kernel: off (--no-fission-kernel)".to_string(),
+                _ if opts.strict_fp => "fission kernel: off (--strict-fp)".to_string(),
+                Some(why) => format!("not a fission kernel: {why}"),
+                None => unreachable!(),
+            });
+        }
+        if g.rec {
+            generic_notes(&mut g, lhs, args, shape, &nodes);
         }
         // before the loop: materialise each node (children first)
         for node in &nodes {
@@ -2032,6 +2390,10 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
             }
             g.split.insert(key, (fw, Some(ad)));
         }
+        let used = g.m.math[math0..].to_vec();
+        if let Some(l) = math_summary(&used) {
+            g.note(l);
+        }
     }
 
     for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
@@ -2068,8 +2430,60 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
     } else {
         format!("define double @mint_model_{}_logp{}(ptr noalias %theta, ptr noalias %grad)", tm.name, g.m.variant)
     };
+    let rec = g.rec;
     g.finish(&header, &[format!("ret double {r}")]);
+    if rec {
+        let slots = m.funcs.last().map_or(0, |f| f.matches("@mint_ws_slot(").count());
+        if let Some(r) = rep(m) {
+            if slots > 0 {
+                r.other.push(format!("scratch: {} in logp, each a per-thread allocation from mint_ws_slot, declared noalias (so LLVM needs no overlap checks between them)", plural(slots, "buffer")));
+            }
+        }
+    }
     true
+}
+
+/// The explain report for a statement that takes the general path of
+/// `gen_logp` (one loop over its index space, with materialised nodes
+/// around it). Mirrors the branches there.
+fn generic_notes(g: &mut Mg, lhs: &M, args: &[M], shape: &SShape, nodes: &[&M]) {
+    let prods: Vec<String> = nodes.iter().filter(|n| matches!(n, M::MatVec { .. })).map(|n| show_m(n)).collect();
+    let text = match shape {
+        SShape::Scalar => "one scalar term".to_string(),
+        SShape::Vec(n) if !prods.is_empty() => format!(
+            "three passes over the {n} elements: the row dot products of {} ({ROW_BLOCK} rows at a time), an elementwise loop for the density and its derivatives (left to LLVM's vectoriser), and the gradient row updates ({ROW_BLOCK} rows at a time)",
+            products(&prods)
+        ),
+        SShape::Vec(n) => format!("one loop over the {n} elements: value, density and reverse sweep per element"),
+        SShape::Mat(r, c) if nodes.is_empty() && !uses_axes(lhs) && !args.iter().any(uses_axes) => format!("one flat loop over the {r} x {c} elements"),
+        SShape::Mat(r, c) if g.is_cm(r, c) => {
+            let mut cp = Vec::new();
+            axis_params(lhs, Ax::Col, &mut cp);
+            for a in args {
+                axis_params(a, Ax::Col, &mut cp);
+            }
+            let acc = if cp.is_empty() { String::new() } else { format!("; gradients of {} (indexed by {c}) summed per column in registers", cp.join(", ")) };
+            format!("one loop over the {r} x {c} elements in the scan layout, columns outer and rows inner{acc}")
+        }
+        SShape::Mat(r, c) => {
+            let mut rp = Vec::new();
+            axis_params(lhs, Ax::Row, &mut rp);
+            for a in args {
+                axis_params(a, Ax::Row, &mut rp);
+            }
+            let acc = if rp.is_empty() { String::new() } else { format!("; gradients of {} (indexed by {r}) summed per row in registers", rp.join(", ")) };
+            format!("one row-major loop over the {r} x {c} elements{acc}")
+        }
+    };
+    g.note(text);
+    for n in nodes {
+        let M::Cumsum { inner, shape: own, .. } = n else { continue };
+        let how = match own {
+            SShape::Mat(r, c) if g.is_cm(r, c) => "column by column in the scan layout",
+            _ => "four rows interleaved",
+        };
+        g.note(format!("running sum of {} materialised before the loop ({how}); its adjoint, a reverse running sum, after it", show_m(inner)));
+    }
 }
 
 /// Most parameters the leap entry point covers: the size of the runtime's
@@ -2139,6 +2553,11 @@ const CHUNK: u32 = 32;
 /// materialised nodes are all matrix-vector products, and every other
 /// operation has a vector form.
 fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
+    fission_kernel_why_not(lhs, args, nodes).is_none()
+}
+
+/// Why a split statement cannot run as a fission kernel (None: it can).
+fn fission_kernel_why_not(lhs: &M, args: &[M], nodes: &[&M]) -> Option<&'static str> {
     fn ok(e: &M) -> bool {
         match e {
             M::Func(Func::Log1p, _) | M::Cumsum { .. } => false,
@@ -2147,7 +2566,13 @@ fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
             _ => true,
         }
     }
-    !nodes.is_empty() && nodes.iter().all(|n| matches!(n, M::MatVec { .. })) && ok(lhs) && args.iter().all(ok)
+    if nodes.is_empty() || !nodes.iter().all(|n| matches!(n, M::MatVec { .. })) {
+        return Some("it materialises something other than matrix-vector products");
+    }
+    if !(ok(lhs) && args.iter().all(ok)) {
+        return Some("log1p or a running sum has no vector form in it");
+    }
+    None
 }
 
 /// A split likelihood over n observations as one loop over chunks of CHUNK
@@ -2166,7 +2591,8 @@ fn fission_kernel_ok(lhs: &M, args: &[M], nodes: &[&M]) -> bool {
 /// X is read from memory once per gradient instead of twice. The rows left
 /// over (n mod CHUNK) take the same steps in groups of four, and the last
 /// n mod 4 rows in scalar code.
-fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M], n: &str, lp: &str) {
+#[allow(clippy::too_many_arguments)]
+fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M], n: &str, nd: &Dim, lp: &str) {
     const L: u32 = 4;
     let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
     let bufs: Vec<(String, Option<String>)> = keys.iter().map(|k| g.split[k].clone()).collect();
@@ -2240,6 +2666,19 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
     let scr_e = scratch(g, cheap && matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog));
     let scr_l = scratch(g, scr_e.is_some() && dist == Dist::BernoulliLogit);
     let scr_q = scratch(g, scr_l.is_some() && g.m.inline_log);
+    if g.rec {
+        let prods: Vec<String> = nodes.iter().map(|n| show_m(n)).collect();
+        g.note(format!("fission kernel: one loop over chunks of {CHUNK} rows; per chunk, the row dot products of {} ({L} rows at a time), then the density and its derivatives on {L} rows per vector, then the gradient updates ({L} rows at a time, reading the chunk's rows again from L1); all in Mint's own <{L} x double> code", products(&prods)));
+        if scr_e.is_some() {
+            g.note(format!("the density's {} runs first, in a loop of its own over the chunk, into L1 scratch", if dist == Dist::PoissonLog { "exp(eta)" } else { "exp(-|eta|)" }));
+        } else if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) {
+            g.note("the density's exp stays in the main loop: the linear predictor calls a function, so it is not evaluated twice");
+        }
+        if scr_l.is_some() {
+            g.note(format!("log(1 + exp(-|eta|)) likewise, in a second loop{}", if scr_q.is_some() { ", with 1/(1 + e) computed once for it and the sigmoid" } else { "" }));
+        }
+        g.note(format!("rows left over: the last {nd} mod {CHUNK} in groups of {L} in the same vector code, then the last {nd} mod {L} in scalar code"));
+    }
     // The elementwise part and the gradient updates of `rows` rows from lo,
     // whose dot products are in the buffers.
     let run_chunk = |g: &mut Mg, lo: &str, rows: u32| {
@@ -2562,21 +3001,28 @@ fn fused_scan_rows(g: &Mg, lhs: &M, args: &[M], shape: &SShape, fission: bool) -
 }
 
 fn fused_scan_rows_cm(cm: &[(Dim, Dim)], lhs: &M, args: &[M], shape: &SShape, fission: bool) -> Option<Dim> {
-    let SShape::Mat(r, c) = shape else { return None };
+    fused_scan_why(cm, lhs, args, shape, fission).ok()
+}
+
+/// `fused_scan_rows_cm`, with the reason when the statement is not a fused
+/// scan.
+fn fused_scan_why(cm: &[(Dim, Dim)], lhs: &M, args: &[M], shape: &SShape, fission: bool) -> Result<Dim, &'static str> {
+    let SShape::Mat(r, c) = shape else { return Err("not matrix-shaped") };
     if !cm.iter().any(|(a, b)| a == r && b == c) {
-        return None;
+        return Err("its shape is not in the scan layout");
     }
     let nodes = stmt_globals(lhs, args, fission);
     if nodes.is_empty() {
-        return None;
+        return Err("no running sum");
     }
     for n in &nodes {
         match n {
             M::Cumsum { shape: own, ax: Ax::Flat, .. } if own == shape && n.active() => {}
-            _ => return None,
+            M::Cumsum { .. } if !n.active() => return Err("a running sum of data only"),
+            _ => return Err("a running sum over another shape"),
         }
     }
-    Some(r.clone())
+    Ok(r.clone())
 }
 
 /// Whether `e` refers to the name `n` anywhere (inside running sums too).
@@ -2605,11 +3051,18 @@ fn mentions_outside_scans(e: &M, n: &str) -> bool {
 /// Vector width of the fused kernel of a scan statement: 4, or 1 when some
 /// operation has no vector form yet.
 fn kernel_lanes(dist: Dist, lhs: &M, args: &[M], fission: bool) -> u32 {
+    lanes_why(dist, lhs, args, fission).0
+}
+
+/// `kernel_lanes`, with the reason for one lane.
+fn lanes_why(dist: Dist, lhs: &M, args: &[M], fission: bool) -> (u32, &'static str) {
     let inner_ok = stmt_globals(lhs, args, fission).iter().all(|n| vec_ok(n));
-    if dist != Dist::BernoulliLogit && vec_ok(lhs) && args.iter().all(vec_ok) && inner_ok {
-        4
+    if dist == Dist::BernoulliLogit {
+        (1, "BernoulliLogit has no vector form in this kernel")
+    } else if !(vec_ok(lhs) && args.iter().all(vec_ok) && inner_ok) {
+        (1, "abs, log1p or a matrix-vector product has no vector form in this kernel")
     } else {
-        1
+        (4, "")
     }
 }
 
@@ -2782,6 +3235,18 @@ fn gen_fused_scan<'s>(
         Some(nt) if lanes > 1 && !guest_matvec => Some(nt.clone()),
         _ => None,
     };
+    g.scan_noted = false;
+    if g.rec {
+        let SShape::Mat(rd, cd) = shape else { unreachable!() };
+        let (_, why1) = lanes_why(dist, lhs, args, false);
+        g.note(format!("fused scan kernel over Matrix[{rd}, {cd}]: {} along {cd}, each carried in a register along its row", plural(nodes.len(), "running sum")));
+        let wide = lanes * KERNEL_UNROLL;
+        g.note(if lanes > 1 {
+            format!("vector code: {lanes} lanes (<{lanes} x double>), one row per lane, in groups of {wide} rows ({KERNEL_UNROLL} vectors); the last {rd} mod {wide} rows as vectors of {lanes}, then single rows")
+        } else {
+            format!("scalar code, one row at a time: {why1}")
+        });
+    }
     let (rows, cols) = (sc.rows.clone(), sc.cols.clone());
     let cp = sc.cp.clone();
     g.col_part = cp.iter().map(|p| (p.clone(), g.part_bufs[p].clone())).collect();
@@ -2932,6 +3397,47 @@ fn gen_fused_scan<'s>(
         });
     }
     g.col_part.clear();
+    if g.rec {
+        let SShape::Mat(rd, cd) = shape else { unreachable!() };
+        for l in std::mem::take(&mut g.pending) {
+            g.note(l);
+        }
+        if !sc.rp.is_empty() {
+            g.note(format!("gradients of {} (indexed by {rd}): summed in registers per group of rows", sc.rp.join(", ")));
+        }
+        if !sc.cp.is_empty() {
+            g.note(format!("gradients of {} (indexed by {cd}): per-lane partial sums, {cd} x 4 per thread, reduced once at the end", sc.cp.join(", ")));
+        }
+        let wide = lanes * KERNEL_UNROLL;
+        g.note(match (&par, g.par_off) {
+            (Some(_), _) => format!("threads: the groups of {wide} rows are split across the chain's threads when more than one is requested at run time (mint_par_groups; thread 0 also runs the rows left over); with one thread it runs the serial loop"),
+            (None, Some(flag)) if lanes > 1 => format!("threads: one (parallel kernel off, {flag})"),
+            (None, _) if lanes == 1 => "threads: one (only vector kernels are split)".to_string(),
+            (None, _) => "threads: one (an absorbed statement has a matrix-vector product)".to_string(),
+        });
+    }
+}
+
+/// Matrix-vector products for the report; a product that occurs k times
+/// is computed k times, and says so.
+fn products(ps: &[String]) -> String {
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for p in ps {
+        match seen.iter_mut().find(|(q, _)| q == p) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((p.clone(), 1)),
+        }
+    }
+    seen.iter().map(|(p, n)| if *n == 1 { p.clone() } else { format!("{p} ({n} times, once per occurrence)") }).collect::<Vec<_>>().join(" and ")
+}
+
+/// "1 running sum", "2 running sums".
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
+    }
 }
 
 /// Slots of the context a fused scan statement passes to its parallel
@@ -3288,6 +3794,7 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // reading it); the running sums have one slot each. With 8 rows and
     // 150 columns that is 19 KB, which stays in L1.
     let split = dist == Dist::PoissonLog;
+    let first_report = g.rec && !g.scan_noted;
     let scr = g.kscratch[&keys[0]].clone();
     let cw = g.f.imul(&cols, &width);
     let eta_p = scr.clone();
@@ -3310,6 +3817,17 @@ fn scan_group(g: &mut Mg, sc: &Scan, l: u32, u: u32, r0: &str, lpa: &[String], v
     // adjoint to R in a register.
     let lean = alias && additive(&args[0]) && !lhs.has_cumsum();
     let ex_p = if lean { s_p[0].clone() } else { ex_p };
+    if first_report {
+        g.scan_noted = true;
+        g.note(if split {
+            format!(
+                "passes per group: A, forward in time, the running sums and the density's argument into L1 scratch; B, exp over the scratch with nothing else live (the exp split); C (density and derivatives) and R (reverse running sums of the adjoints) together, from the last column{}",
+                if lean { "; C reloads the argument (a sum of terms) instead of the running sum, and hands its adjoint to R in a register" } else { "" }
+            )
+        } else {
+            "passes per group: forward in time, the running sums, the density and its derivatives; then backwards from the last column, the reverse running sums of the adjoints".to_string()
+        });
+    }
     if split {
         for_range(g, "0", &cols, |g, col| {
             for k in 0..u as usize {
@@ -3614,6 +4132,17 @@ fn gen_constrain(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) {
     g.cm = cm.to_vec();
     let (layout, total) = g.layout(tm);
     g.f.memcpy(g.m, "%out", "%unc", &total);
+    if let Some(r) = rep(g.m) {
+        for (n, t) in &tm.params {
+            let transform = match t {
+                Ty::Matrix(r, c, _) if cm.contains(&(r.clone(), c.clone())) => "unconstrained; scan layout inside the sampler, draws written row-major",
+                Ty::Scalar(Dom::Positive) => "sampled as log; exp maps it back, log-Jacobian added",
+                Ty::Vector(_, Dom::Positive) => "each entry sampled as log; exp maps it back, log-Jacobian added",
+                _ => "unconstrained",
+            };
+            r.params.push(ParamRep { name: n.clone(), ty: explain::src_ty(t), size: Poly::size_of(t).to_string(), transform: transform.into() });
+        }
+    }
     for ((_, t), (_, off, _)) in tm.params.iter().zip(&layout) {
         match t {
             Ty::Matrix(r, c, _) if g.is_cm(r, c) => {
@@ -3658,10 +4187,15 @@ fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> b
         g.cm = cm.to_vec();
         let (layout, total) = g.layout(tm);
         g.f.memcpy(g.m, "%dst", "%src", &total);
-        for ((_, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+        for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
             let Ty::Matrix(r, c, _) = t else { continue };
             if !g.is_cm(r, c) {
                 continue;
+            }
+            if inward {
+                if let Some(rp) = rep(g.m) {
+                    rp.layout.push(format!("param {n}: in the scan layout inside the sampler's vector; the runtime converts its benchmark point and printed gradients (to_internal, to_user)"));
+                }
             }
             let (rd, cd) = (g.dim(r), g.dim(c));
             let src = g.f.gep("%src", off);
@@ -3696,6 +4230,13 @@ fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, varian
         g.f.emit("call void @mint_set_layout(ptr null, ptr null)");
     }
     let (layout, total) = g.layout(tm);
+    if let Some(r) = rep(g.m) {
+        let mut d = Poly::default();
+        for (_, t) in &tm.params {
+            d.add(&Poly::size_of(t));
+        }
+        r.total = d.to_string();
+    }
     let k = tm.params.len();
     let names = g.f.alloca(&format!("[{k} x ptr]"));
     let sizes = g.f.alloca(&format!("[{k} x i64]"));

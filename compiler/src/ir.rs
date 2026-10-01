@@ -87,6 +87,13 @@ pub struct Module {
     /// Start the vector kernels' register sums of adjoints at -0.0
     /// (`--no-negzero-sums` and `--strict-fp` keep 0.0).
     pub negzero_sums: bool,
+    /// `mintc explain`: the decision log, filled in where each decision is
+    /// made (None for check, emit and build).
+    pub log: Option<Box<crate::explain::Report>>,
+    /// Every transcendental function emitted, by the name of what it calls
+    /// (`Fb::intrinsic1`), in order; the explain report reads the part
+    /// emitted for a statement.
+    pub math: Vec<String>,
 }
 
 /// 2^(j/256) for j = 0..255, each correctly rounded to double (computed with
@@ -990,6 +997,7 @@ impl Fb {
                 m.declare(&d);
             }
             let f = if self.lanes == 1 { "mint_exp".to_string() } else { format!("mint_exp_v{}", self.lanes) };
+            m.math.push(f.clone());
             let r = self.reg();
             self.emit(format!("{r} = call {t} @{f}({t} {a})"));
             return r;
@@ -1001,11 +1009,15 @@ impl Fb {
             for d in mint_log_defs(self.lanes, m.avx2) {
                 m.declare(&d);
             }
+            m.math.push(format!("mint_log_v{}", self.lanes));
             let r = self.reg();
             self.emit(format!("{r} = call {t} @mint_log_v{}({t} {a})", self.lanes));
             return r;
         }
         let name = self.vname(name);
+        if !lit && !name.starts_with("llvm.fabs") && !name.starts_with("llvm.sqrt") {
+            m.math.push(name.clone());
+        }
         m.declare(&format!("declare {t} @{name}({t})"));
         let r = self.reg();
         self.emit(format!("{r} = call {t} @{name}({t} {a})"));
@@ -1018,6 +1030,7 @@ impl Fb {
         for d in mint_log1p01_defs(self.lanes, m.avx2) {
             m.declare(&d);
         }
+        m.math.push(format!("mint_log1p01_v{}", self.lanes));
         let t = self.ty();
         let r = self.reg();
         self.emit(format!("{r} = call {t} @mint_log1p01_v{}({t} {e}, {t} {q})", self.lanes));
@@ -1026,6 +1039,9 @@ impl Fb {
     pub fn intrinsic2(&mut self, m: &mut Module, name: &str, a: &str, b: &str) -> String {
         let (t, a, b) = (self.ty(), self.opnd(a), self.opnd(b));
         let name = self.vname(name);
+        if name.starts_with("llvm.pow") {
+            m.math.push(name.clone());
+        }
         m.declare(&format!("declare {t} @{name}({t}, {t})"));
         let r = self.reg();
         self.emit(format!("{r} = call {t} @{name}({t} {a}, {t} {b})"));
@@ -1219,40 +1235,45 @@ pub fn if_then<C: HasFb>(cx: &mut C, cond: &str, body: impl FnOnce(&mut C)) {
     f.start_block(&join);
 }
 
+/// Rows per pass of the blocked row kernels (`rows_dot_blocked`,
+/// `rows_axpy_blocked`).
+pub const ROW_BLOCK: usize = 4;
+
 /// For i in 0..n: store(i, sum_k M[i*c + k] * v[k]).
 /// Rows are processed four at a time so each load of v feeds four FMAs;
 /// LLVM vectorises the four independent reductions.
 pub fn rows_dot_blocked<C: HasFb>(cx: &mut C, m: &str, v: &str, c: &str, lo: &str, n: &str, store: &dyn Fn(&mut C, &str, &str)) {
     let len = cx.fb().iop("sub nsw", n, lo);
-    let nb = cx.fb().iop("sdiv", &len, "4");
+    let rb = ROW_BLOCK.to_string();
+    let nb = cx.fb().iop("sdiv", &len, &rb);
     for_range(cx, "0", &nb, |cx, b| {
         let f = cx.fb();
-        let i0 = f.imul(b, "4");
+        let i0 = f.imul(b, &rb);
         let i0 = f.iadd(&i0, lo);
         let mut ids = Vec::new();
         let mut rows = Vec::new();
-        for l in 0..4 {
+        for l in 0..ROW_BLOCK {
             let i = f.iadd(&i0, &l.to_string());
             rows.push(f.imul(&i, c));
             ids.push(i);
         }
-        let accs: Vec<String> = (0..4).map(|_| f.acc_new(&fconst(0.0))).collect();
+        let accs: Vec<String> = (0..ROW_BLOCK).map(|_| f.acc_new(&fconst(0.0))).collect();
         for_range(cx, "0", c, |cx, k| {
             let f = cx.fb();
             let x = f.load(v, k);
-            for l in 0..4 {
+            for l in 0..ROW_BLOCK {
                 let idx = f.iadd(&rows[l], k);
                 let a = f.load(m, &idx);
                 let t = f.fmul(&a, &x);
                 f.acc_add(&accs[l], &t);
             }
         });
-        for l in 0..4 {
+        for l in 0..ROW_BLOCK {
             let s = cx.fb().acc_get(&accs[l]);
             store(cx, &ids[l], &s);
         }
     });
-    let done = cx.fb().imul(&nb, "4");
+    let done = cx.fb().imul(&nb, &rb);
     let done = cx.fb().iadd(&done, lo);
     for_range(cx, &done, n, |cx, i| {
         let f = cx.fb();
@@ -1274,13 +1295,14 @@ pub fn rows_dot_blocked<C: HasFb>(cx: &mut C, m: &str, v: &str, c: &str, lo: &st
 /// For k in 0..c: g[k] += sum_i coef(i) * M[i*c + k], four rows per pass over g.
 pub fn rows_axpy_blocked<C: HasFb>(cx: &mut C, m: &str, c: &str, lo: &str, n: &str, coef: &dyn Fn(&mut C, &str) -> String, g: &str) {
     let len = cx.fb().iop("sub nsw", n, lo);
-    let nb = cx.fb().iop("sdiv", &len, "4");
+    let rb = ROW_BLOCK.to_string();
+    let nb = cx.fb().iop("sdiv", &len, &rb);
     for_range(cx, "0", &nb, |cx, b| {
-        let i0 = cx.fb().imul(b, "4");
+        let i0 = cx.fb().imul(b, &rb);
         let i0 = cx.fb().iadd(&i0, lo);
         let mut rows = Vec::new();
         let mut cs = Vec::new();
-        for l in 0..4 {
+        for l in 0..ROW_BLOCK {
             let i = cx.fb().iadd(&i0, &l.to_string());
             cs.push(coef(cx, &i));
             rows.push(cx.fb().imul(&i, c));
@@ -1288,7 +1310,7 @@ pub fn rows_axpy_blocked<C: HasFb>(cx: &mut C, m: &str, c: &str, lo: &str, n: &s
         for_range(cx, "0", c, |cx, k| {
             let f = cx.fb();
             let mut sum: Option<String> = None;
-            for l in 0..4 {
+            for l in 0..ROW_BLOCK {
                 let idx = f.iadd(&rows[l], k);
                 let a = f.load(m, &idx);
                 let t = f.fmul(&cs[l], &a);
@@ -1300,7 +1322,7 @@ pub fn rows_axpy_blocked<C: HasFb>(cx: &mut C, m: &str, c: &str, lo: &str, n: &s
             f.add_to(g, k, &sum.unwrap());
         });
     });
-    let done = cx.fb().imul(&nb, "4");
+    let done = cx.fb().imul(&nb, &rb);
     let done = cx.fb().iadd(&done, lo);
     for_range(cx, &done, n, |cx, i| {
         let a = coef(cx, i);

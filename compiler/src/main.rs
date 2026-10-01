@@ -3,6 +3,10 @@
 //!   mintc check  prog.mint
 //!   mintc emit   prog.mint [-o prog.ll] [flags]
 //!   mintc build  prog.mint [-o prog]    [flags]
+//!   mintc explain prog.mint [-o prog.ll] [flags]
+//!
+//! explain compiles exactly as build does (same flags, same decisions) and
+//! prints what the compiler found and did; with -o it also writes the IR.
 //!
 //! flags: --strict-fp      no reassociation, FMA contraction or vector math
 //!        --no-suffstats   disable the sufficient-statistics rewrite
@@ -26,6 +30,7 @@ mod ast;
 mod check;
 mod codegen;
 mod diag;
+mod explain;
 mod ir;
 mod lexer;
 mod model;
@@ -88,7 +93,7 @@ fn runtime_object() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: mintc (check|emit|build) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--no-narrow-data] [--no-negzero-sums] [--fused-leapfrog]");
+    eprintln!("usage: mintc (check|emit|build|explain) FILE.mint [-o OUT] [--strict-fp] [--no-suffstats] [--no-fission] [--no-vecmath] [--no-gram-blocking] [--no-scan-layout] [--no-inline-exp] [--no-scan-fusion] [--no-row-fusion] [--no-fission-kernel] [--no-inline-log] [--no-parallel-kernel] [--no-narrow-data] [--no-negzero-sums] [--fused-leapfrog]");
     exit(2);
 }
 
@@ -143,6 +148,14 @@ fn main() {
     };
     if cmd == "check" {
         println!("ok");
+        return;
+    }
+    if cmd == "explain" {
+        let (ll, report) = codegen::compile_logged(&prog, &opts, true);
+        if let Some(o) = out {
+            std::fs::write(&o, ll).expect("write .ll");
+        }
+        print!("{}", explain::render(&report.expect("explain report")));
         return;
     }
     let ll = codegen::compile(&prog, &opts);

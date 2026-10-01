@@ -10,11 +10,12 @@
 //! * `X' * v`, `X' * diag(w) * X` and `v' * w` never materialise a transpose
 //!   or a diagonal matrix, and Gram products compute one triangle only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::BinOp;
 use crate::check::{bcast_axis, Axis, Func, TExpr, TFn, TProgram, TStmt, TK};
-use crate::ir::{fconst, for_range, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module};
+use crate::explain::{self, show, FnRep, Report};
+use crate::ir::{fconst, for_range, if_then, rows_axpy_blocked, rows_dot_blocked, Fb, HasFb, Module, ROW_BLOCK};
 use crate::model;
 use crate::types::{Dim, Dom, Ty};
 
@@ -245,6 +246,14 @@ fn find_matvec_x(e: &TExpr, vars: &HashMap<String, Loc>) -> Option<String> {
 /// rows were no faster for Newton).
 const GRAM_CHUNK: u32 = 32;
 
+/// Tile widths of the tiled Gram kernel, in vectors of 4 columns: 4 x 12
+/// tiles, then 4 x 8 (see `gram_strip`, whose arithmetic assumes 3 and 2).
+const TILE_WIDE: usize = 3;
+const TILE_NARROW: usize = 2;
+
+/// Rows per vector of a fused row loop's per-row values.
+const ROW_LANES: u32 = 4;
+
 enum Prep {
     Scalar(String),
     Buf(String),
@@ -272,6 +281,14 @@ pub struct Cg<'a> {
     row_fusion: bool,
     /// first row of the chunk being emitted by a fused row loop
     chunk_i0: Option<String>,
+    /// The switch that turned row fusion off, if any (for the report).
+    row_off: Option<&'static str>,
+    /// For the explain report: the function's `let`s that are never
+    /// assigned again (name -> value), its parameters (name -> type, how
+    /// declared), and the nesting depth of the statement being emitted.
+    lets: HashMap<String, TExpr>,
+    decl: HashMap<String, (Ty, String)>,
+    depth: usize,
 }
 
 impl HasFb for Cg<'_> {
@@ -309,6 +326,12 @@ pub fn declare_runtime(m: &mut Module) {
 }
 
 pub fn compile(p: &TProgram, opts: &Opts) -> String {
+    compile_logged(p, opts, false).0
+}
+
+/// Compiles the program; with `log`, also returns the explain report that
+/// the code generators filled in while making their decisions.
+pub fn compile_logged(p: &TProgram, opts: &Opts, log: bool) -> (String, Option<Report>) {
     let mut m = Module::default();
     m.inline_exp = opts.inline_exp && !opts.strict_fp;
     m.inline_log = opts.inline_log && !opts.strict_fp;
@@ -316,6 +339,9 @@ pub fn compile(p: &TProgram, opts: &Opts) -> String {
     #[cfg(target_arch = "x86_64")]
     {
         m.avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    }
+    if log {
+        m.log = Some(Box::new(Report { switches: switches(opts), host: global_lines(&m, opts), ..Default::default() }));
     }
     declare_runtime(&mut m);
     for tm in &p.models {
@@ -325,11 +351,116 @@ pub fn compile(p: &TProgram, opts: &Opts) -> String {
         gen_fn(&mut m, p, f, opts);
     }
     m.funcs.push("define i32 @main() {\nentry:\n  call void @mint_fn_main()\n  ret i32 0\n}\n".into());
-    m.finish()
+    let report = m.log.take().map(|b| *b);
+    (m.finish(), report)
+}
+
+/// The switches that differ from the defaults, as given on the command line.
+fn switches(o: &Opts) -> Vec<String> {
+    let mut v = Vec::new();
+    for (on, flag) in [
+        (o.strict_fp, "--strict-fp"),
+        (!o.suffstats, "--no-suffstats"),
+        (!o.fission, "--no-fission"),
+        (!o.vecmath, "--no-vecmath"),
+        (o.gram_block <= 1, "--no-gram-blocking"),
+        (!o.scan_layout, "--no-scan-layout"),
+        (!o.inline_exp, "--no-inline-exp"),
+        (!o.scan_fusion, "--no-scan-fusion"),
+        (!o.row_fusion, "--no-row-fusion"),
+        (!o.fission_kernel, "--no-fission-kernel"),
+        (!o.inline_log, "--no-inline-log"),
+        (!o.parallel_kernel, "--no-parallel-kernel"),
+        (!o.narrow_data, "--no-narrow-data"),
+        (!o.negzero_sums, "--no-negzero-sums"),
+        (o.fused_leapfrog, "--fused-leapfrog"),
+    ] {
+        if on {
+            v.push(flag.to_string());
+        }
+    }
+    v
+}
+
+/// Whole-program decisions, made in `compile` and `declare_runtime`.
+fn global_lines(m: &Module, o: &Opts) -> Vec<String> {
+    let off = |flag: &str| if o.strict_fp { "--strict-fp".to_string() } else { flag.to_string() };
+    let mut v = Vec::new();
+    v.push(if m.avx2 { "host: AVX2 and FMA (Mint's exp and log use its gathers; narrow data needs it)".to_string() } else { "host: no AVX2 and FMA (narrow data off)".to_string() });
+    v.push(if m.inline_exp { "exp: Mint's own in the vector code Mint emits (scan and fission kernels, fused row loops); llvm.exp elsewhere".to_string() } else { format!("exp: llvm.exp everywhere ({})", off("--no-inline-exp")) });
+    v.push(if m.inline_log { "log: Mint's own in the fission kernel's vector code; llvm.log elsewhere".to_string() } else { format!("log: llvm.log everywhere ({})", off("--no-inline-log")) });
+    v.push(if o.vecmath && !o.strict_fp {
+        "llvm.exp and llvm.log in loops LLVM vectorises: glibc's vector versions (libmvec)".to_string()
+    } else {
+        format!("llvm.exp and llvm.log: scalar calls, no vector math library ({})", if o.strict_fp { "--strict-fp" } else { "--no-vecmath" })
+    });
+    if !m.negzero_sums {
+        v.push(format!("register sums of adjoints in vector kernels start at 0.0 ({})", off("--no-negzero-sums")));
+    }
+    v.push("allocator: mint_alloc is declared noalias and returns 64-byte aligned memory, so LLVM needs no overlap checks on fresh buffers".into());
+    v
+}
+
+/// Collects a function's `let`s and the names assigned after their `let`.
+fn collect_lets(body: &[TStmt], lets: &mut HashMap<String, TExpr>, assigned: &mut HashSet<String>) {
+    for s in body {
+        match s {
+            TStmt::Let { name, value } => {
+                lets.insert(name.clone(), value.clone());
+            }
+            TStmt::Assign { name, .. } => {
+                assigned.insert(name.clone());
+            }
+            TStmt::Repeat { body, .. } => collect_lets(body, lets, assigned),
+            _ => {}
+        }
+    }
+}
+
+/// The report's one-line form of a statement.
+fn stmt_header(s: &TStmt) -> String {
+    match s {
+        TStmt::Let { name, value } | TStmt::Assign { name, value } => format!("line {}: {} = {}", value.span.line, explain::plain(name), show(value)),
+        TStmt::Repeat { count, .. } => format!("line {}: repeat {}", count.span.line, show(count)),
+        TStmt::Print(vals) => format!("line {}: print({})", vals.first().map_or(0, |v| v.span.line), vals.iter().map(show).collect::<Vec<_>>().join(", ")),
+        TStmt::Expr(e) => format!("line {}: {}", e.span.line, show(e)),
+    }
 }
 
 fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
-    let mut cg = Cg { m, f: Fb::new(opts.strict_fp), vars: HashMap::new(), dims: HashMap::new(), prog, gram_block: opts.gram_block, mat_shape: None, row_fusion: opts.row_fusion && !opts.strict_fp, chunk_i0: None };
+    let row_off = if !opts.row_fusion {
+        Some("--no-row-fusion")
+    } else if opts.strict_fp {
+        Some("--strict-fp")
+    } else {
+        None
+    };
+    let mut cg = Cg {
+        m,
+        f: Fb::new(opts.strict_fp),
+        vars: HashMap::new(),
+        dims: HashMap::new(),
+        prog,
+        gram_block: opts.gram_block,
+        mat_shape: None,
+        row_fusion: opts.row_fusion && !opts.strict_fp,
+        chunk_i0: None,
+        row_off,
+        lets: HashMap::new(),
+        decl: HashMap::new(),
+        depth: 0,
+    };
+    if let Some(r) = cg.m.log.as_deref_mut() {
+        let ps: Vec<String> = f.params.iter().map(|(n, t)| format!("{}: {}", explain::plain(n), explain::src_ty(t))).collect();
+        let ret = f.ret.as_ref().map(|t| format!(" -> {}", explain::src_ty(t))).unwrap_or_default();
+        r.fns.push(FnRep { sig: format!("fn {}({}){ret}", f.name, ps.join(", ")), lines: Vec::new() });
+        let mut assigned = HashSet::new();
+        collect_lets(&f.body, &mut cg.lets, &mut assigned);
+        cg.lets.retain(|n, _| !assigned.contains(n));
+        for (n, t) in &f.params {
+            cg.decl.insert(n.clone(), (t.clone(), format!("declared {}", explain::src_ty(t))));
+        }
+    }
     let mut params = Vec::new();
     for (k, (name, ty)) in f.params.iter().enumerate() {
         let a = format!("%a{k}");
@@ -387,9 +518,57 @@ fn gen_fn(m: &mut Module, prog: &TProgram, f: &TFn, opts: &Opts) {
     let header = format!("define {ret_ty} @mint_fn_{}({})", f.name, params.join(", "));
     let fb = std::mem::replace(&mut cg.f, Fb::new(true));
     cg.m.funcs.push(fb.finish(&header, &epi));
+    if let Some(r) = cg.m.log.as_deref_mut() {
+        let allocs = cg.m.funcs.last().map_or(0, |t| t.matches("@mint_alloc(").count());
+        let r = r.func();
+        if allocs > 0 {
+            r.lines.push((0, format!("buffers: {allocs} from mint_alloc, each allocated once at the start of its top-level statement (outside any repeat) and freed at return")));
+        }
+        if r.lines.is_empty() {
+            r.lines.push((0, "no kernels".into()));
+        }
+    }
 }
 
 impl Cg<'_> {
+    /// Adds a line to the explain report of this function, at the current
+    /// statement's depth.
+    fn note(&mut self, s: impl Into<String>) {
+        let d = self.depth;
+        if let Some(r) = self.m.log.as_deref_mut() {
+            r.func().lines.push((d, s.into()));
+        }
+    }
+
+    fn log_len(&mut self) -> usize {
+        self.m.log.as_deref_mut().map_or(0, |r| r.func().lines.len())
+    }
+
+    /// Inserts `text` at position `at` (where its statement began), when the
+    /// statement added lines of its own.
+    fn log_header(&mut self, at: usize, text: String) {
+        let d = self.depth;
+        if let Some(r) = self.m.log.as_deref_mut() {
+            let f = r.func();
+            if f.lines.len() > at {
+                f.lines.insert(at, (d, text));
+            }
+        }
+    }
+
+    /// The type-fact chain of `e`, below the current line.
+    fn note_facts(&mut self, e: &TExpr) {
+        if self.m.log.is_none() {
+            return;
+        }
+        let sc = explain::Scope { lets: &self.lets, decl: &self.decl };
+        let mut out = Vec::new();
+        explain::fact_chain(e, &sc, self.depth + 1, &mut HashSet::new(), &mut out);
+        if let Some(r) = self.m.log.as_deref_mut() {
+            r.func().lines.extend(out);
+        }
+    }
+
     fn dim(&self, d: &Dim) -> String {
         match d {
             Dim::Const(c) => c.to_string(),
@@ -427,6 +606,14 @@ impl Cg<'_> {
     }
 
     fn stmt(&mut self, s: &TStmt) {
+        let at = self.log_len();
+        self.depth += 1;
+        self.stmt_inner(s);
+        self.depth -= 1;
+        self.log_header(at, stmt_header(s));
+    }
+
+    fn stmt_inner(&mut self, s: &TStmt) {
         match s {
             TStmt::Let { name, value } => {
                 let loc = match (&value.kind, &value.ty) {
@@ -535,6 +722,7 @@ impl Cg<'_> {
                 Dim::Const(c) => Some(c.to_string()),
                 Dim::Sym(sym) => self.dims.get(sym).cloned(),
             };
+            self.note(if bound.is_some() { format!("{d}: checked against the file when it is read") } else { format!("{d}: taken from the file (known at run time)") });
             match bound {
                 Some(b) => {
                     let msg = self.m.string(&format!("{path}: dimension {d}"));
@@ -555,6 +743,7 @@ impl Cg<'_> {
                     Dom::NonNeg => 2,
                     Dom::Real => unreachable!(),
                 };
+                self.note(format!("every entry checked to be {dom} when it is read (the annotation)"));
                 let n = self.dim(n);
                 let msg = self.m.string(path);
                 self.f.emit(format!("call void @mint_check_domain(ptr {r}, i64 {n}, i64 {code}, ptr {msg})"));
@@ -620,6 +809,37 @@ impl Cg<'_> {
             _ => unreachable!(),
         };
         let tm = self.prog.models.iter().find(|m| &m.name == mname).unwrap();
+        if self.m.log.is_some() {
+            let mut known = HashMap::new();
+            let mut fixed = Vec::new();
+            let mut later = Vec::new();
+            for (sym, d) in tm.dims.iter().zip(dims) {
+                match d {
+                    Dim::Const(c) => {
+                        known.insert(sym.clone(), *c);
+                        fixed.push(format!("{sym} = {c}"));
+                    }
+                    Dim::Sym(s) if s == sym => later.push(sym.clone()),
+                    Dim::Sym(s) => later.push(format!("{sym} (= {s})")),
+                }
+            }
+            let mut binds = fixed;
+            if !later.is_empty() {
+                binds.push(format!("{} known at run time", later.join(", ")));
+            }
+            let caller = self.m.log.as_deref_mut().map(|r| r.func().sig.clone()).unwrap_or_default();
+            let caller = caller.split('(').next().unwrap_or("").to_string();
+            let line = e.span.line;
+            if let Some(mr) = self.m.log.as_deref_mut().and_then(|r| r.models.iter_mut().find(|r| &r.name == mname)) {
+                let mut total = explain::Poly::default();
+                for (_, t) in &tm.params {
+                    total.add(&explain::Poly::size_of(t));
+                }
+                let value = total.eval(&known).map(|v| format!(", so NUTS samples {v} values")).unwrap_or_default();
+                mr.calls.push(format!("sample() at line {line} in {caller}: {}{value}", if binds.is_empty() { "no dimensions".to_string() } else { binds.join(", ") }));
+            }
+            self.note(format!("sample({}): runs init (data copies, statistics, narrow-data checks), then NUTS with draws = {draws}, warmup = {warmup}, chains = {chains}, seed = {seed}", show(inst)));
+        }
         for ((dname, dty), arg) in tm.data.iter().zip(data) {
             let g = model::data_global(mname, dname);
             if dty.is_buffer() {
@@ -850,6 +1070,7 @@ impl Cg<'_> {
             }
             TK::Cumsum(a) => {
                 // running sum along the last dimension, in place
+                self.note(format!("{}: running sum along the last dimension, in place", show(e)));
                 self.gen_into(a, dest);
                 let (rows, cols) = match &e.ty {
                     Ty::Vector(n, _) => ("1".to_string(), self.dim(n)),
@@ -876,10 +1097,25 @@ impl Cg<'_> {
                     self.f.store(&v, dest, &k.to_string());
                 }
             }
-            TK::MatVec { m, trans, v } => self.matvec(m, *trans, v, dest),
-            TK::Gram { a, w } => self.gram(a, w.as_deref(), dest),
-            TK::MatMul { a, ta, b, tb } => self.matmul(a, *ta, b, *tb, dest),
+            TK::MatVec { m, trans, v } => {
+                self.note(if *trans {
+                    let fused = if matches!(v.kind, TK::Var(_)) { "" } else { ", the vector's elementwise expression computed per row and never stored" };
+                    format!("{}: row updates of the result, {ROW_BLOCK} rows per pass{fused}", show(e))
+                } else {
+                    format!("{}: row dot products, {ROW_BLOCK} rows at a time sharing loads of {}", show(e), show(v))
+                });
+                self.matvec(m, *trans, v, dest)
+            }
+            TK::Gram { a, w } => {
+                let text = show(e);
+                self.gram(a, w.as_deref(), dest, &text)
+            }
+            TK::MatMul { a, ta, b, tb } => {
+                self.note(format!("{}: general matrix product, one dot product per entry", show(e)));
+                self.matmul(a, *ta, b, *tb, dest)
+            }
             TK::Transpose(a) => {
+                self.note(format!("{}: transpose, materialised", show(e)));
                 let src = self.gen_buf(a);
                 let (r, c) = match &a.ty {
                     Ty::Matrix(r, c, _) => (self.dim(r), self.dim(c)),
@@ -898,6 +1134,8 @@ impl Cg<'_> {
                 });
             }
             TK::Solve { h, g } => {
+                self.note(format!("{}: Cholesky solve (mint_chol_solve), allowed because {} is proved SPD:", show(e), show(h)));
+                self.note_facts(h);
                 let hb = self.gen_buf(h);
                 let gb = self.gen_buf(g);
                 let p = match &g.ty {
@@ -1026,6 +1264,7 @@ impl Cg<'_> {
     }
 
     fn check_spd(&mut self, e: &TExpr, buf: &str) {
+        self.note(format!("{}: symmetry and a Cholesky factorisation checked at run time", show(e)));
         let p = match &e.ty {
             Ty::Matrix(r, _, _) => self.dim(r),
             _ => unreachable!(),
@@ -1066,8 +1305,9 @@ impl Cg<'_> {
     /// mirrored at the end. Rows of A are processed four at a time, so each
     /// load/store of a destination row feeds four FMAs (register blocking);
     /// w's elementwise expression is fused in, never materialised.
-    fn gram(&mut self, a: &TExpr, w: Option<&TExpr>, dest: &str) {
+    fn gram(&mut self, a: &TExpr, w: Option<&TExpr>, dest: &str, text: &str) {
         if self.gram_block > 1 && !self.f.strict {
+            self.note(format!("{text}: {}", tiled_gram_words(w)));
             let ab = self.gen_buf(a);
             let (r, c) = self.mat_dims(a);
             let mut prep = HashMap::new();
@@ -1102,6 +1342,12 @@ impl Cg<'_> {
             return;
         }
         let b_rows = self.gram_block;
+        self.note(format!(
+            "{text}: Gram kernel, {b_rows} row(s) of {} per pass, upper triangle only, mirrored at the end{} ({})",
+            show(a),
+            if w.is_some() { ", the weights computed per row and never stored" } else { "" },
+            if b_rows <= 1 { "--no-gram-blocking" } else { "the tiled kernel is off under --strict-fp" }
+        ));
         let ab = self.gen_buf(a);
         let (r, c) = self.mat_dims(a);
         let dest = dest.to_string();
@@ -1180,12 +1426,22 @@ impl Cg<'_> {
 
     fn stmt_list(&mut self, body: &[TStmt]) {
         let mut k = 0;
+        let mut quiet_until = 0;
         while k < body.len() {
             if self.row_fusion {
                 let n = self.try_row_fusion(&body[k..]);
                 if n > 0 {
                     k += n;
                     continue;
+                }
+            } else if k >= quiet_until && self.m.log.is_some() {
+                // (the report only: what row fusion would have grouped)
+                let (group, _) = self.row_group(&body[k..]);
+                let n = group.len();
+                if n >= 2 {
+                    let why = self.row_off.unwrap_or("off");
+                    self.note(format!("row fusion: off ({why}); lines {} to {} each stream the rows of {} separately", line_of(&body[k]), line_of(&body[k + n - 1]), explain::plain(group[0].matrix())));
+                    quiet_until = k + n;
                 }
             }
             self.stmt(&body[k]);
@@ -1196,6 +1452,17 @@ impl Cg<'_> {
     /// Fuses the longest run of fusible statements at the start of `body`;
     /// returns how many it consumed (0: none).
     fn try_row_fusion(&mut self, body: &[TStmt]) -> usize {
+        let (group, x) = self.row_group(body);
+        if group.len() < 2 {
+            return 0;
+        }
+        self.emit_row_group(&group, x.as_deref().unwrap(), &body[..group.len()]);
+        group.len()
+    }
+
+    /// The longest run of fusible statements at the start of `body` (fewer
+    /// than two: none), and the matrix whose rows they stream.
+    fn row_group<'e>(&self, body: &'e [TStmt]) -> (Vec<RowStmt<'e>>, Option<String>) {
         let mut group: Vec<RowStmt> = Vec::new();
         let mut x: Option<String> = None;
         for st in body {
@@ -1218,13 +1485,13 @@ impl Cg<'_> {
             group.pop();
         }
         if group.len() < 2 {
-            return 0;
+            group.clear();
         }
-        self.emit_row_group(&group, x.as_deref().unwrap());
-        group.len()
+        (group, x)
     }
 
-    fn emit_row_group(&mut self, group: &[RowStmt], xname: &str) {
+    fn emit_row_group(&mut self, group: &[RowStmt], xname: &str, stmts: &[TStmt]) {
+        let math0 = self.m.math.len();
         let xb = match &self.vars[xname] {
             Loc::Buf(b) => b.clone(),
             _ => unreachable!(),
@@ -1305,6 +1572,35 @@ impl Cg<'_> {
             self.f.emit(format!("{r} = xor i1 {f}, true"));
             r
         });
+        if self.m.log.is_some() {
+            self.note(format!(
+                "row fusion: lines {} to {} run as one loop over chunks of {GRAM_CHUNK} rows of {x}, so each chunk of {x} is read from memory once for all of them",
+                line_of(&stmts[0]),
+                line_of(&stmts[stmts.len() - 1]),
+                x = explain::plain(xname)
+            ));
+            let xname = explain::plain(xname);
+            self.depth += 1;
+            for (k, (r, st)) in group.iter().zip(stmts).enumerate() {
+                let head = stmt_header(st);
+                let what = match r {
+                    RowStmt::Prod { .. } => format!("one value per row; the chunk's dot products {xname} * v first, {ROW_BLOCK} rows per pass over v"),
+                    RowStmt::Trans { rest, .. } => format!(
+                        "{xname}' * f by row updates, {ROW_BLOCK} rows per pass{}{}",
+                        if fold_t == Some(k) { format!("; when {cd} is not a multiple of 4 (checked at run time), computed in the Gram kernel's first padding column instead of by its own row updates") } else { String::new() },
+                        rest.map(|e| format!("; {} added after the loop", show(e))).unwrap_or_default()
+                    ),
+                    RowStmt::Gram { w, rest, .. } => format!("{}{}", tiled_gram_words(*w), rest.map(|e| format!("; {} added after the loop", show(e))).unwrap_or_default()),
+                };
+                self.note(format!("{head}: {what}"));
+            }
+            self.note(if vector_ok {
+                format!("per-row values (producers, coefficients, weights): {ROW_LANES} rows per vector{}", if self.m.inline_exp { ", Mint's exp inline" } else { "" })
+            } else {
+                "per-row values one row at a time: log1p has no vector form".to_string()
+            });
+            self.depth -= 1;
+        }
         let chunks = self.f.iop("add nsw", &n, &(GRAM_CHUNK - 1).to_string());
         let chunks = self.f.iop("sdiv", &chunks, &GRAM_CHUNK.to_string());
         for_range(self, "0", &chunks, |cg, ch| {
@@ -1352,14 +1648,14 @@ impl Cg<'_> {
             };
             cg.f.scalar_inline_exp = true;
             let done = if vector_ok {
-                let nb = cg.f.iop("ashr", &nrows, "2");
+                let nb = cg.f.iop("ashr", &nrows, &ROW_LANES.trailing_zeros().to_string());
                 for_range(cg, "0", &nb, |cg, b| {
-                    let ii = cg.f.imul(b, "4");
-                    cg.f.lanes = 4;
+                    let ii = cg.f.imul(b, &ROW_LANES.to_string());
+                    cg.f.lanes = ROW_LANES;
                     per_row(cg, &ii);
                     cg.f.lanes = 1;
                 });
-                cg.f.imul(&nb, "4")
+                cg.f.imul(&nb, &ROW_LANES.to_string())
             } else {
                 "0".to_string()
             };
@@ -1422,6 +1718,12 @@ impl Cg<'_> {
                 let s = cg.f.fadd(&a, &b);
                 cg.f.store(&s, &d, j);
             });
+        }
+        let used = self.m.math[math0..].to_vec();
+        if let Some(l) = crate::model::math_summary(&used) {
+            self.depth += 1;
+            self.note(l);
+            self.depth -= 1;
         }
     }
 
@@ -1575,17 +1877,18 @@ impl Cg<'_> {
         let used = self.f.iadd(&used, &n4);
         let rest = self.f.iop("sub nsw", &m, &used);
         let n8 = self.f.iop("ashr", &rest, "1");
+        let (w12, w8) = ((4 * TILE_WIDE).to_string(), (4 * TILE_NARROW).to_string());
         for_range(self, "0", &n12, |cg, t| {
-            let k0 = cg.f.imul(t, "12");
+            let k0 = cg.f.imul(t, &w12);
             let k0 = cg.f.iadd(&k0, &j0);
-            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, 3, nrows);
+            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, TILE_WIDE, nrows);
         });
-        let k8 = self.f.imul(&n12, "12");
+        let k8 = self.f.imul(&n12, &w12);
         let k8 = self.f.iadd(&k8, &j0);
         for_range(self, "0", &n8, |cg, t| {
-            let k0 = cg.f.imul(t, "8");
+            let k0 = cg.f.imul(t, &w8);
             let k0 = cg.f.iadd(&k0, &k8);
-            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, 2, nrows);
+            cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &k0, TILE_NARROW, nrows);
         });
         if_then(self, &is1, |cg| cg.gram_tile(xc, c, ws, hs, pp, &js, &j0, &j0, 1, nrows));
     }
@@ -1674,6 +1977,25 @@ impl Cg<'_> {
                 cg.f.store(&s, &dest, &di);
             });
         });
+    }
+}
+
+/// The report's description of the tiled Gram kernel (`gram_chunk`).
+fn tiled_gram_words(w: Option<&TExpr>) -> String {
+    format!(
+        "tiled Gram kernel: chunks of {GRAM_CHUNK} rows; each chunk's weighted rows copied into scratch padded to a multiple of 4 columns; the upper triangle updated in 4 x {} and 4 x {} tiles (one 4 x 4 tile in the last strip) held in vector registers, mirrored at the end{}",
+        4 * TILE_WIDE,
+        4 * TILE_NARROW,
+        if w.is_some() { "; the weights computed per row, never stored" } else { "" }
+    )
+}
+
+fn line_of(s: &TStmt) -> u32 {
+    match s {
+        TStmt::Let { value, .. } | TStmt::Assign { value, .. } => value.span.line,
+        TStmt::Repeat { count, .. } => count.span.line,
+        TStmt::Print(v) => v.first().map_or(0, |e| e.span.line),
+        TStmt::Expr(e) => e.span.line,
     }
 }
 
