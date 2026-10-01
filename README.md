@@ -167,6 +167,9 @@ Useful environment variables for compiled programs:
   chain's threads on the CPUs of one L3 cache.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+- `MINT_METRIC=lowrank` adds to Stan's diagonal metric up to 24 directions
+  (`MINT_LOWRANK_K`) estimated from the gradients of the warmup draws; see
+  [hierarchical.md](docs/hierarchical.md) for what it gains and costs.
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,

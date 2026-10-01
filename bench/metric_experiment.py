@@ -107,11 +107,13 @@ def run(prog, variant, threads):
     }
 
 
-def rng(xs, fmt):
+def rng(xs, fmt=None):
+    """median (min to max); fmt None: whole numbers from 100 up, one decimal below"""
     xs = list(xs)
+    f = (lambda x: fmt.format(x)) if fmt else (lambda x: f"{x:.0f}" if abs(x) >= 100 else f"{x:.1f}")
     if len(xs) == 1:
-        return fmt.format(xs[0])
-    return (fmt + " ({} to {})").format(statistics.median(xs), fmt.format(min(xs)), fmt.format(max(xs)))
+        return f(xs[0])
+    return f"{f(statistics.median(xs))} ({f(min(xs))} to {f(max(xs))})"
 
 
 def summary(runs):
@@ -128,7 +130,7 @@ def summary(runs):
         tp = sorted({r["threads_per_chain"] for r in rs})
         print(f"| {m} | {v} | {'/'.join(map(str, tp))} | {len(rs)} "
               f"| {rng((1000 * r['min_ess'] / r['gradients'] for r in rs), '{:.2f}')} "
-              f"| {rng((r['min_ess'] / r['seconds'] for r in rs), '{:.0f}')} "
+              f"| {rng(r['min_ess'] / r['seconds'] for r in rs)} "
               f"| {statistics.median(r['min_ess'] for r in rs):.0f} "
               f"| {statistics.median(r['leapfrog_per_draw'] for r in rs):.1f} "
               f"| {max(r['max_rhat'] for r in rs):.3f} | {sum(r['divergences'] for r in rs)} |")
@@ -140,7 +142,7 @@ def summary(runs):
                                          r["variant"], str(r["threads"]))):
         rank = "" if not r.get("rank") else f"{r['rank'][0]} to {r['rank'][1]}"
         print(f"| {r['model']} | {r['seed']} | {r['variant']} | {r['threads_per_chain']} | {r['min_ess']:.0f} "
-              f"| {1000 * r['min_ess'] / r['gradients']:.2f} | {r['min_ess'] / r['seconds']:.0f} "
+              f"| {1000 * r['min_ess'] / r['gradients']:.2f} | {rng([r['min_ess'] / r['seconds']])} "
               f"| {r['seconds']:.2f} | {r.get('cpu_seconds', float('nan')):.1f} | {r.get('load_average', float('nan')):.1f} "
               f"| {r['leapfrog_per_draw']:.1f} | {r['max_rhat']:.3f} | {rank} |")
 

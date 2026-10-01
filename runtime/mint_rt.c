@@ -1570,11 +1570,24 @@ done:
   free(Gm), free(R), free(B), free(Ri), free(T), free(beta);
 }
 
-// Most directions of the low-rank metric: MINT_LOWRANK_K, else 24.
-static int lowrank_k(int64_t D) {
-  (void)D;
+// Most directions of the low-rank metric: MINT_LOWRANK_K, or by default 8,
+// 16 or 24, the most for which each thread's share of the directions (single
+// precision, D / nt entries each) fits in its L2 cache (512 KiB if the size is
+// not reported). Each leapfrog step streams the directions twice. On the
+// 37,901-parameter time series (3 threads per chain) 8 directions gave about
+// as many effective draws per gradient as 24, at a lower cost per step; on the
+// 3,171-parameter one 24 gave the most (bench/metric_experiment.py).
+static int lowrank_k(int64_t D, int nt) {
   const char *e = getenv("MINT_LOWRANK_K");
-  int k = e ? atoi(e) : 24;
+  int k;
+  if (e) {
+    k = atoi(e);
+  } else {
+    long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2 <= 0) l2 = 512 * 1024;
+    double groups = (double)l2 * nt / (32.0 * (double)D);  // 8 directions x 4 bytes per entry
+    k = groups >= 3 ? 24 : groups >= 2 ? 16 : 8;
+  }
   if (k > LR_KMAX) k = LR_KMAX;
   if (k < 0) k = 0;
   return k;
@@ -2071,7 +2084,7 @@ static void *run_chain(void *arg) {
   double *lr_q = NULL, *lr_g = NULL, *lr_u = NULL, lr_lam[LR_KMAX];
   if (lowrank) {
     const char *e;
-    lr_kmax = lowrank_k(D);
+    lr_kmax = lowrank_k(D, s->nt);
     if (lr_kmax > D) lr_kmax = (int)D;
     if ((e = getenv("MINT_LOWRANK_CUTOFF"))) lr_cutoff = atof(e);
     if (!(lr_cutoff >= 1.0)) lr_cutoff = 2.0;
