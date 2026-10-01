@@ -9,7 +9,7 @@ usage: make_data.py G T SEED OUTDIR [--shared]
   y[g, t] ~ N(beta[g] + sum_{s <= t} innov[g, s], sigma_y).
 
 With --shared, a common drift shared[t] ~ N(0, 0.05) is added inside the
-running sum (examples/random_walk_shared.mint).
+running sum (as in tests/kalman/shared.mint).
 
 Writes OUTDIR/y.f64 (G x T) and OUTDIR/truth.npz.
 """

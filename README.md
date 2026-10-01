@@ -74,7 +74,8 @@ instead of 3,023 or 37,753; the walk is drawn back afterwards. Over three
 seeds, the lowest effective sample size of the remaining parameters per
 gradient was 100 to 146 times that of full NUTS on the non-centred form, and
 400 to 790 times on the centred form as written, though each collapsed
-gradient costs 1.8 to 3.5 times as much. The log density matches a dense
+gradient costs 1.8 to 3.5 times as much (and drawing the walk back costs a
+few gradients per kept draw, which these ratios leave out). The log density matches a dense
 Gaussian computation to about 1e-15 on small panels, and the posterior
 matches full NUTS within Monte Carlo error. Wall times were taken on a
 machine shared with other jobs (load 16 to 32): see the report.

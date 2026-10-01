@@ -647,31 +647,41 @@ limited=$(MINT_THREADS_PER_CHAIN=10 OMP_THREAD_LIMIT=1 ./build/eight_schools 2>/
 
 # ---- Kalman collapse. A latent Gaussian random walk observed with Gaussian
 # noise is integrated out; NUTS samples the rest, and the walk is drawn back
-# by forward filtering, backward sampling. Exact: on small panels (2 x 5,
-# 3 x 7, 9 x 4) the compiled log density and gradient equal a dense
+# by forward filtering, backward sampling (FFBS). Exact: on small panels
+# (2 x 5, 3 x 7, 9 x 4) the compiled log density and gradient equal a dense
 # Gaussian computation (the walk integrated out analytically in numpy) and
-# pass finite differences, for six models (centred and non-centred, a shared
-# drift, per-series scales, every filter input depending on parameters, and
-# a second matrix in the scan layout). Statistical: the draws of every
-# quantity (remaining parameters and every innovation) agree with full NUTS
-# (--no-collapse) within Monte Carlo error, three seeds each, on four of
-# those models.
+# pass finite differences, for eight models (check_marginal.py). The FFBS
+# draws match the walk's exact Gaussian posterior, means and every
+# covariance entry, for three models with fixed scales (check_ffbs.py), and
+# the normal generator they use passes moment and binned-probability checks
+# on 2e7 variates (zig_test.c). Statistical: the draws of every quantity
+# (remaining parameters and every innovation) agree with full NUTS
+# (--no-collapse) within Monte Carlo error, three seeds each, on four models
+# (compare_posterior.py).
 DEFAULT_FLAGS=
-python3 tests/kalman/check_marginal.py $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'
-[ ${PIPESTATUS[0]} -eq 0 ] || fail=1
-python3 tests/kalman/compare_posterior.py $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'
-[ ${PIPESTATUS[0]} -eq 0 ] || fail=1
+kal_py() { python3 "$@" $M build | sed 's/^/  /;s/^  PASS/PASS/;s/^  FAIL/FAIL/'; [ ${PIPESTATUS[0]} -eq 0 ] || fail=1; }
+kal_py tests/kalman/check_marginal.py
+kal_py tests/kalman/check_ffbs.py
+kal_py tests/kalman/compare_posterior.py
+if clang -O3 -march=native -fopenmp tests/kalman/zig_test.c -o build/zig_test -lm 2>/dev/null; then
+  out=$(./build/zig_test) && pass "$out" || { bad "ziggurat normal generator"; echo "$out"; }
+else
+  bad "build tests/kalman/zig_test.c"
+fi
 
-# What is not collapsed, and why: the model must still build (it is sampled
-# as written) and mintc must say why. --no-collapse turns the collapse off.
-not_collapsed() { # label why model-body
-  printf 'model W {\n    data y: Matrix[G, T]\n    param s: Positive\n    param innov: Matrix[G, T]\n    s ~ Normal(0, 1)\n%s\n}\nfn main() {\n    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")\n    print(sample(W(y), draws = 10, warmup = 10, chains = 1))\n}\n' "$3" > build/kal_not_$1.mint
+# What is not collapsed, and why: the model must build, say why, and still
+# sample as written (it runs to the end).
+not_collapsed_src() { # label why source
+  printf '%s\n' "$3" > build/kal_not_$1.mint
   out=$($M build build/kal_not_$1.mint -o build/kal_not_$1 2>&1) || { bad "kalman eligibility $1: build failed"; echo "$out"; return; }
   if grep -qF "collapsed innov" <<<"$out" || ! grep -qF -- "innov was not integrated out: $2" <<<"$out"; then
-    bad "kalman eligibility $1"; echo "$out"
-  else
-    pass "kalman eligibility: $1 is sampled as written ($2)"
+    bad "kalman eligibility $1"; echo "$out"; return
   fi
+  run=$(./build/kal_not_$1 2>&1) && grep -q "^all .* parameters" <<<"$run" \
+    && pass "kalman eligibility: $1 is sampled as written ($2)" || { bad "kalman eligibility $1: run failed"; echo "$run" | tail -3; }
+}
+not_collapsed() { # label why model-body
+  not_collapsed_src "$1" "$2" "$(printf 'model W {\n    data y: Matrix[G, T]\n    param s: Positive\n    param innov: Matrix[G, T]\n    s ~ Normal(0, 1)\n%s\n}\nfn main() {\n    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")\n    print(sample(W(y), draws = 10, warmup = 10, chains = 1))\n}' "$3")"
 }
 not_collapsed nonlinear "the observation's mean must be" '    innov ~ Normal(0, 0.1)
     y ~ Normal(exp(cumsum(innov, T)), s)'
@@ -680,19 +690,48 @@ not_collapsed squared "inside the running sum it must enter linearly" '    innov
 not_collapsed reused "it appears in 3 statements" '    innov ~ Normal(0, 0.1)
     y ~ Normal(cumsum(innov, T), s)
     y ~ Normal(innov, 1)'
-not_collapsed poisson "its observation is PoissonLog, not Normal" '    innov ~ Normal(0, 0.1)
-    y ~ PoissonLog(cumsum(innov, T))'
+not_collapsed_src poisson "its observation is PoissonLog, not Normal" 'model P {
+    data y: Matrix[G, T]
+    param b: Real
+    param innov: Matrix[G, T]
+    b ~ Normal(0, 1)
+    innov ~ Normal(0, 0.1)
+    y ~ PoissonLog(b + cumsum(innov, T))
+}
+fn main() {
+    let y: Matrix[G, T] = read("build/scan_count_13.f64")
+    print(sample(P(y), draws = 10, warmup = 10, chains = 1))
+}'
 not_collapsed prior_depends "its prior must be" '    innov ~ Normal(0.1 * cumsum(innov, T), 0.1)
     y ~ Normal(cumsum(innov, T), s)'
 not_collapsed other_scan "the other terms contain a running sum" '    innov ~ Normal(0, 0.1)
     y ~ Normal(cumsum(innov, T) + cumsum(y, T), s)'
-# (a scale that depends on the walk: only a vector can say so, since the
-# checker proves exp(...) Positive for vectors, not matrices)
-printf 'model V {\n    data y: Vector[T]\n    param innov: Vector[T]\n    innov ~ Normal(0, 0.1)\n    y ~ Normal(cumsum(innov), exp(innov))\n}\nfn main() {\n    let y: Vector[T] = read("data/linear_y.f64")\n    print(sample(V(y), draws = 10, warmup = 10, chains = 1))\n}\n' > build/kal_not_scale.mint
-out=$($M build build/kal_not_scale.mint -o build/kal_not_scale 2>&1) && ! grep -qF "collapsed innov" <<<"$out" \
-  && grep -qF "innov was not integrated out: the observation's scale depends on it" <<<"$out" \
-  && pass "kalman eligibility: scale is sampled as written (the observation's scale depends on it)" \
-  || { bad "kalman eligibility scale"; echo "$out"; }
+not_collapsed param_coef "the observation's mean must be (terms without it) + c * cumsum(...) with c a literal number" '    innov ~ Normal(0, 0.1)
+    y ~ Normal(s * cumsum(innov, T), 1)'
+# nothing would be left for NUTS (fixed scales): sampled as written
+not_collapsed_src nothing_left "no other parameter would be left for NUTS to sample" 'model Z {
+    data y: Matrix[G, T]
+    param innov: Matrix[G, T]
+    innov ~ Normal(0, 0.3)
+    y ~ Normal(cumsum(innov, T), 0.5)
+}
+fn main() {
+    let y: Matrix[G, T] = read("bench/kalman/data_small/y.f64")
+    print(sample(Z(y), draws = 10, warmup = 10, chains = 1))
+}'
+# a scale that depends on the walk: only a vector can say so, since the
+# checker proves exp(...) Positive for vectors, not matrices
+not_collapsed_src scale "the observation's scale depends on it" 'model V {
+    data y: Vector[T]
+    param innov: Vector[T]
+    innov ~ Normal(0, 0.1)
+    y ~ Normal(cumsum(innov), exp(innov))
+}
+fn main() {
+    let y: Vector[T] = read("data/linear_y.f64")
+    print(sample(V(y), draws = 10, warmup = 10, chains = 1))
+}'
+
 # A collapse next to a fused scan kernel (tests/scan/twoowned.mint: w is
 # integrated out; u, which shares its running sum, stays a NUTS parameter and
 # now also gets gradient from the filter, after every kernel, so no kernel
@@ -718,5 +757,25 @@ build examples/random_walk_panel.mint rwp && grep -qF "collapsed innov (G x T la
   && grep -qE "^innov +2997 more entries" <<<"$out" \
   && pass "random_walk_panel: NUTS samples 23 parameters, the 3,000 innovations come back as draws" \
   || { bad "random_walk_panel collapse"; cat build/rwp.log; echo "$out" | tail -5; }
+# --strict-fp: the same log density and gradient to rounding; and the
+# collapsed model sampled with 3 threads per chain gives finite draws of
+# every quantity and the same posterior summary of sigma_w to 2 digits
+build examples/random_walk_panel.mint rwp_strict --strict-fp \
+  && a=$(MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp | sed -n 's/^exact log density: //p; s/^grad://p' | tr '\n' ' ') \
+  && b=$(MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1 ./build/rwp_strict | sed -n 's/^exact log density: //p; s/^grad://p' | tr '\n' ' ') \
+  && python3 -c "
+import sys
+a = [float(x) for x in sys.argv[1].split()]; b = [float(x) for x in sys.argv[2].split()]
+m = max(abs(x) for x in b)
+sys.exit(0 if len(a) == len(b) == 24 and all(abs(x - y) <= 1e-12 * max(m, 1) for x, y in zip(a, b)) else 1)" "$a" "$b" \
+  && pass "random_walk_panel: --strict-fp gives the same log density and gradient to 1e-12" || bad "random_walk_panel --strict-fp"
+out=$(MINT_THREADS_PER_CHAIN=3 MINT_DRAWS=build/rwp_t3.draws ./build/rwp 2>&1) && python3 -c "
+import struct, sys
+import numpy as np
+f = open('build/rwp_t3.draws', 'rb'); c, n, d = struct.unpack('<QQQ', f.read(24))
+x = np.frombuffer(f.read(), dtype='<f8').reshape(c * n, d)
+sw = [l.split() for l in sys.argv[1].splitlines() if l.startswith('sigma_w ')][0]
+sys.exit(0 if d == 3023 and np.all(np.isfinite(x)) and abs(float(sw[1]) - 0.0972) < 0.0015 else 1)" "$out" \
+  && pass "random_walk_panel: 3 threads per chain, finite draws, same sigma_w" || { bad "random_walk_panel, 3 threads per chain"; echo "$out" | grep sigma_w; }
 
 exit $fail

@@ -40,8 +40,11 @@ collapsed: NUTS sampled 23 of the 3023 parameters; 3000 latent scalars were inte
 ```
 
 The posterior still has every parameter, `innov` included, so `print(post)`
-and the raw draws (`MINT_DRAWS`) look as they did without the collapse.
-`mintc build --no-collapse` samples all of them with NUTS.
+and the raw draws (`MINT_DRAWS`) have the same columns as without the
+collapse. The gradient tools (`MINT_GRADCHECK`, `MINT_BENCH_GRAD`, and
+`MINT_THETA`, which sets the point they evaluate) work on the parameters NUTS
+samples, so on the reduced model. `mintc build --no-collapse` samples all of
+them with NUTS.
 
 ## The rule
 
@@ -59,7 +62,8 @@ where
 - `m_w`, `s_w`, `a`, `B`, `k` and `s_y` do not mention `X` and contain no
   running sum; they may use any other parameter or data, indexed by element,
   by series (`Vector[G]`) or by time (`Vector[T]`);
-- `c` is a nonzero literal (`- 0.5 * cumsum(...)` is fine);
+- `c` is a nonzero literal (`a - 0.5 * cumsum(...)`, `-0.5 * cumsum(...)`
+  and `cumsum(...) / 4` are fine; a parameter there is not recognised);
 - `y` is data: no parameter and no running sum in it;
 - inside the running sum `X` enters linearly (`B + k * X`, sums, differences,
   negation, multiplication or division by expressions without `X`);
@@ -68,8 +72,10 @@ where
 The mean may be written in any order (`cumsum(innov, T) + beta`, `beta -
 cumsum(...)`), and `let`s are inlined first, so `let state = cumsum(shared +
 innov, T)` qualifies. If two candidates would depend on each other, only one
-is collapsed. When a matrix or vector parameter appears in a running sum but
-the rule fails, mintc says why and samples the model as written, for example
+is collapsed, and nothing is collapsed when NUTS would be left with no
+parameter at all (a walk with fixed scales and nothing else unknown). When a
+matrix or vector parameter appears in a running sum but the rule fails,
+mintc says why and samples the model as written, for example
 
 ```
 mintc: model DynamicPoisson: innov was not integrated out: its observation is PoissonLog, not Normal (that needs a Laplace approximation, which is not implemented)
@@ -135,7 +141,10 @@ density with these adjoints written over its inputs. The forward pass stores
 `Pp`, `1/F` and `v`, so the reverse pass divides by nothing. `sum log F` is
 the log of a running product per series whose binary exponent is moved to an
 integer counter at every step, so the loop calls no `log`; if any `F` falls
-outside [2^-1022, 2^1022] the sum is recomputed with `log`.
+outside [2^-1022, 2^1022] the sum is recomputed with `log`. That fallback is
+not exercised by any test, and it does not rescue an `F` below about 5e-309
+(a variance that has underflowed), where `1/F` is infinite and the log
+density comes out NaN, which the sampler treats as a divergence.
 
 The compiler generates the rest: a loop that evaluates `a`, `d = B + k m_w`,
 `q = (k s_w)^2` and `r = s_y^2` for every element from the model's own
@@ -161,10 +170,23 @@ posterior by forward filtering, backward sampling (`mint_kalman_ffbs`):
 filter forward storing `m[t]`, `P[t]`; draw `x[T-1] ~ N(m, P)`; then for
 t = T-2 down, `x[t] | x[t+1] ~ N(m[t] + J (x[t+1] - m[t] - d[t+1]),
 P[t] q[t+1] / Pp[t+1])` with `J = P[t] / Pp[t+1]`; then
-`X[t] = (x[t] - x[t-1] - B[t]) / k[t]`. It uses its own random stream per
-chain, so the NUTS draws do not depend on it. Its cost is about one gradient
-per kept draw, and it is included in the reported sampling time. The draws
-are exact given each kept draw of the other parameters.
+`X[t] = (x[t] - x[t-1] - B[t]) / k[t]`. Where `k[t]` is exactly 0 (a data
+mask, say) that element does not reach `y`, and it is drawn from its prior
+`N(m_w, s_w)` instead. It uses its own random stream per chain, so the NUTS
+draws do not depend on it, and the G T normal variates come first from a
+ziggurat generator, so the backward pass vectorises. The draws are exact
+given each kept draw of the other parameters.
+
+Its cost is not negligible. In a timing harness around the runtime kernels
+(load average about 27), one FFBS draw took 21 us at G = 20 and 277 us at
+G = 250 (T = 150), about 2.4 and 5.6 gradients' worth, before counting the
+generated loops around it. With 19 and 45 gradients per kept draw that is
+roughly a tenth to an eighth of the collapsed run. (The benchmark below ran
+an earlier FFBS, with the polar method's normals drawn one at a time and an
+integer division per element, which the independent review measured at 11
+to 21 gradients' worth; its collapsed times are correspondingly
+pessimistic.) The sampling times reported include it; the per-gradient
+ratios do not.
 
 ## Where the code is
 
@@ -182,7 +204,7 @@ are exact given each kept draw of the other parameters.
 
 All in `tests/run.sh` (section "Kalman collapse"):
 
-- **Exact, small instances** (`tests/kalman/check_marginal.py`): for seven
+- **Exact, small instances** (`tests/kalman/check_marginal.py`): for eight
   models (centred and non-centred walks, a shared drift, per-series scales,
   every filter input depending on parameters with `c = -0.5`, a collapse
   beside a Poisson walk in the scan layout, one series as a `Vector[T]`, and
@@ -190,34 +212,61 @@ All in `tests/run.sh` (section "Kalman collapse"):
   random points each, the compiled log density equals a dense Gaussian
   computation in numpy (`X` integrated out analytically, as above) to at most
   8e-16 relative, and every gradient component agrees with a 5-point finite
-  difference of the numpy density to at most 8e-10 relative. The compiled
+  difference of the numpy density to at most 8e-10 (relative to the
+  component, or absolute when it is below 1). The compiled
   gradient also passes the runtime's own finite-difference check (worst 5e-9).
   The runtime gained `MINT_THETA=file` to evaluate at a given point.
+- **Draws of the walk, exact** (`tests/kalman/check_ffbs.py`): three models
+  with fixed scales and one unrelated parameter, so that the walk's posterior
+  is a known Gaussian (an element-wise coefficient that is 0 at three
+  elements and `c = -0.5` written as a negated literal, on the general
+  kernel; one `Vector[T]` walk; two collapses in one model). 10,000 draws:
+  every mean and every covariance entry between two times of a series (24
+  to 30 means and 36 to 129 covariances per model) is within 2.8 standard
+  errors of the exact value; the test fails above 4.5. This checks the joint
+  distribution, which the per-column posterior comparison below does not.
+  With the backward step's conditioning on `x[t+1]` removed (each `x[t]`
+  drawn from its filtered marginal) it fails with |z| up to 195. The normal
+  generator is checked on 2e7 variates (`tests/kalman/zig_test.c`: first four
+  moments and 42 binned probabilities).
 - **Posterior** (`tests/kalman/compare_posterior.py`): on four models
   (G = 6, T = 30), 3 seeds x 4 chains x 1000 draws of the collapsed build and
   of the `--no-collapse` build, every quantity in the draws (the remaining
   parameters and every innovation, the latter from FFBS) has the same mean
   and standard deviation within Monte Carlo error: largest |z| over 189 to 367
-  quantities per model between 2.7 and 3.5 for means and 2.4 and 3.0 for
-  standard deviations, median |z| 0.6 to 0.85 (0.67 is what calibrated
+  quantities per model between 2.4 and 3.7 for means and 2.3 and 3.7 for
+  standard deviations, median |z| 0.56 to 0.86 (0.67 is what calibrated
   standard errors give). The threshold is 4.5. Standard errors come from the
   ESS of the draws (means) and of the squared deviations (standard
   deviations). With FFBS's backward variance broken on purpose the test
-  fails with |z| of 28 to 73 on the standard deviations.
+  failed with |z| of 28 to 73 on the standard deviations. Caveats: it
+  compares each column on its own, not the joint distribution (check_ffbs.py
+  does that, with fixed scales); full NUTS is only a usable reference where
+  it copes, so the data were chosen for that (weakly informative, non-centred
+  forms, target acceptance 0.95; one series, `single.mint`, is left out
+  because full NUTS had hundreds of divergences and R-hat 1.1 there); and the
+  4.5 threshold was set after a first run had shown a largest |z| of 3.5, so
+  it is not a pre-registered test.
 - **Interplay**: a collapse whose walk shares a running sum with a NUTS
   parameter next to a fused scan kernel, built with `--fused-leapfrog`
   (`tests/scan/twoowned.mint`): one fused leaf matches the runtime's, and the
   gradient passes finite differences. (This found a bug: the scan kernel
   claimed sole ownership of that parameter's gradient, though the filter adds
   to it afterwards; fixed.)
-- **Eligibility**: seven models that must not be collapsed build, sample as
-  written, and print the reason.
+- **Eligibility**: nine models that must not be collapsed build, print the
+  reason, and run to the end sampled as written.
+- `--strict-fp` gives the example's log density and gradient to 1e-12, and
+  the collapsed example sampled with 3 threads per chain gives finite draws
+  and the same posterior mean of sigma_w.
 - The earlier scan-kernel, parallel-kernel, fused-leapfrog and narrow-data
   tests now build with `--no-collapse`: several of their models are Gaussian
   random walks, and they exist to test the code that samples them as written.
 
-Not tested: simulation-based calibration (milestone 1 asks for it), and the
-flagship's level-plus-slope and seasonal states (below).
+Not tested: simulation-based calibration (milestone 1 asks for it); the
+flagship's level-plus-slope and seasonal states (below); the collapse under
+the randomised narrow-data check (it runs with `--no-collapse`; the filter's
+code reads doubles only) and with the fused scan kernel on several threads
+other than `twoowned`.
 
 ## Measurements
 
@@ -285,7 +334,10 @@ How to read these:
   G = 250. The filter does more per element than the fused scan kernel's
   running sum, and the generated loops around it are not fused with it. The
   collapse wins on gradients per effective draw, by a factor of 100 to 800,
-  not on the gradient.
+  not on the gradient. Those ratios count gradients only: FFBS, in the form
+  the benchmark ran, cost the equivalent of another 11 to 21 gradients per
+  kept draw (see above), which would shrink them by about 1.3 to 1.7x; with
+  the current FFBS, by about 1.1x.
 - **Threads.** At G = 250 the full model ran 3 threads per chain (12 in
   all) and the collapsed one 1 per chain (4 in all), so the full model had
   the larger budget; on a loaded machine that also exposes it to more
@@ -312,9 +364,8 @@ How to read these:
   the running sum) is sampled by NUTS, not integrated out.
 - **Literal coefficient on the running sum.** `c` must be a number; a
   parameter there is not recognised.
-- **k = 0** (a coefficient on `X` that is exactly zero for some element)
-  makes the drawn `X` for that element infinite or NaN; the log density and
-  NUTS are unaffected.
+- **Underflowed variances.** An observation or innovation variance below
+  about 5e-309 gives a NaN log density (see the filter section).
 - **Cost per gradient.** The filter costs more per element than the fused
   scan kernel's running sum, and the generated input and adjoint loops are
   plain loops around a runtime call rather than one fused kernel: see the

@@ -1131,18 +1131,24 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
         });
         let mut red = full.clone();
         red.params.retain(|(n, _)| !kal.iter().any(|k| &k.param == n));
-        for k in &kal {
-            eprintln!(
-                "mintc: model {name}: collapsed {} ({} latent scalars) by a Kalman filter{}; NUTS samples {} ({} parameters)",
-                k.param,
-                if k.vec { k.cols.to_string() } else { format!("{} x {}", k.rows, k.cols) },
-                if k.shared { " (variances shared by every series: one recursion per time step)" } else { "" },
-                red.params.iter().map(|(n, t)| match t {
+        // one line per collapse; the last also says what NUTS samples
+        for (j, k) in kal.iter().enumerate() {
+            let rest = if j + 1 < kal.len() {
+                String::new()
+            } else {
+                let names: Vec<String> = red.params.iter().map(|(n, t)| match t {
                     Ty::Vector(d, _) => format!("{n}[{d}]"),
                     Ty::Matrix(r, c, _) => format!("{n}[{r}, {c}]"),
                     _ => n.clone(),
-                }).collect::<Vec<_>>().join(", "),
-                param_count(&red)
+                }).collect();
+                let n = param_count(&red);
+                format!("; NUTS samples {} ({n} parameter{})", names.join(", "), if n == "1" { "" } else { "s" })
+            };
+            eprintln!(
+                "mintc: model {name}: collapsed {} ({} latent scalars) by a Kalman filter{}{rest}",
+                k.param,
+                if k.vec { k.cols.to_string() } else { format!("{} x {}", k.rows, k.cols) },
+                if k.shared { " (variances shared by every series: one recursion per time step)" } else { "" },
             );
         }
         red_owned = red;
@@ -3908,6 +3914,15 @@ fn opt_bin(op: BinOp, a: Option<M>, b: Option<M>) -> Option<M> {
 
 /// e = rest + coef * S, where S is the one running sum (along the
 /// statement's own shape) that mentions p. Returns (rest, coef, S).
+/// A literal number: 0.5, or -0.5 (which parses as a negated literal).
+fn kal_lit(e: &M) -> Option<f64> {
+    match e {
+        M::Const(k) => Some(*k),
+        M::Neg(x) => kal_lit(x).map(|k| -k),
+        _ => None,
+    }
+}
+
 fn kal_split_mean<'a>(e: &'a M, p: &str) -> Option<(Option<M>, f64, Option<&'a M>)> {
     if !mentions(e, p) {
         return Some((Some(e.clone()), 0.0, None));
@@ -3927,20 +3942,20 @@ fn kal_split_mean<'a>(e: &'a M, p: &str) -> Option<(Option<M>, f64, Option<&'a M
             let (r, c, s) = kal_split_mean(x, p)?;
             Some((r.map(|r| M::Neg(Box::new(r))), -c, s))
         }
-        M::Bin(BinOp::Mul, x, y) => match (&**x, &**y) {
-            (M::Const(k), z) | (z, M::Const(k)) => {
-                let (r, c, s) = kal_split_mean(z, p)?;
-                Some((r.map(|r| M::Bin(BinOp::Mul, Box::new(M::Const(*k)), Box::new(r))), c * k, s))
-            }
-            _ => None,
-        },
-        M::Bin(BinOp::Div, x, y) => match &**y {
-            M::Const(k) => {
-                let (r, c, s) = kal_split_mean(x, p)?;
-                Some((r.map(|r| M::Bin(BinOp::Div, Box::new(r), Box::new(M::Const(*k)))), c / k, s))
-            }
-            _ => None,
-        },
+        M::Bin(BinOp::Mul, x, y) => {
+            let (k, z) = match (kal_lit(x), kal_lit(y)) {
+                (Some(k), _) => (k, y),
+                (_, Some(k)) => (k, x),
+                _ => return None,
+            };
+            let (r, c, s) = kal_split_mean(z, p)?;
+            Some((r.map(|r| M::Bin(BinOp::Mul, Box::new(M::Const(k)), Box::new(r))), c * k, s))
+        }
+        M::Bin(BinOp::Div, x, y) => {
+            let k = kal_lit(y)?;
+            let (r, c, s) = kal_split_mean(x, p)?;
+            Some((r.map(|r| M::Bin(BinOp::Div, Box::new(r), Box::new(M::Const(k)))), c / k, s))
+        }
         _ => None,
     }
 }
@@ -4024,10 +4039,12 @@ fn detect_kalman(tm: &TModel, stmts: &[Stmt]) -> (Vec<Kalman>, Vec<String>) {
             _ => continue,
         };
         let users: Vec<usize> = (0..stmts.len()).filter(|&k| mentioned(&stmts[k], p)).collect();
-        // the observation: a statement with p inside a running sum
+        // the observation: a statement with p inside a running sum, other
+        // than p's own prior
         let obs = users.iter().copied().find(|&k| {
             let Stmt::Tilde { lhs, args, .. } = &stmts[k];
-            std::iter::once(lhs).chain(args).any(|e| scan_mentions(e, p))
+            let own = matches!(lhs, M::ParamM(n) | M::ParamV(n, Ax::Flat) if n == p);
+            !own && std::iter::once(lhs).chain(args).any(|e| scan_mentions(e, p))
         });
         let Some(obs) = obs else { continue };
         let plan = (|| -> Result<Kalman, String> {
@@ -4054,7 +4071,7 @@ fn detect_kalman(tm: &TModel, stmts: &[Stmt]) -> (Vec<Kalman>, Vec<String>) {
             if mentions(&oa[1], p) {
                 return Err("the observation's scale depends on it".into());
             }
-            let (a, c, cs) = kal_split_mean(&oa[0], p).ok_or("the observation's mean must be (terms without it) + c * cumsum(...), c a number")?;
+            let (a, c, cs) = kal_split_mean(&oa[0], p).ok_or("the observation's mean must be (terms without it) + c * cumsum(...) with c a literal number")?;
             let Some(M::Cumsum { inner, shape: cshape, .. }) = cs else { return Err("no running sum of it in the mean".into()) };
             if cshape != &shape || c == 0.0 || !c.is_finite() {
                 return Err("the running sum must be over the parameter's own shape, with a nonzero coefficient".into());
@@ -4101,6 +4118,12 @@ fn detect_kalman(tm: &TModel, stmts: &[Stmt]) -> (Vec<Kalman>, Vec<String>) {
                 notes.push(format!("{} was not integrated out: its model depends on another integrated-out parameter", k.param));
             }
             None => break,
+        }
+    }
+    // NUTS needs something to sample
+    if !out.is_empty() && out.len() == tm.params.len() {
+        for k in out.drain(..) {
+            notes.push(format!("{} was not integrated out: no other parameter would be left for NUTS to sample", k.param));
         }
     }
     (out, notes)
@@ -4339,6 +4362,7 @@ fn gen_kalman_logp(g: &mut Mg, k: &Kalman, b: &KalBufs, lp: &str) {
 /// collapsed parameter drawn by forward filtering, backward sampling.
 fn gen_collapse_fn(m: &mut Module, full: &TModel, red: &TModel, kal: &[Kalman], opts: &Opts, cm: &[(Dim, Dim)]) {
     m.declare("declare void @mint_kalman_ffbs(i64, i64, double, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr)");
+    m.declare("declare double @mint_kalman_normal(ptr)");
     let mut g = Mg::new(m, red, opts.strict_fp);
     g.cm = cm.to_vec();
     let (lr, _) = g.layout(red);
@@ -4418,13 +4442,26 @@ fn gen_collapse_fn(m: &mut Module, full: &TModel, red: &TModel, kal: &[Kalman], 
                     let bv = g.fwd(d, &ix, &mut vals);
                     v = g.f.fsub(&v, &bv);
                 }
+                let at = g.f.imul(s, &td);
+                let at = g.f.iadd(&at, t);
                 if let Some(kk) = &k.k {
                     let kv = g.fwd(kk, &ix, &mut vals);
                     v = g.f.fdiv(&v, &kv);
+                    g.f.store(&v, &xp, &at);
+                    // where k is 0 the element does not reach y: its prior
+                    let zero = g.f.fcmp("oeq", &kv, &fconst(0.0));
+                    if_then(g, &zero, |g| {
+                        let z = g.f.reg();
+                        g.f.emit(format!("{z} = call double @mint_kalman_normal(ptr %rng)"));
+                        let mw = g.fwd(&k.mw, &ix, &mut HashMap::new());
+                        let sw = g.fwd(&k.sw, &ix, &mut HashMap::new());
+                        let t1 = g.f.fmul(&sw, &z);
+                        let pv = g.f.fadd(&mw, &t1);
+                        g.f.store(&pv, &xp, &at);
+                    });
+                } else {
+                    g.f.store(&v, &xp, &at);
                 }
-                let at = g.f.imul(s, &td);
-                let at = g.f.iadd(&at, t);
-                g.f.store(&v, &xp, &at);
             });
         });
     }

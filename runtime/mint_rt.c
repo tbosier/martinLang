@@ -399,59 +399,107 @@ double mint_kalman_ll_shared(int64_t G, int64_t T, double c, const double *restr
   return -0.5 * ((double)G * logdet + quad);
 }
 
+// n standard normal variates by the ziggurat method (Marsaglia and Tsang
+// 2000, in Doornik's 2005 form with 128 blocks): most variates cost one
+// 64-bit random number, a compare and a multiply, against a log, a square
+// root and a division for the polar method. Tables are built once.
+#define ZIG_C 128
+#define ZIG_R 3.442619855899
+#define ZIG_V 9.91256303526217e-3
+static double zig_x[ZIG_C + 1], zig_ratio[ZIG_C];
+static pthread_once_t zig_once = PTHREAD_ONCE_INIT;
+static void zig_init(void) {
+  double f = exp(-0.5 * ZIG_R * ZIG_R);
+  zig_x[0] = ZIG_V / f;
+  zig_x[1] = ZIG_R;
+  zig_x[ZIG_C] = 0.0;
+  for (int i = 2; i < ZIG_C; i++) {
+    zig_x[i] = sqrt(-2.0 * log(ZIG_V / zig_x[i - 1] + f));
+    f = exp(-0.5 * zig_x[i] * zig_x[i]);
+  }
+  for (int i = 0; i < ZIG_C; i++) zig_ratio[i] = zig_x[i + 1] / zig_x[i];
+}
+static double zig_normal(Rng *r) {
+  for (;;) {
+    uint64_t b = rng_next(r);
+    int i = (int)(b & (ZIG_C - 1));
+    double u = 2.0 * ((double)(b >> 11) * 0x1.0p-53) - 1.0;  // bits independent of i
+    if (fabs(u) < zig_ratio[i]) return u * zig_x[i];
+    if (i == 0) {  // the tail beyond R
+      double x, y;
+      do {
+        x = log(1.0 - rng_uniform(r)) / ZIG_R;
+        y = log(1.0 - rng_uniform(r));
+      } while (-2.0 * y < x * x);
+      return u < 0 ? x - ZIG_R : ZIG_R - x;
+    }
+    double x = u * zig_x[i];
+    double f0 = exp(-0.5 * (zig_x[i] * zig_x[i] - x * x));
+    double f1 = exp(-0.5 * (zig_x[i + 1] * zig_x[i + 1] - x * x));
+    if (f1 + rng_uniform(r) * (f0 - f1) < 1.0) return x;
+  }
+}
+static void rng_normals(Rng *r, double *out, int64_t n) {
+  pthread_once(&zig_once, zig_init);
+  for (int64_t i = 0; i < n; i++) out[i] = zig_normal(r);
+}
+
 // Forward filtering, backward sampling: one draw of the latent paths given
 // the same inputs (not modified), written as increments e[t] = x[t] - x[t-1]
 // (time-major like the inputs). rng is the sampler's per-chain stream for
-// these draws (an Rng). With `shared`, q and r hold T values as for
+// these draws (an Rng); the G T normal variates are drawn first, so the
+// backward pass vectorises. With `shared`, q and r hold T values as for
 // mint_kalman_ll_shared. ws as for mint_kalman_ll.
 void mint_kalman_ffbs(int64_t G, int64_t T, double c, const double *restrict y, const double *restrict a,
                       const double *restrict d, const double *restrict q, const double *restrict r,
                       int64_t shared, double *restrict ws, void *rng, double *restrict e) {
-#define KQ(i) q[shared ? (i) / G : (i)]
-#define KR(i) r[shared ? (i) / G : (i)]
-  double *restrict Ms = ws, *restrict Ps = ws + G * T;
+  double *restrict Ms = ws, *restrict Ps = ws + G * T, *restrict Z = ws + 2 * G * T;
   double *restrict m = ws + 3 * G * T, *restrict P = m + G, *restrict x = P + G;
+  const int64_t qs = shared ? 0 : 1;  // stride of q and r within a time step
   double c2 = c * c;
   for (int64_t g = 0; g < G; g++) m[g] = 0.0, P[g] = 0.0;
   for (int64_t t = 0; t < T; t++) {
     const int64_t o = t * G;
+    const double *restrict qt = q + (shared ? t : o), *restrict rt = r + (shared ? t : o);
+#pragma omp simd
     for (int64_t g = 0; g < G; g++) {
       int64_t i = o + g;
-      double mp = m[g] + d[i], Pp = P[g] + KQ(i);
-      double F = c2 * Pp + KR(i);
+      double mp = m[g] + d[i], Pp = P[g] + qt[g * qs], rr = rt[g * qs];
+      double F = c2 * Pp + rr;
       double v = y[i] - a[i] - c * mp;
       double iF = 1.0 / F;
       m[g] = mp + c * Pp * iF * v;
-      P[g] = Pp * KR(i) * iF;
+      P[g] = Pp * rr * iF;
       Ms[i] = m[g], Ps[i] = P[g];
     }
   }
-  Rng *R = rng;
-  for (int64_t t = T - 1; t >= 0; t--) {
+  rng_normals(rng, Z, G * T);
+  const int64_t last = (T - 1) * G;
+  for (int64_t g = 0; g < G; g++) {
+    double var = Ps[last + g];
+    x[g] = Ms[last + g] + sqrt(var > 0.0 ? var : 0.0) * Z[last + g];
+  }
+  for (int64_t t = T - 2; t >= 0; t--) {
     const int64_t o = t * G;
+    const double *restrict q1t = q + (shared ? t + 1 : o + G);
+#pragma omp simd
     for (int64_t g = 0; g < G; g++) {
       int64_t i = o + g;
-      double mean = Ms[i], var = Ps[i];
-      if (t < T - 1) {
-        // x[t] | x[t+1], y[0..t]: Pp1 = P[t] + q[t+1], J = P[t] / Pp1
-        double q1 = KQ(i + G), Pp1 = var + q1;
-        if (Pp1 > 0.0) {
-          double J = var / Pp1;
-          mean += J * (x[g] - mean - d[i + G]);
-          var = var * q1 / Pp1;
-        } else {
-          var = 0.0;
-        }
-      }
-      double xt = mean + sqrt(var > 0.0 ? var : 0.0) * rng_normal(R);
-      if (t < T - 1) e[i + G] = x[g] - xt;
+      // x[t] | x[t+1], y[0..t]: Pp1 = P[t] + q[t+1], J = P[t] / Pp1
+      double mean = Ms[i], var = Ps[i], q1 = q1t[g * qs], Pp1 = var + q1;
+      double J = Pp1 > 0.0 ? var / Pp1 : 0.0;
+      double cv = Pp1 > 0.0 ? var * q1 / Pp1 : 0.0;
+      double xt = mean + J * (x[g] - mean - d[i + G]) + sqrt(cv > 0.0 ? cv : 0.0) * Z[i];
+      e[i + G] = x[g] - xt;
       x[g] = xt;
     }
   }
   for (int64_t g = 0; g < G; g++) e[g] = x[g];
-#undef KQ
-#undef KR
 }
+
+// One standard normal from the collapsed draws' stream (for an element whose
+// coefficient on the walk is zero, so that only its prior applies).
+double mint_kalman_normal(void *rng) { return rng_normal(rng); }
 
 // A model with collapsed parameters (mintc's Kalman collapse): NUTS runs
 // over the remaining D parameters, and for each kept draw `fn` writes the

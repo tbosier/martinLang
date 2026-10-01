@@ -217,11 +217,11 @@ Each has a completion test fixed in advance.
    pass; on S = 100, the posterior of the scales and the held-out forecasts
    agree with the reference within the stated rule; simulation-based
    calibration passes.
-   *Status:* done for the local-level model (one scalar state per series):
-   exact checks against a dense Gaussian computation and posterior agreement
-   with full NUTS on small instances ([kalman.md](kalman.md)). Not done: the
-   level, slope and seasonal states, the S = 100 reference run, forecasts,
-   and simulation-based calibration.
+   *Status:* not met. For the local-level model only (one scalar state per
+   series) the first part holds: exact checks against a dense Gaussian
+   computation, and posterior agreement with full NUTS on small instances
+   ([kalman.md](kalman.md)). Not done: the level, slope and seasonal states,
+   the S = 100 reference run, forecasts, and simulation-based calibration.
 2. **`mint explain`.** Output checked against hand counts on three models.
 3. **Laplace collapse with correction** for Poisson and Student-t
    observations: mode-solver and determinant checks, gradient checks of the
