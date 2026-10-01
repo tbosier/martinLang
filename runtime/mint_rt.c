@@ -890,12 +890,13 @@ static void init_stepsize(Nuts *s) {
 typedef struct {
   double mu, s_bar, x_bar;
   double counter;
+  double delta;  // target acceptance statistic (Stan: 0.8)
 } DualAvg;
 
 static void da_restart(DualAvg *d) { d->counter = 0, d->s_bar = 0, d->x_bar = 0; }
 
 static void da_learn(DualAvg *d, double *eps, double accept) {
-  const double gamma = 0.05, t0 = 10, kappa = 0.75, delta = 0.8;
+  const double gamma = 0.05, t0 = 10, kappa = 0.75, delta = d->delta;
   d->counter += 1;
   if (accept > 1) accept = 1;
   double eta = 1.0 / (d->counter + t0);
@@ -912,9 +913,11 @@ typedef struct {
   int enabled;
 } Windows;
 
-static void windows_init(Windows *w, int64_t warmup) {
+// Stan's schedule is windows_init(w, warmup, 75, 25, 50).
+static void windows_init(Windows *w, int64_t warmup, int64_t init_buffer, int64_t base_window,
+                         int64_t term_buffer) {
   w->warmup = warmup;
-  w->init_buffer = 75, w->term_buffer = 50, w->base_window = 25;
+  w->init_buffer = init_buffer, w->term_buffer = term_buffer, w->base_window = base_window;
   w->enabled = warmup >= 20;
   if (w->enabled && w->init_buffer + w->term_buffer + w->base_window > warmup) {
     w->init_buffer = (int64_t)(0.15 * warmup);
@@ -942,6 +945,281 @@ static void next_window(Windows *w) {
   if (w->next_window != w->warmup - w->term_buffer - 1) {
     int64_t boundary = w->next_window + 2 * w->window_size;
     if (boundary >= w->warmup - w->term_buffer) w->next_window = w->warmup - w->term_buffer - 1;
+  }
+}
+
+// ---- the alternative warmup (MINT_WARMUP=fast)
+//
+// The default is Stan's: a uniform(-2, 2) start, then the program's warmup
+// iterations in windows 75 / 25, 50, 100, ... / 50. The alternative:
+//   - starts each chain at a point chosen along an L-BFGS climb from its
+//     uniform start (lbfgs_init below);
+//   - runs max(200, warmup / 5) iterations (never more than the program's
+//     warmup) in windows 10 / 10, 20, 40, ... / 50; Stan's rule that
+//     stretches the last window to the terminal buffer is unchanged;
+//   - estimates each window's variance from the draws of all chains together
+//     (Pool), so a window of n iterations has chains x n draws.
+// Only warmup changes: after it the metric and step size are fixed and every
+// chain is an ordinary NUTS chain. MINT_WARMUP_ITERS, _INIT, _WINDOW, _TERM,
+// _LBFGS (0 or 1) and _POOL (0 or 1) override the parts, for experiments.
+// MINT_TARGET_ACCEPT sets the dual averaging target (0.8) under either warmup.
+typedef struct {
+  int fast;
+  int64_t iters;  // warmup iterations to run (at most the program's warmup)
+  int64_t init_buffer, base_window, term_buffer;
+  int lbfgs;         // optimise from the uniform start before warmup
+  int64_t lbfgs_iters;
+  int pool;          // estimate each window's variance from every chain's draws
+  double delta;      // the step size's target acceptance statistic
+} WarmupCfg;
+
+static int64_t env_int(const char *name, int64_t dflt) {
+  const char *e = getenv(name);
+  return e && *e ? atoll(e) : dflt;
+}
+
+static WarmupCfg warmup_cfg(int64_t warmup) {
+  WarmupCfg c = {.fast = 0, .iters = warmup, .init_buffer = 75, .base_window = 25, .term_buffer = 50, .delta = 0.8};
+  const char *e = getenv("MINT_WARMUP");
+  if (e && strcmp(e, "fast") == 0) {
+    c.fast = 1;
+    c.iters = env_int("MINT_WARMUP_ITERS", warmup / 5 > 200 ? warmup / 5 : 200);
+    c.init_buffer = env_int("MINT_WARMUP_INIT", 10);
+    c.base_window = env_int("MINT_WARMUP_WINDOW", 10);
+    c.term_buffer = env_int("MINT_WARMUP_TERM", 50);
+    // a terminal buffer of 0 would end warmup on a metric update, which
+    // restarts the dual averaging and leaves step size exp(0) = 1
+    if (c.init_buffer < 0 || c.base_window < 1 || c.term_buffer < 1)
+      mint_panic("MINT_WARMUP_INIT must be at least 0, MINT_WARMUP_WINDOW and MINT_WARMUP_TERM at least 1");
+    c.lbfgs = (int)env_int("MINT_WARMUP_LBFGS", 1);
+    c.lbfgs_iters = env_int("MINT_WARMUP_LBFGS_ITERS", 1000);
+    c.pool = (int)env_int("MINT_WARMUP_POOL", 1);
+  } else if (e && *e && strcmp(e, "stan") != 0) {
+    mint_panic("MINT_WARMUP must be stan or fast");
+  }
+  const char *de = getenv("MINT_TARGET_ACCEPT");
+  if (de && *de) {
+    c.delta = atof(de);
+    if (!(c.delta > 0 && c.delta < 1)) mint_panic("MINT_TARGET_ACCEPT must be strictly between 0 and 1");
+  }
+  if (c.iters > warmup) c.iters = warmup;
+  if (c.iters < 0) c.iters = 0;
+  return c;
+}
+
+// ---- the starting point of MINT_WARMUP=fast: L-BFGS with Pathfinder's choice
+//
+// L-BFGS climbs the log density from the uniform start. After every step it
+// builds a diagonal Gaussian around the current point (variances from the
+// stored curvature pairs, lb_diag; Pathfinder uses diagonal plus low rank) and
+// estimates that Gaussian's ELBO from a few draws. The chain starts at the
+// point whose Gaussian had the highest ELBO, not at the end of the climb. For
+// a well-behaved posterior that is close to the mode; where the density is
+// unbounded (a centred hierarchical model, whose density grows without limit
+// as a scale goes to zero) the climb runs off towards the singularity but the
+// ELBO falls, so the chain starts before that. If no ELBO is finite the chain
+// keeps its uniform start.
+#define LB_M 6
+typedef struct {
+  int64_t D;
+  double *S[LB_M], *Y[LB_M], rho[LB_M];
+  int k, head;  // pairs stored, next slot
+} Lbfgs;
+
+// pair i of the stored ones, 0 the newest
+static int lb_slot(const Lbfgs *L, int i) { return (L->head - 1 - i + 2 * LB_M) % LB_M; }
+
+// A diagonal BFGS-type estimate of the inverse Hessian: from the newest pair's
+// scalar (s'y / y'y), each stored pair (oldest first) is applied as a BFGS
+// update to the current diagonal matrix and only the diagonal of the result
+// is kept. That is not the diagonal of the full L-BFGS matrix, whose
+// off-diagonal terms are dropped at every step. The BFGS update of a
+// positive diagonal matrix is positive definite, so every entry stays positive.
+static void lb_diag(const Lbfgs *L, double *diag) {
+  int64_t D = L->D;
+  int i0 = lb_slot(L, 0);
+  double yy = 0;
+  for (int64_t q = 0; q < D; q++) yy += L->Y[i0][q] * L->Y[i0][q];
+  for (int64_t q = 0; q < D; q++) diag[q] = 1.0 / (L->rho[i0] * yy);
+  for (int j = L->k - 1; j >= 0; j--) {
+    int i = lb_slot(L, j);
+    const double *sv = L->S[i], *yv = L->Y[i];
+    double yay = 0;
+    for (int64_t q = 0; q < D; q++) yay += diag[q] * yv[q] * yv[q];
+    double r = L->rho[i];
+    for (int64_t q = 0; q < D; q++)
+      diag[q] += -2.0 * r * sv[q] * yv[q] * diag[q] + r * r * sv[q] * sv[q] * yay + r * sv[q] * sv[q];
+  }
+}
+
+// d = H g by the two-loop recursion (g the ascent direction)
+static void lb_direction(const Lbfgs *L, const double *g, double *d) {
+  int64_t D = L->D;
+  double alpha[LB_M];
+  vcopy(d, g, D);
+  for (int j = 0; j < L->k; j++) {
+    int i = lb_slot(L, j);
+    double a = 0;
+    for (int64_t q = 0; q < D; q++) a += L->S[i][q] * d[q];
+    alpha[i] = L->rho[i] * a;
+    for (int64_t q = 0; q < D; q++) d[q] -= alpha[i] * L->Y[i][q];
+  }
+  double gamma;
+  if (L->k > 0) {
+    int i = lb_slot(L, 0);
+    double yy = 0;
+    for (int64_t q = 0; q < D; q++) yy += L->Y[i][q] * L->Y[i][q];
+    gamma = 1.0 / (L->rho[i] * yy);
+  } else {
+    double gg = 0;
+    for (int64_t q = 0; q < D; q++) gg += g[q] * g[q];
+    gamma = 1.0 / sqrt(gg > 0 ? gg : 1.0);
+  }
+  for (int64_t q = 0; q < D; q++) d[q] *= gamma;
+  for (int j = L->k - 1; j >= 0; j--) {
+    int i = lb_slot(L, j);
+    double b = 0;
+    for (int64_t q = 0; q < D; q++) b += L->Y[i][q] * d[q];
+    b *= L->rho[i];
+    for (int64_t q = 0; q < D; q++) d[q] += L->S[i][q] * (alpha[i] - b);
+  }
+}
+
+#define ELBO_DRAWS 4
+#define ELBO_PATIENCE 20
+
+// The ELBO (up to a constant) of N(x, diag(var)) from ELBO_DRAWS draws, -inf if
+// any draw has a non-finite log density. z is scratch.
+static double elbo(Nuts *s, const St *x, const double *var, St *z) {
+  int64_t D = s->D;
+  double ent = 0;
+  for (int64_t q = 0; q < D; q++) ent += 0.5 * log(var[q]);
+  double tot = 0;
+  for (int j = 0; j < ELBO_DRAWS; j++) {
+    double ee = 0;
+    for (int64_t q = 0; q < D; q++) {
+      double e = rng_normal(&s->rng);
+      ee += e * e;
+      z->q[q] = x->q[q] + sqrt(var[q]) * e;
+    }
+    eval(s, z);
+    if (!isfinite(z->lp)) return -INFINITY;
+    tot += z->lp + 0.5 * ee;
+  }
+  return tot / ELBO_DRAWS + ent;
+}
+
+// Runs the search from s->cur and replaces s->cur with the chosen point. The
+// climb stops when no step raises the log density by the Armijo condition with
+// a finite log density and gradient, after maxit steps, when the log density
+// rose by less than 1e-10 (1 + |lp|) three steps running, or when the ELBO
+// has not improved for ELBO_PATIENCE steps. Returns 1 if a point was chosen.
+static int lbfgs_init(Nuts *s, int64_t maxit, int trace, int chain) {
+  int64_t D = s->D;
+  Lbfgs L = {.D = D};
+  for (int i = 0; i < LB_M; i++) L.S[i] = mint_alloc(D), L.Y[i] = mint_alloc(D);
+  double *d = mint_alloc(D), *var = mint_alloc(D);
+  St *x = s->cur, *n = st_acquire(s), *z = st_acquire(s), *best = st_clone_position(s, s->cur);
+  double best_elbo = -INFINITY;  // best holds the uniform start until an ELBO is finite
+  int small = 0;
+  int64_t since_best = 0, it = 0, best_it = -1, rejected = 0;
+  for (; it < maxit; it++) {
+    lb_direction(&L, x->g, d);
+    double gd = 0;
+    for (int64_t q = 0; q < D; q++) gd += x->g[q] * d[q];
+    if (!(gd > 0)) {  // not an ascent direction: forget the pairs and follow the gradient
+      L.k = 0, L.head = 0;
+      lb_direction(&L, x->g, d);
+      gd = 0;
+      for (int64_t q = 0; q < D; q++) gd += x->g[q] * d[q];
+      if (!(gd > 0)) break;
+    }
+    double t = 1.0;
+    int found = 0;
+    for (int ls = 0; ls < 60 && !found; ls++, t *= 0.5) {
+      for (int64_t q = 0; q < D; q++) n->q[q] = x->q[q] + t * d[q];
+      eval(s, n);
+      found = isfinite(n->lp) && n->lp >= x->lp + 1e-4 * t * gd;
+      for (int64_t q = 0; q < D && found; q++) found = isfinite(n->g[q]);
+    }
+    if (!found) break;
+    // the pair is stored only if its curvature is positive; once the history is
+    // full the slot at head holds the oldest live pair, so test before writing
+    double sy = 0;
+    for (int64_t q = 0; q < D; q++) sy += (n->q[q] - x->q[q]) * (x->g[q] - n->g[q]);
+    if (sy > 0 && isfinite(sy)) {
+      double *sv = L.S[L.head], *yv = L.Y[L.head];
+      for (int64_t q = 0; q < D; q++) {
+        sv[q] = n->q[q] - x->q[q];
+        yv[q] = x->g[q] - n->g[q];
+      }
+      L.rho[L.head] = 1.0 / sy;
+      L.head = (L.head + 1) % LB_M;
+      if (L.k < LB_M) L.k++;
+    } else {
+      rejected++;
+    }
+    double rise = n->lp - x->lp;
+    St *tmp = x;
+    x = n, n = tmp;
+    if (L.k > 0) {
+      lb_diag(&L, var);
+      double e = elbo(s, x, var, z);
+      if (e > best_elbo) {
+        best_elbo = e, since_best = 0, best_it = it;
+        vcopy(best->q, x->q, D);
+        vcopy(best->g, x->g, D);
+        best->lp = x->lp;
+      } else if (++since_best >= ELBO_PATIENCE) {
+        it++;
+        break;
+      }
+    }
+    small = rise < 1e-10 * (1.0 + fabs(x->lp)) ? small + 1 : 0;
+    if (small >= 3) {
+      it++;
+      break;
+    }
+  }
+  if (trace)
+    fprintf(stderr, "warmup chain=%d lbfgs steps=%lld chosen=%lld elbo=%.6g pairs rejected=%lld end lp=%.6g\n", chain,
+            (long long)it, (long long)best_it, best_elbo, (long long)rejected, x->lp);
+  st_release(s, n);
+  st_release(s, z);
+  st_release(s, x);
+  s->cur = best;
+  for (int i = 0; i < LB_M; i++) free(L.S[i]), free(L.Y[i]);
+  free(d), free(var);
+  return best_it >= 0;
+}
+
+// Window statistics shared between the chains of one sample() call. At the
+// end of each metric window every chain publishes its count, mean and sum of
+// squared deviations, waits for the others, and combines all chains' in chain
+// order, so each chain gets the same metric and the result does not depend
+// on thread timing.
+typedef struct {
+  pthread_barrier_t bar;
+  int64_t chains;
+  int64_t *n;
+  const double **mean, **m2;
+} Pool;
+
+// Pooled variance of coordinate i over every chain's window; *n_out the pooled count.
+static void pool_combine(Pool *p, int64_t D, double *var, double *n_out) {
+  double n = 0;
+  for (int64_t c = 0; c < p->chains; c++) n += (double)p->n[c];
+  *n_out = n;
+  for (int64_t i = 0; i < D; i++) {
+    double mean = 0;
+    for (int64_t c = 0; c < p->chains; c++) mean += (double)p->n[c] * p->mean[c][i];
+    mean /= n;
+    double m2 = 0;
+    for (int64_t c = 0; c < p->chains; c++) {
+      double dm = p->mean[c][i] - mean;
+      m2 += p->m2[c][i] + (double)p->n[c] * dm * dm;
+    }
+    var[i] = n > 1 ? m2 / (n - 1.0) : 1.0;
   }
 }
 
@@ -1067,11 +1345,14 @@ typedef struct {
   int chain;
   int threads_per_chain;
   const cpu_set_t *l3;  // CPUs for this chain's threads, or NULL
+  const WarmupCfg *cfg;
+  Pool *pool;  // NULL unless the chains pool their window estimates
   // outputs
   int team_min;
   double *out;  // draws x D, constrained
   double step_size;
   int64_t n_grad, divergent;
+  int64_t warmup_grad;  // gradients used before the first kept draw (initialisation and warmup)
   double mean_leapfrog;
 } ChainJob;
 
@@ -1109,6 +1390,13 @@ static void *run_chain(void *arg) {
     if (ok) break;
     if (++tries == 100) mint_panic("could not find a finite initial point in 100 tries");
   }
+  const WarmupCfg *cfg = job->cfg;
+  int64_t warmup = cfg->iters;
+  int trace = getenv("MINT_WARMUP_TRACE") != NULL;
+  if (cfg->lbfgs) lbfgs_init(s, cfg->lbfgs_iters, trace, job->chain);
+  if (trace)
+    fprintf(stderr, "warmup chain=%d start lp=%.6g gradients=%lld\n", job->chain, s->cur->lp,
+            (long long)s->n_grad);
 
   // Metric adaptation: "stan" uses the variance of the draws in each window;
   // "grad" (nutpie's idea) uses sqrt(var(draws) / var(gradients)), which is
@@ -1128,9 +1416,10 @@ static void *run_chain(void *arg) {
   init_stepsize(s);
   DualAvg da;
   da_restart(&da);
+  da.delta = cfg->delta;
   da.mu = log(10 * s->eps);
   Windows w;
-  windows_init(&w, job->warmup);
+  windows_init(&w, warmup, cfg->init_buffer, cfg->base_window, cfg->term_buffer);
   double *wmean = mint_alloc(D), *wm2 = mint_alloc(D);
   double *gmean = mint_alloc(D), *gm2 = mint_alloc(D);
   vzero(wmean, D);
@@ -1140,11 +1429,12 @@ static void *run_chain(void *arg) {
   int64_t wn = 0;
 
   job->divergent = 0;
+  job->warmup_grad = s->n_grad;
   int64_t total_leapfrog = 0;
-  for (int64_t it = 0; it < job->warmup + job->draws; it++) {
+  for (int64_t it = 0; it < warmup + job->draws; it++) {
     double accept = transition(s, &t);
     const double *q = s->cur->q, *gq = s->cur->g;
-    if (it < job->warmup) {
+    if (it < warmup) {
       da_learn(&da, &s->eps, accept);
       if (w.enabled) {
         if (in_window(&w)) {
@@ -1163,12 +1453,23 @@ static void *run_chain(void *arg) {
           }
         }
         if (end_window(&w)) {
+          if (trace) fprintf(stderr, "warmup chain=%d it=%lld gradients=%lld eps=%.4g\n", job->chain, (long long)it,
+                             (long long)s->n_grad, s->eps);
           next_window(&w);
           double n = (double)wn;
-          for (int64_t i = 0; i < D; i++) {
-            double var = wn > 1 ? wm2[i] / (n - 1.0) : 1.0;
-            if (grad_metric && wn > 1 && gm2[i] > 0) var = sqrt(var / (gm2[i] / (n - 1.0)));
-            s->inv_m[i] = (n / (n + 5.0)) * var + 1e-3 * (5.0 / (n + 5.0));
+          if (job->pool) {  // the variance of every chain's window draws (not with grad_metric)
+            Pool *P = job->pool;
+            P->n[job->chain] = wn, P->mean[job->chain] = wmean, P->m2[job->chain] = wm2;
+            pthread_barrier_wait(&P->bar);
+            pool_combine(P, D, s->inv_m, &n);
+            pthread_barrier_wait(&P->bar);
+            for (int64_t i = 0; i < D; i++) s->inv_m[i] = (n / (n + 5.0)) * s->inv_m[i] + 1e-3 * (5.0 / (n + 5.0));
+          } else {
+            for (int64_t i = 0; i < D; i++) {
+              double var = wn > 1 ? wm2[i] / (n - 1.0) : 1.0;
+              if (grad_metric && wn > 1 && gm2[i] > 0) var = sqrt(var / (gm2[i] / (n - 1.0)));
+              s->inv_m[i] = (n / (n + 5.0)) * var + 1e-3 * (5.0 / (n + 5.0));
+            }
           }
           vzero(wmean, D);
           vzero(wm2, D);
@@ -1183,9 +1484,14 @@ static void *run_chain(void *arg) {
           w.counter++;
         }
       }
-      if (it == job->warmup - 1) s->eps = exp(da.x_bar);
+      if (it == warmup - 1) {
+        s->eps = exp(da.x_bar);
+        job->warmup_grad = s->n_grad;
+        if (trace) fprintf(stderr, "warmup chain=%d it=%lld gradients=%lld eps=%.4g (end)\n", job->chain,
+                           (long long)it, (long long)s->n_grad, s->eps);
+      }
     } else {
-      job->constrain(q, job->out + (it - job->warmup) * D);
+      job->constrain(q, job->out + (it - warmup) * D);
       total_leapfrog += s->n_leapfrog;
       job->divergent += s->divergent;
     }
@@ -1319,9 +1625,11 @@ typedef struct {
   int64_t *block_start, *block_len;  // per parameter: first flat index, element count
   double *draw;   // chains x draws x D
   double seconds;
-  int64_t n_grad, divergent;
+  int64_t n_grad, divergent, warmup_grad;
   double *step_size, *mean_leapfrog;
   int threads_per_chain, team_min, grad_metric;
+  int64_t warmup_iters;
+  int warmup_fast;
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -1488,6 +1796,20 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   if (tpc > 1 && !(aenv && strcmp(aenv, "0") == 0)) n_l3 = l3_groups(l3, MAX_L3);
   ChainJob *jobs = calloc((size_t)chains, sizeof *jobs);
   pthread_t *th = calloc((size_t)chains, sizeof *th);
+  WarmupCfg cfg = warmup_cfg(warmup);
+  const char *metric_env = getenv("MINT_METRIC");
+  post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
+  Pool pool, *pool_p = NULL;
+  if (cfg.pool && chains > 1 && !post->grad_metric) {
+    pool.chains = chains;
+    pool.n = calloc((size_t)chains, sizeof *pool.n);
+    pool.mean = calloc((size_t)chains, sizeof *pool.mean);
+    pool.m2 = calloc((size_t)chains, sizeof *pool.m2);
+    if (pthread_barrier_init(&pool.bar, NULL, (unsigned)chains) != 0) mint_panic("could not create a barrier");
+    pool_p = &pool;
+  }
+  post->warmup_iters = cfg.iters;
+  post->warmup_fast = cfg.fast;
   double t0 = mint_clock();
   for (int64_t c = 0; c < chains; c++) {
     jobs[c] = (ChainJob){.f = f,
@@ -1499,6 +1821,8 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
                          .chain = (int)c,
                          .threads_per_chain = tpc,
                          .l3 = n_l3 > 1 ? &l3[c % n_l3] : NULL,
+                         .cfg = &cfg,
+                         .pool = pool_p,
                          .out = post->draw + c * draws * D};
     if (chains == 1) {
       run_chain(&jobs[c]);
@@ -1513,11 +1837,14 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   post->mean_leapfrog = mint_alloc(chains);
   post->threads_per_chain = tpc;
   post->team_min = tpc;
-  const char *metric_env = getenv("MINT_METRIC");
-  post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
+  if (pool_p) {
+    pthread_barrier_destroy(&pool.bar);
+    free(pool.n), free(pool.mean), free(pool.m2);
+  }
   for (int64_t c = 0; c < chains; c++) {
     if (jobs[c].team_min < post->team_min) post->team_min = jobs[c].team_min;
     post->n_grad += jobs[c].n_grad;
+    post->warmup_grad += jobs[c].warmup_grad;
     post->divergent += jobs[c].divergent;
     post->step_size[c] = jobs[c].step_size;
     post->mean_leapfrog[c] = jobs[c].mean_leapfrog;
@@ -1618,6 +1945,8 @@ void mint_print_posterior(MintPosterior *p) {
   printf("\n");
   fprintf(stderr, "sampling took %.6f s (%.0f ns per gradient incl. sampler); preparation took %.6f s\n",
           p->seconds, 1e9 * p->seconds / (double)(p->n_grad ? p->n_grad : 1), prep_seconds);
+  fprintf(stderr, "gradients: warmup=%lld sampling=%lld (warmup=%s, %lld iterations)\n", (long long)p->warmup_grad,
+          (long long)(p->n_grad - p->warmup_grad), p->warmup_fast ? "fast" : "stan", (long long)p->warmup_iters);
   fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s\n", p->threads_per_chain,
           p->team_min, p->grad_metric ? "grad" : "stan");
 }

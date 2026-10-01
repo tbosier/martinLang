@@ -167,6 +167,13 @@ Useful environment variables for compiled programs:
   chain's threads on the CPUs of one L3 cache.
 - `MINT_METRIC=grad` switches to the experimental gradient-based metric
   adaptation.
+- `MINT_WARMUP=fast` replaces Stan's warmup with a shorter one: each chain
+  starts from a Pathfinder-style L-BFGS point, warmup runs max(200, warmup / 5)
+  iterations (never more than the program's warmup), and the chains pool
+  their draws for each metric window. On the
+  examples it took 1.4 to 1.7x fewer gradients per effective draw (see the
+  Runtime section of [architecture.md](docs/architecture.md)). Stan's warmup
+  stays the default.
 
 Compiler switches, each turning one optimisation off (for measuring it):
 `--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
