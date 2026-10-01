@@ -239,6 +239,25 @@ static double rng_normal(Rng *r) {
 typedef double (*mint_logp_fn)(const double *theta, double *grad);
 typedef void (*mint_constrain_fn)(const double *unc, double *out);
 
+// The fused leapfrog (optional, generated for models with a fused scan
+// kernel; see gen_logp in compiler/src/model.rs). leap(theta, grad, hook,
+// hctx) is the model's logp, except that each thread of a fused scan kernel,
+// once the gradient of its rows is final, calls hook(hctx, slot, off,
+// stride, cols, r0, r1): elements off + c * stride + r, for c < cols and r0
+// <= r < r1, are its own. The sampler then does its leaf work on them there
+// (leaf_slab): on the thread that has them in its cache, inside the
+// kernel's parallel region, instead of in a pass of its own split
+// differently across the threads. slot is the kernel's thread index, or
+// MAX_NT for the rows the calling thread runs after the kernel.
+// leap_blocks(out) writes (offset, length) of each parameter the hooks
+// cover and returns their number; the sampler does the rest of theta
+// itself.
+typedef void (*mint_leap_hook)(void *hctx, int64_t slot, int64_t off, int64_t stride, int64_t cols, int64_t r0,
+                               int64_t r1);
+typedef double (*mint_leap_fn)(const double *theta, double *grad, mint_leap_hook hook, void *hctx);
+typedef int64_t (*mint_leap_blocks_fn)(int64_t *out);
+#define MAX_LEAP_BLOCKS 64
+
 #define MAX_DEPTH 10
 
 // Phase-space states are immutable once built and shared by reference: a
@@ -275,10 +294,16 @@ typedef struct {
 
 #define MAX_NT 64
 #define NPART (1 + 6 * (MAX_DEPTH + 2))
+#define SLOT_REST MAX_NT         // partial sums of the rows a kernel's calling thread runs
+#define SLOT_OTHER (MAX_NT + 1)  // partial sums of the parameters no hook covers
 
 typedef struct {
   int64_t D;
   mint_logp_fn f;
+  mint_leap_fn leap;  // the model's fused leapfrog, or NULL (see mint_leap_fn)
+  int leap_exact;     // with leap: the sums in the runtime's own order (MINT_FUSED_LEAPFROG=exact)
+  int nother;         // with leap: the ranges of theta no hook covers
+  int64_t other[2 * (MAX_LEAP_BLOCKS + 1)];
   double *inv_m;
   double eps;
   Rng rng;
@@ -302,7 +327,7 @@ typedef struct {
   St *spec;
   const St *spec_from;
   double spec_eps;
-  double part[MAX_NT][NPART];  // per-thread partial sums of a leaf pass
+  double part[MAX_NT + 2][NPART];  // per-thread partial sums of a leaf pass (and SLOT_REST, SLOT_OTHER)
 } Nuts;
 
 #define MAX_NT 64
@@ -578,22 +603,38 @@ typedef struct {
   St *n, *nx;  // the leaf, and the next leaf (NULL: none)
   double eps;
   int nlev;
+  int half;    // 1: the second half-step (and the next leaf's first); 2: only the kinetic energy of n->p
+  int merges;  // whether to compute the merges
   LevelJob lev[MAX_DEPTH + 2];
 } LeafJob;
 
-static void leaf_work(LeafJob *J, int t, int T) {
+// The kinetic-energy lanes of a final momentum p over [lo, hi), with the
+// arithmetic and order of kern_half2's.
+static void kern_kinetic(int64_t lo, int64_t hi, const double *restrict im, const double *restrict p,
+                         double *restrict k) {
+  double kk[LN];
+  for (int l = 0; l < LN; l++) kk[l] = k[l];
+  int64_t i = lo;
+  for (; i + LN <= hi; i += LN)
+    for (int l = 0; l < LN; l++) kk[l] += p[i + l] * p[i + l] * im[i + l];
+  for (; i < hi; i++) kk[i % LN] += p[i] * p[i] * im[i];
+  for (int l = 0; l < LN; l++) k[l] = kk[l];
+}
+
+// Leaf J's work on elements [lo, hi), accumulating the kinetic-energy lanes
+// k and the merges' lanes acc.
+static void leaf_range(const LeafJob *J, int64_t lo, int64_t hi, double *k, double (*acc)[6][LN]) {
   Nuts *s = J->s;
   St *n = J->n, *nx = J->nx;
   const double *im = s->inv_m;
-  int64_t lo, hi;
-  split_range(s->D, t, T, &lo, &hi);
-  double k[LN] = {0};
-  double acc[MAX_DEPTH + 2][6][LN];
-  memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
   double buf[2][CHUNK];
   for (int64_t c0 = lo; c0 < hi; c0 += CHUNK) {
     int64_t c1 = c0 + CHUNK < hi ? c0 + CHUNK : hi, m = c1 - c0;
-    kern_half2(c0, c1, J->eps, im, n->p, n->g, n->q, nx ? nx->p : NULL, nx ? nx->q : NULL, k);
+    if (J->half == 1)
+      kern_half2(c0, c1, J->eps, im, n->p, n->g, n->q, nx ? nx->p : NULL, nx ? nx->q : NULL, k);
+    else
+      kern_kinetic(c0, c1, im, n->p, k);
+    if (!J->merges) continue;
     const double *below = n->p + c0;
     for (int v = 0; v < J->nlev; v++) {
       const LevelJob *L = &J->lev[v];
@@ -606,10 +647,38 @@ static void leaf_work(LeafJob *J, int t, int T) {
       below = out;
     }
   }
-  double *part = s->part[t];
-  part[0] = lanes_total(k);
+}
+
+// Stores (add = 0) or adds the totals of the lanes to a partial-sum slot.
+static void leaf_part(const LeafJob *J, double *part, const double *k, double (*acc)[6][LN], int add) {
+  if (!add) memset(part, 0, (size_t)(1 + 6 * J->nlev) * sizeof(double));
+  part[0] += lanes_total(k);
+  if (!J->merges) return;
   for (int v = 0; v < J->nlev; v++)
-    for (int j = 0; j < 6; j++) part[1 + 6 * v + j] = lanes_total(acc[v][j]);
+    for (int j = 0; j < 6; j++) part[1 + 6 * v + j] += lanes_total(acc[v][j]);
+}
+
+static void leaf_work(LeafJob *J, int t, int T) {
+  int64_t lo, hi;
+  split_range(J->s->D, t, T, &lo, &hi);
+  double k[LN] = {0};
+  double acc[MAX_DEPTH + 2][6][LN];
+  memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
+  leaf_range(J, lo, hi, k, acc);
+  leaf_part(J, J->s->part[t], k, acc, 0);
+}
+
+// The fused leapfrog's hook (see mint_leap_fn): leaf work on one thread's
+// rows of a parameter, as runs of r1 - r0 elements, one per column. The
+// lanes run over the runs in order, and the totals are added to the slot.
+static void leaf_slab(void *ctx, int64_t slot, int64_t off, int64_t stride, int64_t cols, int64_t r0, int64_t r1) {
+  LeafJob *J = ctx;
+  if (r1 <= r0) return;
+  double k[LN] = {0};
+  double acc[MAX_DEPTH + 2][6][LN];
+  memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
+  for (int64_t c = 0; c < cols; c++) leaf_range(J, off + c * stride + r0, off + c * stride + r1, k, acc);
+  leaf_part(J, J->s->part[slot], k, acc, 1);
 }
 
 // Records the smallest OpenMP team that ran a pass: OpenMP may give fewer
@@ -639,27 +708,51 @@ static void leaf_start(Nuts *s, const St *z, St *n, double eps) {
   note_team(s, used);
 }
 
-// Second half of leaf n's leapfrog and the merges waiting for it (see above).
-// Returns the Hamiltonian; each completed merge's result is in its Merge.
-static double leaf_finish(Nuts *s, St *n, double eps) {
+// The work of leaf n once its gradient is known: the merges waiting for it
+// (whose states are read through their slots now) and the next leaf.
+static void leaf_prepare(Nuts *s, St *n, double eps, LeafJob *J) {
   int lo = s->pend_lo, hi = s->npend;
-  LeafJob J = {.s = s, .n = n, .eps = eps, .nlev = hi - lo};
+  *J = (LeafJob){.s = s, .n = n, .eps = eps, .nlev = hi - lo, .half = 1, .merges = 1};
   // When the merges reach the transition's own (pend[0]), this leaf ends the
   // new subtree and the next direction is not yet drawn: no next leaf.
-  if (!(lo == 0 && hi > 0)) J.nx = st_acquire(s);
-  for (int v = 0; v < J.nlev; v++) {
+  if (!(lo == 0 && hi > 0)) J->nx = st_acquire(s);
+  for (int v = 0; v < J->nlev; v++) {
     const Merge *m = &s->pend[hi - 1 - v];
-    LevelJob *L = &J.lev[v];
+    LevelJob *L = &J->lev[v];
     L->ra = m->ra, L->rb = m->rb;
     L->bp = (*m->beg)->p, L->ep = (*m->end)->p, L->m2p = (*m->mid2)->p, L->m1p = (*m->mid1)->p;
-    L->out = v == J.nlev - 1 ? m->rho : NULL;
-    if (v == J.nlev - 1 && !L->out) mint_panic("internal error: outermost merge has no output");
+    L->out = v == J->nlev - 1 ? m->rho : NULL;
+    if (v == J->nlev - 1 && !L->out) mint_panic("internal error: outermost merge has no output");
     // two single leaves: the halves are the earlier leaf and this one
     L->leaves = v == 0 && m->ra && !m->rb && m->ra == L->bp && m->ra == L->m1p && L->ep == n->p &&
                 L->m2p == n->p;
   }
+}
+
+// Reads leaf J's sums v (kinetic energy, then six per merge): each merge's
+// result into its Merge, and the next leaf's half-step for build_tree.
+// Returns the Hamiltonian.
+static double leaf_conclude(Nuts *s, const LeafJob *J, const double *v) {
+  int hi = s->npend;
+  for (int l = 0; l < J->nlev; l++) {
+    const double *x = v + 1 + 6 * l;
+    int ok = J->lev[l].leaves ? (x[0] > 0 && x[1] > 0)
+                              : (x[0] > 0 && x[1] > 0) & (x[2] > 0 && x[3] > 0) & (x[4] > 0 && x[5] > 0);
+    s->pend[hi - 1 - l].persist = ok;
+  }
+  if (J->nx) {
+    s->spec = J->nx;
+    s->spec_from = J->n;
+    s->spec_eps = J->eps;
+  }
+  return -J->n->lp + 0.5 * v[0];
+}
+
+// The leaf pass across the chain's threads, split by index ranges; the
+// totals end up in s->part[0].
+static void leaf_pass(Nuts *s, LeafJob *J) {
   if (s->nt == 1) {
-    leaf_work(&J, 0, 1);
+    leaf_work(J, 0, 1);
     note_team(s, 1);
   } else {
     int used = 1;
@@ -667,25 +760,88 @@ static double leaf_finish(Nuts *s, St *n, double eps) {
     {
       int t = omp_get_thread_num(), T = omp_get_num_threads();
       if (t == 0) used = T;
-      leaf_work(&J, t, T);
+      leaf_work(J, t, T);
     }
     note_team(s, used);
     for (int t = 1; t < used; t++)
-      for (int j = 0; j < 1 + 6 * J.nlev; j++) s->part[0][j] += s->part[t][j];
+      for (int j = 0; j < 1 + 6 * J->nlev; j++) s->part[0][j] += s->part[t][j];
   }
-  const double *v = s->part[0];
-  for (int l = 0; l < J.nlev; l++) {
-    const double *x = v + 1 + 6 * l;
-    int ok = J.lev[l].leaves ? (x[0] > 0 && x[1] > 0)
-                             : (x[0] > 0 && x[1] > 0) & (x[2] > 0 && x[3] > 0) & (x[4] > 0 && x[5] > 0);
-    s->pend[hi - 1 - l].persist = ok;
+}
+
+// Second half of leaf n's leapfrog and the merges waiting for it (see above).
+// Returns the Hamiltonian; each completed merge's result is in its Merge.
+static double leaf_finish(Nuts *s, St *n, double eps) {
+  LeafJob J;
+  leaf_prepare(s, n, eps, &J);
+  leaf_pass(s, &J);
+  return leaf_conclude(s, &J, s->part[0]);
+}
+
+// Leaf n with the model's fused leapfrog (see mint_leap_fn): its gradient,
+// with the leaf work on each fused scan kernel's rows done by the kernel's
+// threads through the hook (leaf_slab), and on the rest of theta here,
+// after it. The partial sums are added in slot order: the kernel's
+// threads, the kernel's calling thread, the rest. That order differs from
+// leaf_pass's, so the draws differ from the runtime's own leapfrog by
+// rounding. With s->leap_exact the hooks and the rest take only the
+// half-steps, and a leaf pass then sums in leaf_pass's order, which gives
+// exactly the runtime's draws (for testing). Returns the Hamiltonian.
+static void leaf_fused_run(Nuts *s, LeafJob *J) {
+  St *n = J->n;
+  int nt = (int)kernel_nt;
+  int nsum = 1 + 6 * J->nlev;
+  if (s->leap_exact) J->merges = 0;
+  for (int t = 0; t < nt; t++) memset(s->part[t], 0, (size_t)nsum * sizeof(double));
+  memset(s->part[SLOT_REST], 0, (size_t)nsum * sizeof(double));
+  n->lp = s->leap(n->q, n->g, leaf_slab, J);
+  s->n_grad++;
+  {
+    double k[LN] = {0};
+    double acc[MAX_DEPTH + 2][6][LN];
+    memset(acc, 0, (size_t)J->nlev * sizeof acc[0]);
+    for (int b = 0; b < s->nother; b++) leaf_range(J, s->other[2 * b], s->other[2 * b + 1], k, acc);
+    leaf_part(J, s->part[SLOT_OTHER], k, acc, 0);
   }
-  if (J.nx) {
-    s->spec = J.nx;
-    s->spec_from = n;
-    s->spec_eps = eps;
+  if (s->leap_exact) {
+    J->half = 2;
+    J->merges = 1;
+    leaf_pass(s, J);
+    return;
   }
-  return -n->lp + 0.5 * v[0];
+  double *v = s->part[0];
+  for (int t = 1; t < nt; t++)
+    for (int j = 0; j < nsum; j++) v[j] += s->part[t][j];
+  for (int j = 0; j < nsum; j++) v[j] += s->part[SLOT_REST][j];
+  for (int j = 0; j < nsum; j++) v[j] += s->part[SLOT_OTHER][j];
+}
+
+static double leaf_fused(Nuts *s, St *n, double eps) {
+  LeafJob J;
+  leaf_prepare(s, n, eps, &J);
+  leaf_fused_run(s, &J);
+  return leaf_conclude(s, &J, s->part[0]);
+}
+
+// The ranges of theta that no fused-leapfrog block covers, into s->other.
+static void leap_other(Nuts *s, mint_leap_blocks_fn blocks) {
+  int64_t D = s->D, blk[2 * MAX_LEAP_BLOCKS];
+  int64_t nb = blocks(blk);
+  if (nb < 1 || nb > MAX_LEAP_BLOCKS) mint_panic("internal error: fused leapfrog blocks");
+  for (int64_t a = 0; a < nb; a++)  // sort by offset
+    for (int64_t b = a + 1; b < nb; b++)
+      if (blk[2 * b] < blk[2 * a]) {
+        int64_t t0 = blk[2 * a], t1 = blk[2 * a + 1];
+        blk[2 * a] = blk[2 * b], blk[2 * a + 1] = blk[2 * b + 1];
+        blk[2 * b] = t0, blk[2 * b + 1] = t1;
+      }
+  int64_t at = 0;
+  s->nother = 0;
+  for (int64_t a = 0; a <= nb; a++) {
+    int64_t lo = a < nb ? blk[2 * a] : D;
+    if (lo < at || lo > D) mint_panic("internal error: fused leapfrog blocks overlap");
+    if (lo > at) s->other[2 * s->nother] = at, s->other[2 * s->nother + 1] = lo, s->nother++;
+    if (a < nb) at = lo + blk[2 * a + 1];
+  }
 }
 
 static void sample_momentum(Nuts *s, St *z) {
@@ -731,7 +887,8 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
       n = st_acquire(s);
       leaf_start(s, s->edge, n, eps);
     }
-    eval(s, n);
+    // (with the fused leapfrog the gradient comes with the leaf's work)
+    if (!s->leap) eval(s, n);
     st_release(s, s->edge);
     s->edge = n;
     s->n_leapfrog++;
@@ -739,7 +896,7 @@ static int build_tree(Nuts *s, int depth, St **prop, St **beg, St **end, double 
     st_set(s, beg, n);
     st_set(s, end, n);
     *rho_out = n->p;
-    double h = leaf_finish(s, n, eps);
+    double h = s->leap ? leaf_fused(s, n, eps) : leaf_finish(s, n, eps);
     if (isnan(h)) h = INFINITY;
     n->h = h;
     if (h - H0 > 1000.0) s->divergent = 1;
@@ -1061,6 +1218,9 @@ static int bind_team(int nt, const cpu_set_t *set) {
 typedef struct {
   // inputs
   mint_logp_fn f;
+  mint_leap_fn leap;
+  mint_leap_blocks_fn leap_blocks;
+  int leap_mode;  // 0: off, 1: on when the chain has more than one thread, 2: on, 3: on with exact sums
   mint_constrain_fn constrain;
   int64_t D, draws, warmup;
   uint64_t seed;
@@ -1087,6 +1247,11 @@ static void *run_chain(void *arg) {
   kernel_nt = kernel_threads(s->nt);
   int bound = job->l3 && s->nt > 1 && bind_team(s->nt, job->l3);
   s->f = job->f;
+  if (job->leap && (job->leap_mode >= 2 || (job->leap_mode == 1 && s->nt > 1))) {
+    leap_other(s, job->leap_blocks);
+    s->leap = job->leap;
+    s->leap_exact = job->leap_mode == 3;
+  }
   s->inv_m = mint_alloc(D);
   for (int64_t i = 0; i < D; i++) s->inv_m[i] = 1.0;
   rng_seed(&s->rng, job->seed * 0x9E3779B97F4A7C15ull + (uint64_t)job->chain + 1);
@@ -1260,6 +1425,15 @@ static void gradcheck(mint_logp_fn f, int64_t D, const double *theta) {
 // A compiled model may store some parameters in a different order from the
 // user's (see scan layouts in compiler/src/model.rs). These convert an
 // unconstrained vector between the two; null means the orders agree.
+// The model's fused leapfrog, registered by the generated sample function
+// before it calls mint_sample (NULL: none; the Rust baselines never set it).
+static mint_leap_fn model_leap;
+static mint_leap_blocks_fn model_leap_blocks;
+void mint_set_leap(mint_leap_fn f, mint_leap_blocks_fn blocks) {
+  model_leap = f;
+  model_leap_blocks = blocks;
+}
+
 typedef void (*mint_permute_fn)(const double *src, double *dst);
 static mint_permute_fn layout_to_internal, layout_to_user;
 void mint_set_layout(mint_permute_fn to_internal, mint_permute_fn to_user) {
@@ -1312,6 +1486,125 @@ static void bench_grad(mint_logp_fn f, int64_t D, int64_t reps) {
   exit(0);
 }
 
+// MINT_LEAP_TEST: one leaf from the benchmark point (momentum, inverse
+// metric, step size and the states of one merge fixed below; eps of both
+// signs) through the runtime's own path (the model's logp, then the leaf
+// pass) and through the fused leapfrog (MINT_KERNEL_THREADS threads in the
+// kernel). The gradient, log density, final momentum, the next leaf's
+// half-step and the merge's summed momentum must be bit-identical; the
+// kinetic energy and the merge's six sums are summed in a different order
+// and are compared relative to the largest of them. With MINT_LEAP_TEST=K
+// > 1, also times K steady-state leaves of each (no merge, eps = 0 so the
+// values stay put, three rotating states, the runtime's pass on as many
+// threads as the kernel), alternating blocks of each so that both see the
+// same machine. Then exits.
+static St *test_state(int64_t D) {
+  St *x = calloc(1, sizeof *x);
+  x->q = mint_alloc(D), x->p = mint_alloc(D), x->g = mint_alloc(D);
+  return x;
+}
+
+static void leap_test(mint_logp_fn f, int64_t D, int64_t reps) {
+  if (!model_leap) {
+    printf("leap-test: the model has no fused leapfrog\n");
+    exit(2);
+  }
+  Nuts *s = calloc(1, sizeof *s);
+  s->D = D, s->f = f, s->leap = model_leap, s->nt = (int)kernel_nt, s->team_min = s->nt;
+  leap_other(s, model_leap_blocks);
+  double *im = mint_alloc(D);
+  St *z = test_state(D), *na = test_state(D), *nb = test_state(D), *xa = test_state(D), *xb = test_state(D);
+  double *v[6];
+  for (int j = 0; j < 6; j++) v[j] = mint_alloc(D);
+  bench_point(z->q, D);
+  f(z->q, z->g);
+  for (int64_t i = 0; i < D; i++) {
+    z->p[i] = 0.3 * (double)((i * 53) % 17 - 8) / 8.0;
+    im[i] = 0.5 + (double)((i * 29) % 13) / 13.0;
+    for (int j = 0; j < 5; j++) v[j][i] = 0.2 * (double)((i * (31 + 6 * j) + j) % 19 - 9) / 9.0;
+  }
+  s->inv_m = im;
+  int bad = 0;
+  for (int sgn = 0; sgn < 2; sgn++) {
+    double eps = sgn ? -0.00137 : 0.00213;
+    kern_half1(0, D, eps, im, z->p, z->g, z->q, na->p, na->q);
+    memcpy(nb->p, na->p, (size_t)D * sizeof(double));
+    memcpy(nb->q, na->q, (size_t)D * sizeof(double));
+    double sums[2][7];
+    double *out[2] = {v[5], mint_alloc(D)};
+    for (int w = 0; w < 2; w++) {
+      St *n = w ? nb : na, *x = w ? xb : xa;
+      LeafJob J = {.s = s, .n = n, .nx = x, .eps = eps, .nlev = 1, .half = 1, .merges = 1};
+      J.lev[0] = (LevelJob){.ra = v[0], .bp = v[1], .ep = v[2], .m2p = v[3], .m1p = v[4], .out = out[w]};
+      if (w == 0) {
+        n->lp = f(n->q, n->g);
+        leaf_pass(s, &J);
+      } else {
+        leaf_fused_run(s, &J);
+      }
+      memcpy(sums[w], s->part[0], sizeof sums[w]);
+    }
+    int64_t d[6] = {0};
+    for (int64_t i = 0; i < D; i++) {
+      d[0] += memcmp(&na->g[i], &nb->g[i], sizeof(double)) != 0;
+      d[1] += memcmp(&na->p[i], &nb->p[i], sizeof(double)) != 0;
+      d[2] += memcmp(&xa->p[i], &xb->p[i], sizeof(double)) != 0;
+      d[3] += memcmp(&xa->q[i], &xb->q[i], sizeof(double)) != 0;
+      d[4] += memcmp(&out[0][i], &out[1][i], sizeof(double)) != 0;
+    }
+    d[5] = memcmp(&na->lp, &nb->lp, sizeof(double)) != 0;
+    double big = 0, worst = 0;
+    for (int j = 0; j < 7; j++) big = fmax(big, fabs(sums[0][j]));
+    for (int j = 0; j < 7; j++) worst = fmax(worst, fabs(sums[0][j] - sums[1][j]) / big);
+    printf("leap-test: threads=%d eps=%g elements that differ: gradient %lld, momentum %lld, next momentum %lld, "
+           "next position %lld, merged momentum %lld; logp differs %lld; kinetic energy %.17g fused %.17g; "
+           "largest sum difference %.3g of the largest sum\n",
+           s->nt, eps, (long long)d[0], (long long)d[1], (long long)d[2], (long long)d[3], (long long)d[4],
+           (long long)d[5], sums[0][0], sums[1][0], worst);
+    bad |= d[0] || d[1] || d[2] || d[3] || d[4] || d[5] || !(worst < 1e-12);
+    free(out[1]);
+  }
+  if (reps > 1) {
+    St *S[3];
+    for (int i = 0; i < 3; i++) {
+      S[i] = test_state(D);
+      memcpy(S[i]->q, z->q, (size_t)D * sizeof(double));
+      memcpy(S[i]->p, z->p, (size_t)D * sizeof(double));
+      memcpy(S[i]->g, z->g, (size_t)D * sizeof(double));
+    }
+    const int64_t B = 20;
+    double tsum[2] = {0, 0}, tmin[2] = {1e30, 1e30}, sink = 0;
+    int cur = 0;
+    for (int64_t r0 = 0; r0 < reps; r0 += B) {
+      for (int w = 0; w < 2; w++) {
+        double t0 = mint_clock();
+        for (int64_t r = 0; r < B; r++) {
+          St *n = S[cur], *x = S[(cur + 1) % 3];
+          LeafJob J = {.s = s, .n = n, .nx = x, .eps = 0.0, .nlev = 0, .half = 1, .merges = 1};
+          if (w == 0) {
+            n->lp = f(n->q, n->g);
+            leaf_pass(s, &J);
+          } else {
+            leaf_fused_run(s, &J);
+          }
+          sink += n->lp + s->part[0][0];
+          cur = (cur + 1) % 3;
+        }
+        double dt = (mint_clock() - t0) / (double)B;
+        tsum[w] += dt;
+        if (dt < tmin[w]) tmin[w] = dt;
+      }
+    }
+    double nblk = (double)((reps + B - 1) / B);
+    printf("leap-test: reps=%lld threads=%d ns per leaf: runtime mean %.1f fastest %.1f, fused mean %.1f "
+           "fastest %.1f (sink %g)\n",
+           (long long)reps, s->nt, 1e9 * tsum[0] / nblk, 1e9 * tmin[0], 1e9 * tsum[1] / nblk, 1e9 * tmin[1],
+           sink * 0);
+  }
+  printf("leap-test: %s\n", bad ? "MISMATCH" : "ok");
+  exit(bad);
+}
+
 typedef struct {
   int64_t D, draws, chains, nparams;
   char **labels;  // D labels
@@ -1322,6 +1615,7 @@ typedef struct {
   int64_t n_grad, divergent;
   double *step_size, *mean_leapfrog;
   int threads_per_chain, team_min, grad_metric;
+  int leapfrog;  // whether the fused leapfrog ran (1), with exact sums (2), or not (0)
 } MintPosterior;
 
 static int cmp_double(const void *a, const void *b) {
@@ -1440,7 +1734,14 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
     free(q);
   }
   if (bench) bench_grad(f, D, atoll(bench));
+  const char *ltest = getenv("MINT_LEAP_TEST");
+  if (ltest) leap_test(f, D, atoll(ltest));
   kernel_nt = 1;
+  // The model's fused leapfrog (when it has one): by default when a chain
+  // runs on more than one thread. MINT_FUSED_LEAPFROG=0 turns it off, =1 on
+  // for every chain, and =exact on with the sums in the runtime's own order.
+  const char *lenv = getenv("MINT_FUSED_LEAPFROG");
+  int leap_mode = !lenv ? 1 : strcmp(lenv, "0") == 0 ? 0 : strcmp(lenv, "exact") == 0 ? 3 : 2;
 
   MintPosterior *post = calloc(1, sizeof *post);
   post->D = D, post->draws = draws, post->chains = chains, post->nparams = nparams;
@@ -1491,6 +1792,9 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   double t0 = mint_clock();
   for (int64_t c = 0; c < chains; c++) {
     jobs[c] = (ChainJob){.f = f,
+                         .leap = model_leap,
+                         .leap_blocks = model_leap_blocks,
+                         .leap_mode = leap_mode,
                          .constrain = constrain,
                          .D = D,
                          .draws = draws,
@@ -1513,6 +1817,7 @@ MintPosterior *mint_sample(mint_logp_fn f, mint_constrain_fn constrain, int64_t 
   post->mean_leapfrog = mint_alloc(chains);
   post->threads_per_chain = tpc;
   post->team_min = tpc;
+  post->leapfrog = model_leap && (leap_mode >= 2 || (leap_mode == 1 && tpc > 1)) ? (leap_mode == 3 ? 2 : 1) : 0;
   const char *metric_env = getenv("MINT_METRIC");
   post->grad_metric = metric_env && strcmp(metric_env, "grad") == 0;
   for (int64_t c = 0; c < chains; c++) {
@@ -1618,8 +1923,9 @@ void mint_print_posterior(MintPosterior *p) {
   printf("\n");
   fprintf(stderr, "sampling took %.6f s (%.0f ns per gradient incl. sampler); preparation took %.6f s\n",
           p->seconds, 1e9 * p->seconds / (double)(p->n_grad ? p->n_grad : 1), prep_seconds);
-  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s\n", p->threads_per_chain,
-          p->team_min, p->grad_metric ? "grad" : "stan");
+  fprintf(stderr, "sampler: threads per chain=%d (smallest team that ran=%d) metric=%s leapfrog=%s\n",
+          p->threads_per_chain, p->team_min, p->grad_metric ? "grad" : "stan",
+          p->leapfrog == 2 ? "fused (exact sums)" : p->leapfrog ? "fused" : "runtime");
 }
 
 // Posterior mean of flat component j (0-based), used by generated code.

@@ -336,6 +336,67 @@ if [ -f bench/dynpois/data_large/y.f64 ]; then
   fi
 fi
 
+# ---- fused leapfrog. The leap entry point hands each kernel thread's rows of
+# a covered matrix parameter to the sampler's leaf work (MINT_LEAP_TEST: one
+# leaf with a merge, against the runtime's own path). The gradient, log
+# density, momentum, next half-step and merged momentum must be
+# bit-identical and the kinetic energy and merge sums equal to 1e-12, on 1
+# and 3 kernel threads. Models with nothing to cover (a running sum of data
+# only; a matrix parameter shared by two scan statements, which neither
+# kernel owns) and --no-fused-leapfrog builds must not have the entry point. In
+# whole runs, MINT_FUSED_LEAPFROG=exact (the fused leaf work with the sums
+# in the runtime's order) must give exactly the draws of
+# MINT_FUSED_LEAPFROG=0, serial and with 3 threads per chain; the default
+# fused sums must be deterministic.
+leap_check() { # NAME leap|none (uses build/par_NAME from the parallel kernel tests)
+  local n=$1 want=$2 has=none
+  [ -x build/par_$n ] || { bad "fused leapfrog $n: no binary"; return; }
+  grep -q "define double @mint_model_.*_leap(" build/par_$n.ll && has=leap
+  [ "$has" = "$want" ] && pass "fused leapfrog $n: generated code has $want" || { bad "fused leapfrog $n: expected $want, got $has"; return; }
+  [ "$want" = leap ] || return
+  for t in 1 3; do
+    out=$(MINT_KERNEL_THREADS=$t MINT_LEAP_TEST=1 ./build/par_$n 2>&1)
+    grep -q "^leap-test: ok" <<<"$out" && pass "fused leapfrog $n, $t kernel threads: same leaf as the runtime's" \
+      || { bad "fused leapfrog $n, $t kernel threads: leaf differs"; echo "$out"; }
+  done
+}
+for m in nested mixed nested_sq colreuse twohosts layout_draws bernoulli datascan; do
+  want=leap
+  case $m in datascan|twohosts) want=none ;; esac
+  for G in 7 13 20 61; do leap_check ${m}_$G $want; done
+done
+build build/par_nested.20.mint leap_off --no-fused-leapfrog \
+  && { grep -q "define double @mint_model_.*_leap(" build/leap_off.ll && bad "--no-fused-leapfrog still emits the leap entry point" \
+       || pass "--no-fused-leapfrog: no leap entry point"; }
+# draws_same LABEL BIN ENV_A ENV_B: the raw draws of two runs are identical
+draws_same() {
+  env $3 MINT_DRAWS=build/leap_a.draws ./build/$2 > /dev/null 2>&1
+  env $4 MINT_DRAWS=build/leap_b.draws ./build/$2 > /dev/null 2>&1
+  [ -s build/leap_a.draws ] && cmp -s build/leap_a.draws build/leap_b.draws && pass "$1" || bad "$1"
+  rm -f build/leap_a.draws build/leap_b.draws
+}
+sed 's/draws = 4, warmup = 0/draws = 30, warmup = 30/' build/par_nested.61.mint > build/leap_nested.mint
+sed 's/draws = 1000, warmup = 1000/draws = 40, warmup = 40/' examples/dynamic_poisson.mint > build/leap_dps.mint
+for m in nested dps; do
+  build build/leap_$m.mint leap_$m || continue
+  for t in 1 3; do
+    draws_same "fused leapfrog $m, $t threads per chain: exact sums give the runtime's draws" leap_$m \
+      "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=exact"
+    draws_same "fused leapfrog $m, $t threads per chain: deterministic" leap_$m \
+      "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=1" "MINT_THREADS_PER_CHAIN=$t MINT_FUSED_LEAPFROG=1"
+  done
+done
+if [ -f bench/dynpois/data_large/y.f64 ] && [ -x build/par_dynpois_run ]; then
+  draws_same "fused leapfrog, large model, 3 threads per chain: exact sums give the runtime's draws" par_dynpois_run \
+    "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=0" "MINT_THREADS_PER_CHAIN=3 MINT_FUSED_LEAPFROG=exact"
+  out=$(MINT_THREADS_PER_CHAIN=3 ./build/par_dynpois_run 2>&1 >/dev/null)
+  grep -q "leapfrog=fused$" <<<"$out" && pass "fused leapfrog is the default with 3 threads per chain" \
+    || { bad "fused leapfrog is not the default with 3 threads per chain"; echo "$out"; }
+  out=$(MINT_THREADS_PER_CHAIN=1 ./build/par_dynpois_run 2>&1 >/dev/null)
+  grep -q "leapfrog=runtime$" <<<"$out" && pass "runtime leapfrog is the default with 1 thread per chain" \
+    || { bad "runtime leapfrog is not the default with 1 thread per chain"; echo "$out"; }
+fi
+
 # ---- the scan layout reaches the draws: a matrix parameter pinned to the
 # data by a tight prior must come back with each posterior mean on its own
 # (row-major) entry.

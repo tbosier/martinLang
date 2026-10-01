@@ -523,6 +523,10 @@ struct Mg<'a> {
     /// When fused scan kernels may run on several threads: the register
     /// holding the requested thread count (`mint_par_threads`).
     par_nt: Option<String>,
+    /// The leap entry point (`gen_logp` with `leap`): the matrix parameters
+    /// whose leapfrog work the fused scan kernels hand to the runtime's hook,
+    /// with their offsets in theta.
+    leap_cov: Vec<(String, String)>,
 }
 
 impl HasFb for Mg<'_> {
@@ -559,6 +563,7 @@ impl<'a> Mg<'a> {
             pending_ad: HashMap::new(),
             ws_slot_of: HashMap::new(),
             par_nt: None,
+            leap_cov: Vec::new(),
         };
         for d in &tm.dims {
             let v = g.f.load_i64(&dim_global(&tm.name, d));
@@ -1086,10 +1091,11 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     }
 
     gen_init(m, tm, &stmts, opts, &cm);
-    gen_logp(m, tm, &stmts, opts, &cm);
+    gen_logp(m, tm, &stmts, opts, &cm, false);
+    let leap = opts.fused_leapfrog && gen_logp(m, tm, &stmts, opts, &cm, true);
     gen_constrain(m, tm, opts, &cm);
     let permute = gen_permute(m, tm, opts, &cm);
-    gen_sample_fn(m, tm, opts, permute);
+    gen_sample_fn(m, tm, opts, permute, leap);
 }
 
 fn panic_model(tm: &TModel, msg: &str) -> ! {
@@ -1278,7 +1284,28 @@ fn first_of(g: &mut Mg, n: &str) -> String {
     r
 }
 
-fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)]) {
+/// Emits the model's log density and gradient, `logp(theta, grad)`.
+///
+/// With `leap`, emits instead `leap(theta, grad, hook, hctx)`, the same
+/// function with a hook for the sampler (the fused leapfrog): the matrix
+/// parameters owned by exactly one fused scan kernel (all their gradient is
+/// summed in its reverse loop) are covered. Each thread of a kernel, once
+/// its groups of rows are done, so that their gradient is final, calls
+///
+///   hook(hctx, slot, off, rows, cols, r0, r1)
+///
+/// for each covered parameter at offset `off` of theta (column-major,
+/// `rows` x `cols`): rows r0..r1 of every column are this thread's. The
+/// runtime then does its leapfrog and tree work on those elements on the
+/// same thread, while they are in its cache, instead of in a pass of its
+/// own split differently across the threads. `slot` is the kernel's thread
+/// index, or PAR_MAX_THREADS for the rows the calling thread runs after the
+/// groups (single vectors and leftover rows). Also emits
+/// `leap_blocks(out)`, which writes (offset, length) of each covered
+/// parameter and returns their number, so the runtime can do the rest of
+/// theta itself. Returns false, emitting nothing, when nothing would be
+/// covered.
+fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim, Dim)], leap: bool) -> bool {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.cm = cm.to_vec();
     let (layout, _total) = g.layout(tm);
@@ -1327,6 +1354,17 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
                 }
             }
         }
+    }
+    if leap {
+        for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
+            if matches!(t, Ty::Matrix(..)) && owned.values().filter(|v| v.contains(n)).count() == 1 {
+                g.leap_cov.push((n.clone(), off.clone()));
+            }
+        }
+        if g.leap_cov.is_empty() {
+            return false;
+        }
+        gen_leap_blocks(g.m, tm, opts, cm, &g.leap_cov.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>());
     }
     // Zero the gradient of every parameter whose gradient is accumulated
     // (scalars and Positive vectors are stored at the end; owned matrices
@@ -1785,8 +1823,51 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], opts: &Opts, cm: &[(Dim
         }
     }
     let r = g.f.acc_get(&lp);
-    let header = format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name);
+    let header = if leap {
+        // grad is not noalias here: the hook reads it through the sampler's
+        // own pointers
+        format!("define double @mint_model_{}_leap(ptr noalias %theta, ptr %grad, ptr %hook, ptr %hctx)", tm.name)
+    } else {
+        format!("define double @mint_model_{}_logp(ptr noalias %theta, ptr noalias %grad)", tm.name)
+    };
     g.finish(&header, &[format!("ret double {r}")]);
+    true
+}
+
+/// `leap_blocks(out)`: (offset, length) in theta of each parameter the leap
+/// entry point covers (see `gen_logp`); returns their number.
+fn gen_leap_blocks(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)], covered: &[String]) {
+    let mut g = Mg::new(m, tm, opts.strict_fp);
+    g.cm = cm.to_vec();
+    let (layout, _) = g.layout(tm);
+    let mut k = 0usize;
+    for (n, off, size) in &layout {
+        if !covered.contains(n) {
+            continue;
+        }
+        for (j, v) in [off.clone(), size.clone().unwrap()].iter().enumerate() {
+            let a = g.f.reg();
+            g.f.emit(format!("{a} = getelementptr inbounds i64, ptr %out, i64 {}", 2 * k + j));
+            g.f.emit(format!("store i64 {v}, ptr {a}"));
+        }
+        k += 1;
+    }
+    let header = format!("define i64 @mint_model_{}_leap_blocks(ptr %out)", tm.name);
+    g.finish(&header, &[format!("ret i64 {k}")]);
+}
+
+/// The leap entry point: rows r0..r1 of every column of the covered
+/// parameters among `owned` are done; hand them to the runtime's hook.
+fn leap_hook_calls(g: &mut Mg, owned: &[String], rows: &str, cols: &str, slot: &str, r0: &str, r1: &str, hook: &str, hctx: &str) {
+    let cov: Vec<(String, String)> = g.leap_cov.iter().filter(|(n, _)| owned.contains(n)).cloned().collect();
+    if cov.is_empty() {
+        return;
+    }
+    for (_, off) in cov {
+        g.f.emit(format!(
+            "call void {hook}(ptr {hctx}, i64 {slot}, i64 {off}, i64 {rows}, i64 {cols}, i64 {r0}, i64 {r1})"
+        ));
+    }
 }
 
 /// Rows per chunk of a fission kernel: the chunk's rows of X (CHUNK * p
@@ -2461,6 +2542,7 @@ fn gen_fused_scan<'s>(
                 let r0 = g.f.imul(b, &wide);
                 scan_group(g, &sc, lanes, UNROLL, &r0, &lpv, &vps);
             });
+            leap_hook_calls(g, owned, &rows, &cols, "0", "0", &done_wide, "%hook", "%hctx");
         };
         if let Some(nt) = &par {
             // With more than one thread requested, the outlined kernel;
@@ -2513,6 +2595,9 @@ fn gen_fused_scan<'s>(
     }
     let lp1 = [lp.to_string()];
     for_range(g, &done, &rows, |g, r| scan_group(g, &sc, 1, 1, r, &lp1, &[]));
+    // the rows the calling thread ran after the groups
+    let rest = if lanes > 1 { done_wide.clone() } else { "0".to_string() };
+    leap_hook_calls(g, owned, &rows, &cols, &PAR_MAX_THREADS.to_string(), &rest, &rows, "%hook", "%hctx");
     let used = if par.is_some() {
         let r = g.f.reg();
         g.f.emit(format!("{r} = load i64, ptr {used_at}"));
@@ -2581,9 +2666,12 @@ fn pos_vectors(tm: &TModel) -> Vec<String> {
 /// density and scalar adjoints written to entry `tid` of the output arrays.
 /// Returns the name of the entry point `(ctx, g0, g1, tid)`.
 fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], scalars: &[String]) -> String {
-    let kn = format!("mint_model_{}_scan{k}", tm.name);
+    let leap = !g.leap_cov.is_empty();
+    let kn = format!("mint_model_{}_{}scan{k}", tm.name, if leap { "leap_" } else { "" });
     let pos = pos_vectors(tm);
     let ncp = sc.cp.len();
+    let leap_base = CTX_FIXED + ncp + 2 * pos.len() + scalars.len();
+    let covered: Vec<String> = g.leap_cov.iter().map(|(n, _)| n.clone()).collect();
     // The same per-thread slots as the caller's buffers, requested at the
     // same sizes: on the calling thread they are the caller's own buffers,
     // and are never reallocated under it.
@@ -2601,6 +2689,7 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
         let mut km = Mg::new(&mut *g.m, tm, strict);
         km.cm = cm;
         let (layout, _) = km.layout(tm);
+        km.leap_cov = tm.params.iter().zip(&layout).filter(|((n, _), _)| covered.contains(n)).map(|((n, _), (_, off, _))| (n.clone(), off.clone())).collect();
         let sc_base = CTX_FIXED + ncp + 2 * pos.len();
         for ((n, t), (_, off, _)) in tm.params.iter().zip(&layout) {
             match t {
@@ -2663,6 +2752,21 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let r0 = km.f.imul(b, &wide);
             scan_group(km, &sck, lanes, UNROLL, &r0, &lpv, &vps);
         });
+        if leap {
+            // this thread's rows are done: the runtime's hook
+            let mut hp = Vec::new();
+            for j in 0..2 {
+                let a = km.f.reg();
+                km.f.emit(format!("{a} = getelementptr inbounds i64, ptr %ctx, i64 {}", leap_base + j));
+                let v = km.f.reg();
+                km.f.emit(format!("{v} = load ptr, ptr {a}"));
+                hp.push(v);
+            }
+            let r0 = km.f.imul("%g0", &wide);
+            let r1 = km.f.imul("%g1", &wide);
+            let (rows, cols) = (sck.rows.clone(), sck.cols.clone());
+            leap_hook_calls(&mut km, sc.owned, &rows, &cols, "%tid", &r0, &r1, &hp[0], &hp[1]);
+        }
         km.f.lanes = lanes;
         let mut tot = km.f.acc_get(&lpv[0]);
         for a in &lpv[1..] {
@@ -2694,7 +2798,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
             let at = km.f.iadd(&base, &j.to_string());
             km.f.store(v, &out_sc2, &at);
         }
-        let mut params = vec!["ptr noalias %theta".to_string(), "ptr noalias %grad".to_string()];
+        // (grad is read by the leap entry point's hook: not noalias there)
+        let gq = if leap { "ptr %grad" } else { "ptr noalias %grad" };
+        let mut params = vec!["ptr noalias %theta".to_string(), gq.to_string()];
         params.extend((0..ncp).map(|i| format!("ptr noalias %kp{i}")));
         for i in 0..pos.len() {
             params.push(format!("ptr noalias %kpv{i}"));
@@ -2727,7 +2833,9 @@ fn gen_par_kernel(g: &mut Mg, tm: &TModel, k: usize, sc: &Scan, nodes: &[&M], sc
 #[allow(clippy::too_many_arguments)]
 fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[String], groups: &str, nt: &str, lp: &str) -> String {
     let pos = pos_vectors(tm);
-    let nslots = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let leap = !g.leap_cov.is_empty();
+    let leap_base = CTX_FIXED + cp.len() + 2 * pos.len() + scalars.len();
+    let nslots = leap_base + if leap { 2 } else { 0 };
     let ctx = g.f.alloca(&format!("[{nslots} x i64]"));
     let out_lp = g.f.alloca(&format!("[{PAR_MAX_THREADS} x double]"));
     let out_sc = g.f.alloca(&format!("[{} x double]", PAR_MAX_THREADS * scalars.len().max(1)));
@@ -2753,6 +2861,11 @@ fn par_kernel_call(g: &mut Mg, tm: &TModel, kn: &str, cp: &[String], scalars: &[
         let v = g.pval[n].clone();
         let v = g.f.opnd(&v);
         put(g, CTX_FIXED + cp.len() + 2 * pos.len() + j, "double", &v);
+    }
+    if leap {
+        // the leap entry point's hook and its context
+        put(g, leap_base, "ptr", "%hook");
+        put(g, leap_base + 1, "ptr", "%hctx");
     }
     g.m.declare("declare i64 @mint_par_groups(ptr, ptr, i64, i64)");
     let used = g.f.reg();
@@ -3233,9 +3346,16 @@ fn gen_permute(m: &mut Module, tm: &TModel, opts: &Opts, cm: &[(Dim, Dim)]) -> b
     true
 }
 
-fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool) {
+fn gen_sample_fn(m: &mut Module, tm: &TModel, opts: &Opts, permute: bool, leap: bool) {
     let mut g = Mg::new(m, tm, opts.strict_fp);
     g.m.declare("declare void @mint_set_layout(ptr, ptr)");
+    g.m.declare("declare void @mint_set_leap(ptr, ptr)");
+    if leap {
+        let n = &tm.name;
+        g.f.emit(format!("call void @mint_set_leap(ptr @mint_model_{n}_leap, ptr @mint_model_{n}_leap_blocks)"));
+    } else {
+        g.f.emit("call void @mint_set_leap(ptr null, ptr null)");
+    }
     if permute {
         let n = &tm.name;
         g.f.emit(format!("call void @mint_set_layout(ptr @mint_model_{n}_to_internal, ptr @mint_model_{n}_to_user)"));
