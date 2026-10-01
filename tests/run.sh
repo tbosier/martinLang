@@ -287,27 +287,31 @@ a = [float(x) for x in '$a'.split(',')]; b = [float(x) for x in '$b'.split(',')]
 sys.exit(0 if len(a) == len(b) == 13 and max(abs(x - y) for x, y in zip(a, b)) < 1e-8 else 1)" \
     && pass "row fusion + tiled Gram match the unfused build (1003 rows)" || bad "row fusion + tiled Gram differ from the unfused build"
 fi
-# The Hessian itself, for column counts that exercise every tile shape and
-# the clamped last strip (p not a multiple of 4), fused and unfused.
+# The gradient and Hessian themselves, for column counts that exercise every
+# tile shape, the clamped last strip and the gradient carried in the Gram
+# kernel's padding (p not a multiple of 4), fused and unfused.
 if build tests/rowfuse/hessian.mint rf_h_opt && build tests/rowfuse/hessian.mint rf_h_nrf --no-row-fusion \
    && build tests/rowfuse/hessian.mint rf_h_ref --no-row-fusion --no-gram-blocking; then
   for np in "1003 1" "1003 3" "1003 4" "1003 5" "1003 13" "1003 24" "1003 50" "37 9" "3000 71"; do
     python3 tests/rowfuse/make_data.py $np
-    python3 - $np <<'PY' && pass "tiled Gram Hessian matches the untiled one (n p = $np)" || bad "tiled Gram Hessian differs (n p = $np)"
+    python3 - $np <<'PY' && pass "fused, tiled gradient and Hessian match the untiled ones (n p = $np)" || bad "fused, tiled gradient or Hessian differ (n p = $np)"
 import re, subprocess, sys
 p = int(sys.argv[2])
-def H(b):
+def values(b, label):
     out = subprocess.run(["./build/" + b], capture_output=True, text=True, check=True).stdout
-    return [float(x) for x in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", out[out.index("H "):])]
-ref = H("rf_h_ref")
-s = max(abs(x) for x in ref)
-ok = len(ref) == p * p
-for b in ("rf_h_opt", "rf_h_nrf"):
-    a = H(b)
-    d = max(abs(x - y) for x, y in zip(a, ref)) / s if len(a) == len(ref) else float("inf")
-    ok = ok and d < 1e-9
-    if d >= 1e-9:
-        print(f"      {b}: relative difference {d:.3g}")
+    line = out[out.index(label + " "):].split("\n" + ("H " if label == "g" else "\0"))[0]
+    return [float(x) for x in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", line[2:])]
+ok = True
+for label, size in (("g", p), ("H", p * p)):
+    ref = values("rf_h_ref", label)
+    s = max(abs(x) for x in ref)
+    ok = ok and len(ref) == size
+    for b in ("rf_h_opt", "rf_h_nrf"):
+        a = values(b, label)
+        d = max(abs(x - y) for x, y in zip(a, ref)) / s if len(a) == len(ref) else float("inf")
+        ok = ok and d < 1e-9
+        if d >= 1e-9:
+            print(f"      {b} {label}: relative difference {d:.3g}")
 sys.exit(0 if ok else 1)
 PY
   done

@@ -1075,7 +1075,7 @@ impl Cg<'_> {
                 });
                 let base = cg.f.imul(&i0, &c);
                 let xc = cg.f.gep(&ab2, &base);
-                cg.gram_chunk(&st, &xc, &c, &nrows);
+                cg.gram_chunk(&st, &xc, &c, &nrows, None);
             });
             self.gram_finish(&st, &c, dest);
             return;
@@ -1267,6 +1267,22 @@ impl Cg<'_> {
             coef_bufs.push(cbuf);
             grams.push(gst);
         }
+        // When the group has a Gram product and c is not a multiple of 4, the
+        // first transposed product X' r rides in the Gram kernel's first
+        // padding column (decided at run time), instead of its own pass.
+        let fold_g = group.iter().position(|r| matches!(r, RowStmt::Gram { .. }));
+        let fold_t = fold_g.and_then(|_| group.iter().position(|r| matches!(r, RowStmt::Trans { .. })));
+        let fold = fold_t.map(|_| {
+            let rem = self.f.iop("and", &c, "3");
+            let r = self.f.reg();
+            self.f.emit(format!("{r} = icmp ne i64 {rem}, 0"));
+            r
+        });
+        let no_fold = fold.as_ref().map(|f| {
+            let r = self.f.reg();
+            self.f.emit(format!("{r} = xor i1 {f}, true"));
+            r
+        });
         let chunks = self.f.iop("add nsw", &n, &(GRAM_CHUNK - 1).to_string());
         let chunks = self.f.iop("sdiv", &chunks, &GRAM_CHUNK.to_string());
         for_range(self, "0", &chunks, |cg, ch| {
@@ -1332,14 +1348,37 @@ impl Cg<'_> {
                 match r {
                     RowStmt::Trans { .. } => {
                         let cb = coef_bufs[k].clone().unwrap();
-                        rows_axpy_blocked(cg, &xc, &c, &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
+                        let axpy = |cg: &mut Cg| rows_axpy_blocked(cg, &xc, &c, &nrows, &move |cg: &mut Cg, ii: &str| cg.f.load(&cb, ii), &dests[k]);
+                        match (fold_t, &no_fold) {
+                            (Some(t), Some(nf)) if t == k => if_then(cg, nf, axpy),
+                            _ => axpy(cg),
+                        }
                     }
-                    RowStmt::Gram { .. } => cg.gram_chunk(grams[k].as_ref().unwrap(), &xc, &c, &nrows),
+                    RowStmt::Gram { .. } => {
+                        let extra = match (fold_g, fold_t, &fold) {
+                            (Some(g), Some(t), Some(f)) if g == k => Some((coef_bufs[t].as_deref().unwrap(), f.as_str())),
+                            _ => None,
+                        };
+                        cg.gram_chunk(grams[k].as_ref().unwrap(), &xc, &c, &nrows, extra)
+                    }
                     RowStmt::Prod { .. } => {}
                 }
             }
             cg.chunk_i0 = None;
         });
+        if let (Some(g), Some(t), Some(f)) = (fold_g, fold_t, &fold) {
+            // X' r = column c of the padded H, rows 0..c
+            let (_, _, hs, pp) = grams[g].clone().unwrap();
+            let d = dests[t].clone();
+            if_then(self, f, |cg| {
+                for_range(cg, "0", &c, |cg, j| {
+                    let at = cg.f.imul(j, &pp);
+                    let at = cg.f.iadd(&at, &c);
+                    let v = cg.f.load(&hs, &at);
+                    cg.f.add_to(&d, j, &v);
+                });
+            });
+        }
         for (k, r) in group.iter().enumerate() {
             if let RowStmt::Gram { .. } = r {
                 self.gram_finish(grams[k].as_ref().unwrap(), &c, &dests[k]);
@@ -1427,7 +1466,11 @@ impl Cg<'_> {
 
     /// Adds the chunk's rows [0, nrows) (A's rows from xc, c columns) to the
     /// upper triangle of the padded H.
-    fn gram_chunk(&mut self, st: &(String, String, String, String), xc: &str, c: &str, nrows: &str) {
+    ///
+    /// With `extra` = (coefficients, cond) and cond true at run time (c not a
+    /// multiple of 4), W's first padding column holds the chunk's
+    /// coefficients r, so column c of H accumulates A' r for free.
+    fn gram_chunk(&mut self, st: &(String, String, String, String), xc: &str, c: &str, nrows: &str, extra: Option<(&str, &str)>) {
         let (wb, ws, hs, pp) = st.clone();
         let (xc, c) = (xc.to_string(), c.to_string());
         // W = diag(w) A for the chunk (the padding columns stay zero)
@@ -1442,6 +1485,13 @@ impl Cg<'_> {
                 let di = cg.f.iadd(&dst, k);
                 cg.f.store(&y, &ws, &di);
             });
+            if let Some((cb, cond)) = extra {
+                if_then(cg, cond, |cg| {
+                    let r = cg.f.load(cb, ii);
+                    let di = cg.f.iadd(&dst, &c);
+                    cg.f.store(&r, &ws, &di);
+                });
+            }
         });
         // strips whose four rows are all real columns of A, then the one
         // that reaches into the padding (when c is not a multiple of 4)
