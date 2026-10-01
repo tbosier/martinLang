@@ -1,0 +1,4534 @@
+{
+ "what": "gradient time at the runtime's benchmark point (MINT_BENCH_GRAD), interleaved, pinned",
+ "reps": 15,
+ "seconds_per_run": 0.25,
+ "loadavg_start": [
+  7.86,
+  12.97,
+  11.67
+ ],
+ "loadavg_per_round": [
+  {
+   "loadavg": [
+    7.47,
+    12.81,
+    11.62
+   ],
+   "cpu_busy_percent": {
+    "0": 68,
+    "1": 5,
+    "2": 2,
+    "3": 1,
+    "4": 2,
+    "5": 3,
+    "6": 9,
+    "7": 3,
+    "8": 3,
+    "9": 0,
+    "10": 0,
+    "11": 3,
+    "12": 0,
+    "13": 7,
+    "14": 1,
+    "15": 1,
+    "16": 1,
+    "17": 9,
+    "18": 3,
+    "19": 2,
+    "20": 3,
+    "21": 3,
+    "22": 2,
+    "23": 1
+   },
+   "pins": {
+    "1": "3",
+    "3": "3,2,4"
+   }
+  },
+  {
+   "loadavg": [
+    7.03,
+    12.63,
+    11.57
+   ],
+   "cpu_busy_percent": {
+    "0": 40,
+    "1": 52,
+    "2": 17,
+    "3": 17,
+    "4": 13,
+    "5": 16,
+    "6": 18,
+    "7": 12,
+    "8": 19,
+    "9": 21,
+    "10": 17,
+    "11": 5,
+    "12": 28,
+    "13": 20,
+    "14": 13,
+    "15": 18,
+    "16": 4,
+    "17": 18,
+    "18": 18,
+    "19": 23,
+    "20": 19,
+    "21": 11,
+    "22": 9,
+    "23": 26
+   },
+   "pins": {
+    "1": "4",
+    "3": "4,2,5"
+   }
+  },
+  {
+   "loadavg": [
+    6.33,
+    12.29,
+    11.47
+   ],
+   "cpu_busy_percent": {
+    "0": 46,
+    "1": 2,
+    "2": 9,
+    "3": 19,
+    "4": 1,
+    "5": 32,
+    "6": 12,
+    "7": 1,
+    "8": 3,
+    "9": 1,
+    "10": 1,
+    "11": 1,
+    "12": 4,
+    "13": 98,
+    "14": 1,
+    "15": 17,
+    "16": 4,
+    "17": 17,
+    "18": 1,
+    "19": 3,
+    "20": 1,
+    "21": 7,
+    "22": 1,
+    "23": 4
+   },
+   "pins": {
+    "1": "10",
+    "3": "10,7,8"
+   }
+  },
+  {
+   "loadavg": [
+    6.22,
+    12.17,
+    11.43
+   ],
+   "cpu_busy_percent": {
+    "0": 77,
+    "1": 3,
+    "2": 23,
+    "3": 13,
+    "4": 6,
+    "5": 13,
+    "6": 7,
+    "7": 3,
+    "8": 4,
+    "9": 4,
+    "10": 2,
+    "11": 3,
+    "12": 1,
+    "13": 100,
+    "14": 2,
+    "15": 7,
+    "16": 2,
+    "17": 3,
+    "18": 5,
+    "19": 5,
+    "20": 3,
+    "21": 2,
+    "22": 3,
+    "23": 5
+   },
+   "pins": {
+    "1": "10",
+    "3": "10,9,8"
+   }
+  },
+  {
+   "loadavg": [
+    6.27,
+    11.99,
+    11.38
+   ],
+   "cpu_busy_percent": {
+    "0": 91,
+    "1": 40,
+    "2": 55,
+    "3": 55,
+    "4": 23,
+    "5": 37,
+    "6": 5,
+    "7": 7,
+    "8": 2,
+    "9": 2,
+    "10": 1,
+    "11": 3,
+    "12": 3,
+    "13": 56,
+    "14": 2,
+    "15": 7,
+    "16": 5,
+    "17": 10,
+    "18": 2,
+    "19": 4,
+    "20": 18,
+    "21": 35,
+    "22": 1,
+    "23": 30
+   },
+   "pins": {
+    "1": "10",
+    "3": "10,6,7"
+   }
+  },
+  {
+   "loadavg": [
+    6.41,
+    11.92,
+    11.36
+   ],
+   "cpu_busy_percent": {
+    "0": 37,
+    "1": 15,
+    "2": 11,
+    "3": 12,
+    "4": 4,
+    "5": 8,
+    "6": 5,
+    "7": 7,
+    "8": 5,
+    "9": 34,
+    "10": 2,
+    "11": 4,
+    "12": 8,
+    "13": 51,
+    "14": 4,
+    "15": 2,
+    "16": 4,
+    "17": 1,
+    "18": 14,
+    "19": 10,
+    "20": 3,
+    "21": 7,
+    "22": 7,
+    "23": 0
+   },
+   "pins": {
+    "1": "11",
+    "3": "11,8,10"
+   }
+  },
+  {
+   "loadavg": [
+    5.65,
+    11.58,
+    11.26
+   ],
+   "cpu_busy_percent": {
+    "0": 17,
+    "1": 78,
+    "2": 8,
+    "3": 7,
+    "4": 9,
+    "5": 2,
+    "6": 4,
+    "7": 3,
+    "8": 1,
+    "9": 4,
+    "10": 1,
+    "11": 4,
+    "12": 6,
+    "13": 5,
+    "14": 3,
+    "15": 0,
+    "16": 1,
+    "17": 5,
+    "18": 2,
+    "19": 1,
+    "20": 6,
+    "21": 3,
+    "22": 6,
+    "23": 1
+   },
+   "pins": {
+    "1": "7",
+    "3": "7,11,6"
+   }
+  },
+  {
+   "loadavg": [
+    5.28,
+    11.4,
+    11.2
+   ],
+   "cpu_busy_percent": {
+    "0": 22,
+    "1": 3,
+    "2": 4,
+    "3": 1,
+    "4": 1,
+    "5": 4,
+    "6": 3,
+    "7": 1,
+    "8": 1,
+    "9": 1,
+    "10": 2,
+    "11": 2,
+    "12": 4,
+    "13": 5,
+    "14": 3,
+    "15": 1,
+    "16": 0,
+    "17": 0,
+    "18": 3,
+    "19": 0,
+    "20": 1,
+    "21": 3,
+    "22": 2,
+    "23": 1
+   },
+   "pins": {
+    "1": "4",
+    "3": "7,8,11"
+   }
+  },
+  {
+   "loadavg": [
+    7.59,
+    11.61,
+    11.27
+   ],
+   "cpu_busy_percent": {
+    "0": 11,
+    "1": 85,
+    "2": 13,
+    "3": 88,
+    "4": 100,
+    "5": 100,
+    "6": 100,
+    "7": 99,
+    "8": 14,
+    "9": 94,
+    "10": 100,
+    "11": 17,
+    "12": 100,
+    "13": 31,
+    "14": 100,
+    "15": 22,
+    "16": 9,
+    "17": 7,
+    "18": 16,
+    "19": 100,
+    "20": 100,
+    "21": 15,
+    "22": 12,
+    "23": 100
+   },
+   "pins": {
+    "1": "5",
+    "3": "5,4,3"
+   }
+  },
+  {
+   "loadavg": [
+    9.29,
+    11.79,
+    11.34
+   ],
+   "cpu_busy_percent": {
+    "0": 21,
+    "1": 100,
+    "2": 13,
+    "3": 13,
+    "4": 19,
+    "5": 13,
+    "6": 22,
+    "7": 42,
+    "8": 72,
+    "9": 30,
+    "10": 100,
+    "11": 100,
+    "12": 100,
+    "13": 78,
+    "14": 100,
+    "15": 100,
+    "16": 100,
+    "17": 100,
+    "18": 100,
+    "19": 100,
+    "20": 100,
+    "21": 100,
+    "22": 11,
+    "23": 26
+   },
+   "pins": {
+    "1": "10",
+    "3": "2,3,5"
+   }
+  },
+  {
+   "loadavg": [
+    11.74,
+    12.2,
+    11.48
+   ],
+   "cpu_busy_percent": {
+    "0": 16,
+    "1": 89,
+    "2": 20,
+    "3": 89,
+    "4": 100,
+    "5": 100,
+    "6": 17,
+    "7": 100,
+    "8": 15,
+    "9": 16,
+    "10": 14,
+    "11": 100,
+    "12": 98,
+    "13": 25,
+    "14": 100,
+    "15": 100,
+    "16": 20,
+    "17": 13,
+    "18": 100,
+    "19": 100,
+    "20": 100,
+    "21": 100,
+    "22": 100,
+    "23": 10
+   },
+   "pins": {
+    "1": "11",
+    "3": "11,10,8"
+   }
+  },
+  {
+   "loadavg": [
+    13.12,
+    12.48,
+    11.59
+   ],
+   "cpu_busy_percent": {
+    "0": 100,
+    "1": 100,
+    "2": 99,
+    "3": 34,
+    "4": 41,
+    "5": 41,
+    "6": 35,
+    "7": 50,
+    "8": 100,
+    "9": 100,
+    "10": 39,
+    "11": 33,
+    "12": 49,
+    "13": 49,
+    "14": 42,
+    "15": 100,
+    "16": 100,
+    "17": 100,
+    "18": 100,
+    "19": 85,
+    "20": 99,
+    "21": 100,
+    "22": 38,
+    "23": 100
+   },
+   "pins": {
+    "1": "10",
+    "3": "10,11,6"
+   }
+  },
+  {
+   "loadavg": [
+    13.84,
+    12.67,
+    11.66
+   ],
+   "cpu_busy_percent": {
+    "0": 100,
+    "1": 100,
+    "2": 100,
+    "3": 100,
+    "4": 20,
+    "5": 100,
+    "6": 11,
+    "7": 100,
+    "8": 100,
+    "9": 11,
+    "10": 71,
+    "11": 13,
+    "12": 24,
+    "13": 100,
+    "14": 14,
+    "15": 12,
+    "16": 100,
+    "17": 22,
+    "18": 100,
+    "19": 100,
+    "20": 15,
+    "21": 100,
+    "22": 46,
+    "23": 100
+   },
+   "pins": {
+    "1": "6",
+    "3": "6,9,11"
+   }
+  },
+  {
+   "loadavg": [
+    13.29,
+    12.6,
+    11.65
+   ],
+   "cpu_busy_percent": {
+    "0": 28,
+    "1": 100,
+    "2": 38,
+    "3": 45,
+    "4": 13,
+    "5": 10,
+    "6": 36,
+    "7": 4,
+    "8": 22,
+    "9": 8,
+    "10": 2,
+    "11": 4,
+    "12": 75,
+    "13": 4,
+    "14": 7,
+    "15": 29,
+    "16": 4,
+    "17": 72,
+    "18": 2,
+    "19": 5,
+    "20": 3,
+    "21": 2,
+    "22": 2,
+    "23": 0
+   },
+   "pins": {
+    "1": "10",
+    "3": "10,11,7"
+   }
+  },
+  {
+   "loadavg": [
+    12.58,
+    12.46,
+    11.62
+   ],
+   "cpu_busy_percent": {
+    "0": 100,
+    "1": 100,
+    "2": 100,
+    "3": 100,
+    "4": 8,
+    "5": 100,
+    "6": 7,
+    "7": 24,
+    "8": 100,
+    "9": 4,
+    "10": 39,
+    "11": 6,
+    "12": 8,
+    "13": 7,
+    "14": 14,
+    "15": 8,
+    "16": 100,
+    "17": 13,
+    "18": 100,
+    "19": 100,
+    "20": 10,
+    "21": 100,
+    "22": 69,
+    "23": 100
+   },
+   "pins": {
+    "1": "9",
+    "3": "9,11,6"
+   }
+  }
+ ],
+ "loadavg_end": [
+  14.36,
+  12.85,
+  11.76
+ ],
+ "rows": [
+  {
+   "problem": "dynpois_small",
+   "impl": "mint",
+   "kernel_threads": 1,
+   "evals_per_run": 65116,
+   "ns_median": 3697.9,
+   "ns_min": 3510.3,
+   "ns_max": 10689.3,
+   "clean_runs": 8,
+   "ns_median_clean": 3669.6,
+   "runs": [
+    {
+     "reps": 65116,
+     "ns": 3510.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 3655.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 12.5,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 3665.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 3697.4,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 3673.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 3622.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 3600.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 8535.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 9630.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 10689.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 3970.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 7.7,
+     "cpu_share": 0.993,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 9826.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 9994.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 65116,
+     "ns": 3697.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 7.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65116,
+     "ns": 8882.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.97,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "rust_max",
+   "kernel_threads": 1,
+   "evals_per_run": 54986,
+   "ns_median": 4302.7,
+   "ns_min": 4070.5,
+   "ns_max": 11969.1,
+   "clean_runs": 9,
+   "ns_median_clean": 4261.7,
+   "runs": [
+    {
+     "reps": 54986,
+     "ns": 4070.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4070.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 5550.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4261.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4275.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4297.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4187.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 10322.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 54986,
+     "ns": 11600.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 54986,
+     "ns": 11969.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 54986,
+     "ns": 7606.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.899,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 54986,
+     "ns": 5933.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 69.7,
+     "cpu_share": 0.952,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 54986,
+     "ns": 4302.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 4249.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 54986,
+     "ns": 9019.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 91.8,
+     "cpu_share": 0.986,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "rust_par",
+   "kernel_threads": 1,
+   "evals_per_run": 61849,
+   "ns_median": 3880.5,
+   "ns_min": 3718.7,
+   "ns_max": 11020.6,
+   "clean_runs": 9,
+   "ns_median_clean": 3787.8,
+   "runs": [
+    {
+     "reps": 61849,
+     "ns": 3734.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 8.7,
+     "cpu_share": 0.996,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3718.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3906.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3876.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 4.2,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3880.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3787.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3744.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 3816.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 10246.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 61849,
+     "ns": 11020.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 61849,
+     "ns": 4386.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 17.9,
+     "cpu_share": 0.993,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 61849,
+     "ns": 4259.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 14.8,
+     "cpu_share": 0.989,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 61849,
+     "ns": 3764.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 4.2,
+     "cpu_share": 0.985,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 61849,
+     "ns": 4316.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 22.2,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 61849,
+     "ns": 9713.4,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "stan",
+   "kernel_threads": 1,
+   "evals_per_run": 4746,
+   "ns_median": 53445.5,
+   "ns_min": 50037.4,
+   "ns_max": 120981.5,
+   "clean_runs": 8,
+   "ns_median_clean": 51426.75,
+   "runs": [
+    {
+     "reps": 4746,
+     "ns": 50139.4,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 4.2,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 50414.6,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 51600.1,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 51637.0,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 53445.5,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 51666.2,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 51253.4,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 50037.4,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4746,
+     "ns": 113049.0,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 120981.5,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.973,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 63088.5,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 10.0,
+     "cpu_share": 0.943,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 60147.5,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 13.3,
+     "cpu_share": 0.986,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 114916.0,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 61441.5,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 25.8,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4746,
+     "ns": 108063.9,
+     "logp": -3538.987211103,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.986,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -3538.987211103,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "rust_par[fused]",
+   "kernel_threads": 1,
+   "evals_per_run": 58574,
+   "ns_median": 4787.4,
+   "ns_min": 4460.9,
+   "ns_max": 12496.7,
+   "clean_runs": 9,
+   "ns_median_clean": 4589.7,
+   "runs": [
+    {
+     "reps": 58574,
+     "ns": 4567.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4470.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4613.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4681.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 7.1,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4787.4,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4574.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 4589.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 10400.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 58574,
+     "ns": 12148.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 58574,
+     "ns": 12496.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 58574,
+     "ns": 4988.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 10.0,
+     "cpu_share": 0.994,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 5272.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 28.1,
+     "cpu_share": 0.99,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 58574,
+     "ns": 4460.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 58574,
+     "ns": 11695.0,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 58574,
+     "ns": 11620.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "rust_par[back]",
+   "kernel_threads": 1,
+   "evals_per_run": 65950,
+   "ns_median": 4150.6,
+   "ns_min": 3965.3,
+   "ns_max": 11700.8,
+   "clean_runs": 9,
+   "ns_median_clean": 4121.6,
+   "runs": [
+    {
+     "reps": 65950,
+     "ns": 3965.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4020.4,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.998,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4115.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4121.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4141.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 6.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4150.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4080.4,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 4492.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 9.7,
+     "cpu_share": 0.993,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 10763.2,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 65950,
+     "ns": 11700.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 97.4,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 65950,
+     "ns": 10962.3,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 95.8,
+     "cpu_share": 0.983,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 65950,
+     "ns": 11177.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 65950,
+     "ns": 4371.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 20.7,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 65950,
+     "ns": 4133.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 65950,
+     "ns": 10234.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_small",
+   "impl": "rust_par[glibc]",
+   "kernel_threads": 1,
+   "evals_per_run": 62218,
+   "ns_median": 4453.8,
+   "ns_min": 4140.8,
+   "ns_max": 12239.7,
+   "clean_runs": 8,
+   "ns_median_clean": 4305.6,
+   "runs": [
+    {
+     "reps": 62218,
+     "ns": 4140.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4224.9,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4352.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4453.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 10.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 4384.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4258.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4254.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 6146.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 60.5,
+     "cpu_share": 0.993,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 11639.6,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 12239.7,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 5323.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 41.2,
+     "cpu_share": 0.991,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 12140.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 62218,
+     "ns": 7538.8,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 4413.5,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 62218,
+     "ns": 11463.1,
+     "logp": 4505.884377493,
+     "grad_norm": 109235.4687975,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 4505.884377493,
+   "grad_norm": 109235.4687975
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "mint",
+   "kernel_threads": 1,
+   "evals_per_run": 5983,
+   "ns_median": 46079.6,
+   "ns_min": 44222.3,
+   "ns_max": 135276.9,
+   "clean_runs": 10,
+   "ns_median_clean": 45279.85,
+   "runs": [
+    {
+     "reps": 5983,
+     "ns": 44288.8,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 44363.8,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 45882.6,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 45984.0,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 46079.6,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 44222.3,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 44670.7,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 116370.6,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 5983,
+     "ns": 120468.5,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5983,
+     "ns": 135276.9,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5983,
+     "ns": 50531.9,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.2,
+     "cpu_share": 0.989,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 51533.1,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 21.2,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5983,
+     "ns": 44677.1,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 46081.6,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5983,
+     "ns": 111977.3,
+     "logp": 49751.53922919,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922919,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_max",
+   "kernel_threads": 1,
+   "evals_per_run": 5017,
+   "ns_median": 55727.8,
+   "ns_min": 52511.5,
+   "ns_max": 150535.1,
+   "clean_runs": 10,
+   "ns_median_clean": 54984.55,
+   "runs": [
+    {
+     "reps": 5017,
+     "ns": 54481.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 7.1,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 52511.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 55160.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 54808.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.4,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 55727.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 53761.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 53149.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 63020.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.2,
+     "cpu_share": 0.984,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 144270.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5017,
+     "ns": 150535.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 94.7,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5017,
+     "ns": 63850.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.4,
+     "cpu_share": 0.99,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 64465.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 24.2,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5017,
+     "ns": 111317.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 5017,
+     "ns": 55175.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5017,
+     "ns": 129034.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 98.5,
+     "cpu_share": 0.987,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par",
+   "kernel_threads": 1,
+   "evals_per_run": 5713,
+   "ns_median": 49223.9,
+   "ns_min": 46210.2,
+   "ns_max": 133811.7,
+   "clean_runs": 9,
+   "ns_median_clean": 47512.5,
+   "runs": [
+    {
+     "reps": 5713,
+     "ns": 46210.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 46493.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 47209.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 49223.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 7.1,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 49021.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 47223.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 6.7,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 47512.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 124692.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 5713,
+     "ns": 128209.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5713,
+     "ns": 129626.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5713,
+     "ns": 54876.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.2,
+     "cpu_share": 0.987,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 133811.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5713,
+     "ns": 71669.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 73.8,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 5713,
+     "ns": 48498.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5713,
+     "ns": 75471.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 81.8,
+     "cpu_share": 0.989,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "stan",
+   "kernel_threads": 1,
+   "evals_per_run": 387,
+   "ns_median": 890767.2,
+   "ns_min": 648912.2,
+   "ns_max": 7776958.0,
+   "clean_runs": 9,
+   "ns_median_clean": 675105.5,
+   "runs": [
+    {
+     "reps": 387,
+     "ns": 648912.2,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.4,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 667345.4,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 10.0,
+     "cpu_share": 0.996,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 675105.5,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 675389.9,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 684694.5,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.4,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 663198.2,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 660852.8,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 6112594.8,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 387,
+     "ns": 6656488.0,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 387,
+     "ns": 7776958.0,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 387,
+     "ns": 3702798.4,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 8.8,
+     "cpu_share": 0.99,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 7004195.2,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 387,
+     "ns": 1258956.2,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.994,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 387,
+     "ns": 890767.2,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 8.1,
+     "cpu_share": 0.994,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 387,
+     "ns": 7036316.9,
+     "logp": -45641.71745638,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -45641.71745638,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par[fused]",
+   "kernel_threads": 1,
+   "evals_per_run": 4470,
+   "ns_median": 59956.9,
+   "ns_min": 56537.9,
+   "ns_max": 167180.4,
+   "clean_runs": 9,
+   "ns_median_clean": 58968.5,
+   "runs": [
+    {
+     "reps": 4470,
+     "ns": 57633.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 57463.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 58263.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 58968.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 59956.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 65393.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 59731.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 11.1,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": false
+    },
+    {
+     "reps": 4470,
+     "ns": 56537.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 152988.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 4470,
+     "ns": 167180.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4470,
+     "ns": 65937.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.4,
+     "cpu_share": 0.991,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 71495.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 32.4,
+     "cpu_share": 0.986,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4470,
+     "ns": 166582.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 4470,
+     "ns": 59385.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4470,
+     "ns": 156544.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par[back]",
+   "kernel_threads": 1,
+   "evals_per_run": 5143,
+   "ns_median": 52714.8,
+   "ns_min": 49668.4,
+   "ns_max": 144810.0,
+   "clean_runs": 10,
+   "ns_median_clean": 51632.85,
+   "runs": [
+    {
+     "reps": 5143,
+     "ns": 51117.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 50315.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 51923.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 52714.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 7.1,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 53144.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 51641.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 51398.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 49668.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 135212.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5143,
+     "ns": 144810.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5143,
+     "ns": 66237.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 47.2,
+     "cpu_share": 0.988,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 5143,
+     "ns": 144248.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5143,
+     "ns": 51624.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 53212.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.6,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5143,
+     "ns": 134893.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par[glibc]",
+   "kernel_threads": 1,
+   "evals_per_run": 4699,
+   "ns_median": 55342.1,
+   "ns_min": 52562.0,
+   "ns_max": 151119.9,
+   "clean_runs": 9,
+   "ns_median_clean": 53733.0,
+   "runs": [
+    {
+     "reps": 4699,
+     "ns": 52562.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 53170.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 54754.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 54430.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 62866.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 19.4,
+     "cpu_share": 0.902,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4699,
+     "ns": 53733.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 53325.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 52784.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 145027.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 4699,
+     "ns": 151119.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4699,
+     "ns": 61604.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 3.4,
+     "cpu_share": 0.989,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 114590.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.807,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 4699,
+     "ns": 120232.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.996,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 4699,
+     "ns": 55342.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 4699,
+     "ns": 139005.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.991,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "mint",
+   "kernel_threads": 3,
+   "evals_per_run": 11840,
+   "ns_median": 37558.9,
+   "ns_min": 17173.2,
+   "ns_max": 67194.3,
+   "clean_runs": 5,
+   "ns_median_clean": 17445.0,
+   "runs": [
+    {
+     "reps": 11840,
+     "ns": 17626.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 2.85,
+     "cpus": "3,2,4",
+     "clean": true
+    },
+    {
+     "reps": 11840,
+     "ns": 17173.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.5,
+     "cpu_share": 2.951,
+     "cpus": "4,2,5",
+     "clean": true
+    },
+    {
+     "reps": 11840,
+     "ns": 17343.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 2.955,
+     "cpus": "10,7,8",
+     "clean": true
+    },
+    {
+     "reps": 11840,
+     "ns": 20296.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 57.7,
+     "cpu_share": 2.95,
+     "cpus": "10,9,8",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 29965.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.971,
+     "cpus": "10,6,7",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 17445.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 4.5,
+     "cpu_share": 2.952,
+     "cpus": "11,8,10",
+     "clean": true
+    },
+    {
+     "reps": 11840,
+     "ns": 42746.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 2.021,
+     "cpus": "7,11,6",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 56363.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.664,
+     "cpus": "7,8,11",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 49868.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.916,
+     "cpus": "5,4,3",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 54618.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 96.9,
+     "cpu_share": 1.954,
+     "cpus": "2,3,5",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 67194.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 1.858,
+     "cpus": "11,10,8",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 60700.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.883,
+     "cpus": "10,11,6",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 37558.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.878,
+     "cpus": "6,9,11",
+     "clean": false
+    },
+    {
+     "reps": 11840,
+     "ns": 18407.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.5,
+     "cpu_share": 2.952,
+     "cpus": "10,11,7",
+     "clean": true
+    },
+    {
+     "reps": 11840,
+     "ns": 45160.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.861,
+     "cpus": "9,11,6",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par",
+   "kernel_threads": 3,
+   "evals_per_run": 10626,
+   "ns_median": 37931.7,
+   "ns_min": 18444.8,
+   "ns_max": 80392.5,
+   "clean_runs": 6,
+   "ns_median_clean": 18774.5,
+   "runs": [
+    {
+     "reps": 10626,
+     "ns": 18683.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 4.8,
+     "cpu_share": 2.948,
+     "cpus": "3,2,4",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 18669.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 10.0,
+     "cpu_share": 2.949,
+     "cpus": "4,2,5",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 48826.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 98.1,
+     "cpu_share": 2.941,
+     "cpus": "10,7,8",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 19471.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.5,
+     "cpu_share": 2.949,
+     "cpus": "10,9,8",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 37931.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.967,
+     "cpus": "10,6,7",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 18865.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 4.5,
+     "cpu_share": 2.945,
+     "cpus": "11,8,10",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 19597.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 19.0,
+     "cpu_share": 2.95,
+     "cpus": "7,11,6",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 18444.8,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.5,
+     "cpu_share": 2.948,
+     "cpus": "7,8,11",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 80392.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 98.8,
+     "cpu_share": 2.569,
+     "cpus": "5,4,3",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 62949.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.837,
+     "cpus": "2,3,5",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 75041.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 1.871,
+     "cpus": "11,10,8",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 75300.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 1.749,
+     "cpus": "10,11,6",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 56131.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.92,
+     "cpus": "6,9,11",
+     "clean": false
+    },
+    {
+     "reps": 10626,
+     "ns": 19270.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 4.8,
+     "cpu_share": 2.95,
+     "cpus": "10,11,7",
+     "clean": true
+    },
+    {
+     "reps": 10626,
+     "ns": 76199.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.105,
+     "cpus": "9,11,6",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "dynpois_large",
+   "impl": "rust_par[glibc]",
+   "kernel_threads": 3,
+   "evals_per_run": 9129,
+   "ns_median": 41096.1,
+   "ns_min": 20527.0,
+   "ns_max": 99050.2,
+   "clean_runs": 4,
+   "ns_median_clean": 21236.95,
+   "runs": [
+    {
+     "reps": 9129,
+     "ns": 38277.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 58.8,
+     "cpu_share": 2.686,
+     "cpus": "3,2,4",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 20583.5,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 5.0,
+     "cpu_share": 2.947,
+     "cpus": "4,2,5",
+     "clean": true
+    },
+    {
+     "reps": 9129,
+     "ns": 49060.7,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.765,
+     "cpus": "10,7,8",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 21890.4,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 9.5,
+     "cpu_share": 2.944,
+     "cpus": "10,9,8",
+     "clean": true
+    },
+    {
+     "reps": 9129,
+     "ns": 41096.1,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.968,
+     "cpus": "10,6,7",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 22774.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 18.2,
+     "cpu_share": 2.953,
+     "cpus": "11,8,10",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 20527.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 5.0,
+     "cpu_share": 2.951,
+     "cpus": "7,11,6",
+     "clean": true
+    },
+    {
+     "reps": 9129,
+     "ns": 74565.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.684,
+     "cpus": "7,8,11",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 72660.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.757,
+     "cpus": "5,4,3",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 56203.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 83.3,
+     "cpu_share": 2.522,
+     "cpus": "2,3,5",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 99050.2,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 1.339,
+     "cpus": "11,10,8",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 64467.0,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 1.959,
+     "cpus": "10,11,6",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 39897.9,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 0.0,
+     "cpu_share": 2.226,
+     "cpus": "6,9,11",
+     "clean": false
+    },
+    {
+     "reps": 9129,
+     "ns": 23070.3,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 4.8,
+     "cpu_share": 2.952,
+     "cpus": "10,11,7",
+     "clean": true
+    },
+    {
+     "reps": 9129,
+     "ns": 60785.6,
+     "logp": 49751.53922918,
+     "grad_norm": 847007.6517495,
+     "sibling_busy": 100.0,
+     "cpu_share": 2.921,
+     "cpus": "9,11,6",
+     "clean": false
+    }
+   ],
+   "logp": 49751.53922918,
+   "grad_norm": 847007.6517495
+  },
+  {
+   "problem": "logistic",
+   "impl": "mint",
+   "kernel_threads": 1,
+   "evals_per_run": 9583,
+   "ns_median": 25263.1,
+   "ns_min": 23293.7,
+   "ns_max": 69312.0,
+   "clean_runs": 11,
+   "ns_median_clean": 24276.9,
+   "runs": [
+    {
+     "reps": 9583,
+     "ns": 23499.5,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 23320.0,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 4.2,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 25609.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 23662.0,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 24276.9,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 25263.1,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 24008.7,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 23293.7,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 64182.4,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 9583,
+     "ns": 69312.0,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 9583,
+     "ns": 29061.0,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.991,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 33132.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 42.4,
+     "cpu_share": 0.983,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 9583,
+     "ns": 24294.1,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 4.2,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 28780.3,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.991,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9583,
+     "ns": 57309.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -3509.04210377,
+   "grad_norm": 1657.704296408
+  },
+  {
+   "problem": "logistic",
+   "impl": "rust_max",
+   "kernel_threads": 1,
+   "evals_per_run": 6035,
+   "ns_median": 40973.2,
+   "ns_min": 36779.9,
+   "ns_max": 105569.8,
+   "clean_runs": 9,
+   "ns_median_clean": 38295.3,
+   "runs": [
+    {
+     "reps": 6035,
+     "ns": 38295.3,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 37896.7,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 41363.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 38445.0,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 40238.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 37509.2,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 37812.7,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 36779.9,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 100616.6,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.993,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 6035,
+     "ns": 105569.8,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 6035,
+     "ns": 83965.9,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 98.1,
+     "cpu_share": 0.99,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 6035,
+     "ns": 49651.3,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 22.6,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 6035,
+     "ns": 40973.2,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 6035,
+     "ns": 93084.1,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 6035,
+     "ns": 92359.2,
+     "logp": -3509.04210377,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.865,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -3509.04210377,
+   "grad_norm": 1657.704296408
+  },
+  {
+   "problem": "logistic",
+   "impl": "stan",
+   "kernel_threads": 1,
+   "evals_per_run": 5349,
+   "ns_median": 44375.8,
+   "ns_min": 42118.8,
+   "ns_max": 105384.4,
+   "clean_runs": 8,
+   "ns_median_clean": 43051.05,
+   "runs": [
+    {
+     "reps": 5349,
+     "ns": 42925.9,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 42587.8,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 43176.2,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 44524.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 15.4,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 44375.8,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 43312.6,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 42899.5,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 42118.8,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 99229.7,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 105384.4,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.96,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 55201.4,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 11.8,
+     "cpu_share": 0.988,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 104159.8,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 100972.3,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 5349,
+     "ns": 44368.5,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5349,
+     "ns": 94772.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -3508.125813038,
+   "grad_norm": 1657.704296408
+  },
+  {
+   "problem": "logistic",
+   "impl": "stan_glm",
+   "kernel_threads": 1,
+   "evals_per_run": 5353,
+   "ns_median": 45869.5,
+   "ns_min": 42269.8,
+   "ns_max": 104689.3,
+   "clean_runs": 8,
+   "ns_median_clean": 43709.55,
+   "runs": [
+    {
+     "reps": 5353,
+     "ns": 42269.8,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 42866.2,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 43813.6,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 43605.5,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 44780.0,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 45869.5,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 19.2,
+     "cpu_share": 0.994,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 43021.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 94470.6,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.99,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 97824.6,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 101391.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.988,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 53479.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 3.2,
+     "cpu_share": 0.99,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 104689.3,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 100219.3,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 5353,
+     "ns": 44175.4,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 5353,
+     "ns": 52164.1,
+     "logp": -3508.125813038,
+     "grad_norm": 1657.704296408,
+     "sibling_busy": 18.2,
+     "cpu_share": 0.98,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -3508.125813038,
+   "grad_norm": 1657.704296408
+  },
+  {
+   "problem": "eight_schools",
+   "impl": "mint",
+   "kernel_threads": 1,
+   "evals_per_run": 9615384,
+   "ns_median": 28.5,
+   "ns_min": 24.4,
+   "ns_max": 53.3,
+   "clean_runs": 9,
+   "ns_median_clean": 25.5,
+   "runs": [
+    {
+     "reps": 9615384,
+     "ns": 24.4,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 24.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 25.5,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 25.5,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 25.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 34.1,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 25.2,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 4.0,
+     "cpu_share": 0.997,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 50.6,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 9615384,
+     "ns": 53.3,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 9615384,
+     "ns": 50.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 9615384,
+     "ns": 28.5,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 10.7,
+     "cpu_share": 0.993,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 9615384,
+     "ns": 52.6,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 9615384,
+     "ns": 25.1,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 34.3,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 9615384,
+     "ns": 53.2,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -27.368364533,
+   "grad_norm": 1.099114656127
+  },
+  {
+   "problem": "eight_schools",
+   "impl": "rust",
+   "kernel_threads": 1,
+   "evals_per_run": 6944444,
+   "ns_median": 27.0,
+   "ns_min": 24.6,
+   "ns_max": 42.0,
+   "clean_runs": 8,
+   "ns_median_clean": 25.05,
+   "runs": [
+    {
+     "reps": 6944444,
+     "ns": 24.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 5.9,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 24.6,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 25.1,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.995,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 25.1,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 25.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.995,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 25.0,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 24.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 40.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.976,
+     "cpus": "4",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 41.3,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.986,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 42.0,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 28.7,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 30.0,
+     "cpu_share": 0.992,
+     "cpus": "11",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 41.9,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.985,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 41.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.989,
+     "cpus": "6",
+     "clean": false
+    },
+    {
+     "reps": 6944444,
+     "ns": 27.0,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 6944444,
+     "ns": 41.8,
+     "logp": -27.368364533,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -27.368364533,
+   "grad_norm": 1.099114656127
+  },
+  {
+   "problem": "eight_schools",
+   "impl": "stan",
+   "kernel_threads": 1,
+   "evals_per_run": 506688,
+   "ns_median": 513.2,
+   "ns_min": 484.4,
+   "ns_max": 1142.7,
+   "clean_runs": 11,
+   "ns_median_clean": 503.8,
+   "runs": [
+    {
+     "reps": 506688,
+     "ns": 484.4,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "3",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 499.8,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.997,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 503.8,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.996,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 517.7,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 513.2,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 7.4,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 495.9,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 495.1,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.998,
+     "cpus": "7",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 532.5,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 3.7,
+     "cpu_share": 0.994,
+     "cpus": "4",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 1082.0,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.992,
+     "cpus": "5",
+     "clean": false
+    },
+    {
+     "reps": 506688,
+     "ns": 1130.4,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.945,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 506688,
+     "ns": 529.5,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 3.8,
+     "cpu_share": 0.993,
+     "cpus": "11",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 1142.7,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.987,
+     "cpus": "10",
+     "clean": false
+    },
+    {
+     "reps": 506688,
+     "ns": 494.7,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "6",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 509.4,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 0.0,
+     "cpu_share": 0.997,
+     "cpus": "10",
+     "clean": true
+    },
+    {
+     "reps": 506688,
+     "ns": 974.4,
+     "logp": -4.180292717975,
+     "grad_norm": 1.099114656127,
+     "sibling_busy": 100.0,
+     "cpu_share": 0.98,
+     "cpus": "9",
+     "clean": false
+    }
+   ],
+   "logp": -4.180292717975,
+   "grad_norm": 1.099114656127
+  }
+ ]
+}
