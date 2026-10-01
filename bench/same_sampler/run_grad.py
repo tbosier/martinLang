@@ -21,7 +21,9 @@ clean runs with their count.
 
 The new Rust baseline's exp variants (DYNPOIS_EXP, see baselines/dynpois_par.rs)
 are measured as separate configurations, rust_par[fused] etc.; plain rust_par
-is its default (table). Before each round the busy fraction of every CPU is
+is its default (table). Mint is also built without the column-major layout
+and without narrow data (mint[no-scan-layout] etc., mintc flags), the two
+things the Rust baseline cannot do under the shared parameter order. Before each round the busy fraction of every CPU is
 recorded (other work shares the machine).
 
 usage: python bench/same_sampler/run_grad.py [--reps 15] [--seconds 0.25]
@@ -49,6 +51,10 @@ for p in args.problems.split(","):
         configs.append((p, impl, 1))
     if p.startswith("dynpois"):
         configs += [(p, f"rust_par[{m}]", 1) for m in ("fused", "back", "glibc")]
+        # Mint without the two things the Rust cannot do: the column-major
+        # layout of innov and the int8 copy of the counts
+        configs += [(p, f"mint[{m}]", 1) for m in ("no-scan-layout", "no-narrow-data",
+                                                    "no-scan-layout+no-narrow-data")]
     if p == "dynpois_large":
         configs += [(p, "mint", 3), (p, "rust_par", 3), (p, "rust_par[glibc]", 3)]
 
@@ -68,9 +74,10 @@ def bench(cfg, k):
     mode = None
     if "[" in impl:
         impl, mode = impl[:-1].split("[")
-    argv, env = common.command(p, impl)
+    flags = ["--" + f for f in mode.split("+")] if mode and impl == "mint" else []
+    argv, env = common.command(p, impl, mint_flags=flags)
     env = dict(env, MINT_BENCH_GRAD=str(k))
-    if mode:
+    if mode and impl == "rust_par":
         env["DYNPOIS_EXP"] = mode
     if nt > 1:
         env["MINT_KERNEL_THREADS"] = str(nt)

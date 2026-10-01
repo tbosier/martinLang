@@ -93,8 +93,9 @@ def cpu_busy(seconds=1.0):
     return {c: round(100 * (1 - (b[c][1] - a[c][1]) / max(1, b[c][0] - a[c][0]))) for c in sorted(a)}
 
 
-def mint_program(problem, draws, warmup, chains, seed):
-    """Builds (once) the Mint program for these sampler settings; returns its path."""
+def mint_program(problem, draws, warmup, chains, seed, flags=()):
+    """Builds (once) the Mint program for these sampler settings (and mintc
+    flags, for ablations); returns its path."""
     p = PROBLEMS[problem]
     src = open(os.path.join(ROOT, p["mint"])).read()
     if p["mint_data"]:
@@ -105,11 +106,13 @@ def mint_program(problem, draws, warmup, chains, seed):
     assert n == 1, f"cannot set the sampler settings in {p['mint']}"
     d = os.path.join(OUT, "mint")
     os.makedirs(d, exist_ok=True)
-    prog = os.path.join(d, f"{problem}_d{draws}_w{warmup}_c{chains}_s{seed}")
+    tag = "".join("_" + f.strip("-").replace("-", "") for f in flags)
+    prog = os.path.join(d, f"{problem}_d{draws}_w{warmup}_c{chains}_s{seed}{tag}")
     if not os.path.exists(prog) or open(prog + ".mint").read() != new:
         open(prog + ".mint", "w").write(new)
         for attempt in range(3):  # (rustc and gcc have crashed spuriously on this machine)
-            r = subprocess.run([MINTC, "build", prog + ".mint", "-o", prog], cwd=ROOT, capture_output=True, text=True)
+            r = subprocess.run([MINTC, "build", prog + ".mint", "-o", prog, *flags], cwd=ROOT,
+                               capture_output=True, text=True)
             if r.returncode == 0:
                 break
         else:
@@ -117,11 +120,11 @@ def mint_program(problem, draws, warmup, chains, seed):
     return prog
 
 
-def command(problem, impl, draws=1000, warmup=1000, chains=4, seed=1):
+def command(problem, impl, draws=1000, warmup=1000, chains=4, seed=1, mint_flags=()):
     """(argv, extra environment) running `impl` on `problem` with these settings."""
     p = PROBLEMS[problem]
     if impl == "mint":
-        return [mint_program(problem, draws, warmup, chains, seed)], {}
+        return [mint_program(problem, draws, warmup, chains, seed, mint_flags)], {}
     if impl in p["rust"]:
         exe, *args = p["rust"][impl]
         if exe.startswith("rs_dynpois"):

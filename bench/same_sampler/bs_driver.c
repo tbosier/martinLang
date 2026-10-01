@@ -26,11 +26,12 @@
 // The build uses STAN_THREADS=true. By default the chains share one model
 // object; BS_MODEL_PER_CHAIN=1 instead constructs one per chain and gives each
 // calling thread its own (the draws must be identical either way, which
-// run_checks.py verifies).
+// verify.py checks on the small dynamic Poisson model).
 //
 // A Stan exception (for example an overflowing Poisson rate) returns a log
 // density of -inf with a zero gradient, which the sampler treats as a
-// divergence, as Stan's own sampler does with a rejection.
+// divergence, as Stan's own sampler does with a rejection. The number of
+// such evaluations (warmup included) is printed at the end.
 #include <dlfcn.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -69,6 +70,7 @@ static int n_models;
 static atomic_int next_model;
 static int64_t D;
 static __thread bs_model *mine;
+static atomic_long n_threw;  // log density evaluations that raised a Stan exception
 
 static inline const bs_model *model_here(void) {
   if (!mine) mine = models[atomic_fetch_add(&next_model, 1) % n_models];
@@ -78,6 +80,7 @@ static inline const bs_model *model_here(void) {
 static double logp(const double *theta, double *grad) {
   double lp;
   if (bs_log_density_gradient(model_here(), true, true, theta, &lp, grad, NULL) != 0) {
+    atomic_fetch_add_explicit(&n_threw, 1, memory_order_relaxed);
     memset(grad, 0, (size_t)D * sizeof(double));
     return -INFINITY;
   }
@@ -157,5 +160,7 @@ int main(int argc, char **argv) {
   mint_set_prep_seconds(mint_clock() - t0);
   void *post = mint_sample(logp, constrain, D, draws, warmup, chains, seed, nb, names, sizes);
   mint_print_posterior(post);
+  fprintf(stderr, "bs_driver: %ld log density evaluations raised a Stan exception (returned -inf)\n",
+          (long)atomic_load(&n_threw));
   return 0;
 }

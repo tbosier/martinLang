@@ -8,8 +8,12 @@ density and gradient is shared:
   `runtime/mint_rt.c`, a port of Stan's `base_nuts`);
 - the warmup and metric adaptation (Stan's windowed warmup: step-size dual
   averaging and a diagonal metric);
-- the random number stream (xoshiro256++, seeded per chain from the run's
-  seed), so the initial points and momenta are the same random numbers;
+- the random number generator and its seeding (xoshiro256++, seeded per
+  chain from the run's seed). The initial point is the same draw (but see
+  the layout note below). After that the streams stay in step only while
+  the trajectories do: accept/reject and tree-selection draws depend on log
+  density values, so once rounding differences change a branch, the chains
+  use the same generator from different positions;
 - the settings: 4 chains on parallel threads, 1000 warmup + 1000 draws, the
   same seeds, and the same threads per chain for the sampler's own passes
   (1 for the small models, 3 for the large one, the runtime's default);
@@ -38,8 +42,9 @@ BridgeStan model with `dlopen` and calls `mint_sample` with:
 - `logp` = `bs_log_density_gradient(model, propto = true, jacobian = true, ...)`.
   Stan then drops every constant term, while Mint keeps each Normal's
   `-log(scale)`. The two log densities therefore differ by a constant, which
-  the sampler never sees, and `verify.py` checks that the constant is exactly
-  the one expected. Both add the log Jacobian of their constraining transforms
+  the sampler never sees. `verify.py` checks that the difference is the
+  expected constant, to 1e-13 relative (3.4e-9 absolute on the large model's
+  constant of 95,393). Both add the log Jacobian of their constraining transforms
   (only eight schools' `tau` is constrained).
 - `constrain` = `bs_param_constrain` (no transformed parameters or generated
   quantities).
@@ -72,9 +77,9 @@ does and the shared sampler allows:
   to put it was measured. `DYNPOIS_EXP` selects:
   - `table` (the default): a separate tight pass over each block's `eta`,
     replacing `dynpois_max.rs`'s glibc calls. This is the fastest.
-  - `fused`: inside the forward pass, as Mint does. It measured 20 to 25%
-    slower here; Mint's column-major layout, which this file cannot use, may
-    be what makes fusing pay there.
+  - `fused`: inside the forward pass, as Mint does. It measured about 20%
+    slower than `table` here (1.19 to 1.24x over the passes). Why fusing
+    pays in Mint's code and not here was not established.
   - `back`: inside the backward pass.
   - `glibc`: `dynpois_max.rs`'s kernel with only the threading added.
 - **The gradient split across the chain's threads**, like Mint's parallel
@@ -94,7 +99,7 @@ because the parameter vector's order is part of the shared interface. It
 brings rows into column form with half-width loads and unpacks, and writes
 the gradient back with 4x4 transposes.
 
-A consequence for the "same random numbers" rule: Mint's initial points and
+A consequence for the shared random numbers: Mint's initial points and
 momenta for `innov` are drawn in its internal (column-major) order. On the
 dynamic Poisson model, Mint's chains therefore start from a permutation of
 the point the Rust and Stan chains start from. That is statistically
@@ -106,11 +111,21 @@ implementations start from the same point.
 | | Mint | rust_max | rust_par | Stan |
 |---|---|---|---|---|
 | gradient | compile-time AD | by hand | by hand | reverse-mode autodiff at run time |
-| vectorised across series (4 per AVX2 vector) | yes | yes | yes | no (Eigen within a series) |
+| vectorised across series (4 per AVX2 vector) | yes | yes | yes | no (Eigen expressions within a series) |
 | column-major `innov` | yes | no (fixed order) | no (fixed order) | no |
-| exp | own table exp, fused into the pass | glibc vector exp, separate pass | own table exp (Mint's), separate pass | scalar libm inside autodiff |
+| exp | own table exp, fused into the pass | glibc vector exp, separate pass | own table exp (Mint's), separate pass | Eigen's vectorised exp on the values; `poisson_log_lpmf` forms its partials analytically |
 | narrow data (counts read as int8) | yes | no | no | no |
-| gradient split across the chain's threads | yes (3 per chain on the large model) | no | yes | no |
+| gradient split across the chain's threads | yes (3 per chain on the large model) | no | yes | no: the Stan program has no `reduce_sum`; a version with it was not written |
+
+Mint's two layout-dependent tricks were measured by turning them off
+(`run_grad.py`, `mint[no-scan-layout]`, `mint[no-narrow-data]`). Without the
+column-major layout, Mint's gradient takes 2.1 to 2.2x as long: 7.35 and
+96.2 µs, slower than both Rust versions. So Mint's code generator depends on
+that layout, but the layout alone does not explain the remaining 5% between
+Mint and `dynpois_par.rs`, which gets close without it by transposing in
+registers. Reading the counts as int8 made no measurable difference here:
+3.49 against 3.56 µs, and 44.6 against 44.4 µs. What the remaining 5% is
+was not established.
 
 ## Rules for anyone extending this
 
@@ -121,8 +136,9 @@ implementations start from the same point.
    benchmark point and the log density difference against the expected
    constant (`verify.py`) before timing anything.
 3. Machine load is part of every number. Record the load average and CPU
-   busy fractions (the scripts do), interleave the configurations, and say
-   which comparisons the noise allows.
+   busy fractions (the scripts do; for whole runs only in the second before
+   each run), interleave the configurations, and say which comparisons the
+   noise allows.
 
 ## Running
 
@@ -143,76 +159,118 @@ bench/same_sampler/build.sh                 # runtime, mintc, Rust, BridgeStan m
 
 Results: `results/*.json` holds every run, and `results/results.md` has the
 tables, generated by `report.py`. The files ending in `_loaded` are earlier
-passes taken while other work kept 15 to 29 of the 24 hardware threads busy.
-They have the same seeds, gradient counts and ESS, and slower times.
+passes taken while other agents loaded the machine: a 1-minute load average
+of 15 to 29, with 6 to 24 of the 24 hardware threads busy. They have the
+same seeds, gradient counts and ESS, and slower times.
 
 ## Findings (run of 2026-10-01, at de58040 plus this harness)
 
-Machine: Ryzen 9 5900X, shared with other agents. The figures below come
-from passes taken while under one hardware thread was busy with other work,
-except where noted.
+Machine: Ryzen 9 5900X, shared with other agents. Unless noted, the figures
+come from passes in which at most 1.6 of the 24 hardware threads were busy
+with other work in the second before each run. Load during a whole run was
+not recorded. `results/results.md` has every row, with ranges.
 
-**Gradient alone.** Median µs, 15 interleaved pinned rounds, all clean:
+**Gradient alone.** Median µs over 15 interleaved, pinned rounds. In the
+latest pass 12 to 15 of the 15 rounds were clean for each configuration;
+the clean medians are shown.
 
 | problem | Mint | Rust max effort | Rust v2 (`dynpois_par.rs`) | Stan via BridgeStan |
 |---|---|---|---|---|
-| dynamic Poisson, D = 3,171 | 3.57 | 4.10 | 3.74 | 50.5 |
-| dynamic Poisson, D = 37,901 | 44.2 | 52.8 | 46.7 | 654 |
-| same, 3 kernel threads | 16.9 | | 18.3 | |
-| logistic, n = 5000, p = 20 | 23.7 | 38.2 | | 42.6 |
-| eight schools | 0.024 | 0.024 (plain Rust) | | 0.49 |
+| dynamic Poisson, D = 3,171 | 3.56 | 4.10 (1.15x) | 3.73 (1.05x) | 51.0 (14.3x) |
+| dynamic Poisson, D = 37,901 | 44.4 | 52.9 (1.19x) | 46.6 (1.05x) | 654 (14.7x) |
+| same, 3 kernel threads | 17.0 | not threaded | 18.4 (1.08x) | not threaded |
+| logistic, n = 5000, p = 20 | 23.6 | 38.0 (1.61x) | | 42.7 (1.81x) |
+| eight schools | 0.025 | 0.025 (plain Rust) | | 0.50 (about 20x) |
 
-**Whole runs.** 4 chains, 1000 + 1000. Medians over 5 seeds (3 for the
-large model):
+Two earlier passes agree with these clean medians to within 4%. One was
+taken on a loaded machine and is kept as `grad_loaded.json`. The other was
+quiet and was overwritten by this one.
+
+**Whole runs.** 4 chains, 1000 + 1000. Medians over 5 seeds, 3 for the
+large model:
 
 | problem | Mint | Rust max effort | Rust v2 | Stan |
 |---|---|---|---|---|
 | dynamic Poisson, small | 3.32 s | 3.76 s | 3.50 s | 28.3 s |
-| dynamic Poisson, large | 62.4 s | 98.6 s | 65.2 s | 741 s (two quiet seeds 737 and 741 s; one loaded seed 3887 s) |
+| dynamic Poisson, large | 62.4 s | 98.6 s | 65.2 s | 737 and 741 s (two quiet seeds); 3887 s for a third seed run while about 16 threads were busy |
 | logistic | 0.38 s | 0.59 s | | 0.64 s |
-| eight schools | 0.01 s | 0.01 s | | 0.02 s |
+| eight schools | 5.5 ms | 5.7 ms (plain Rust) | | 16.6 ms |
 
-- The sampler is shared. At the same seed, gradient counts agree to within
-  1.6% on the time-series and logistic models. On eight schools they agree
-  to within 3 to 17%, presumably because its trajectories part ways sooner
-  once rounding differs (not checked). ESS per gradient agrees within the
-  spread between seeds.
-- The new Rust baseline is within 5% of Mint's gradient. On the large model
-  it is within 5% of Mint's whole run, where `dynpois_max.rs` (not threaded)
-  takes 1.6x as long. The gap that remains is in what the fixed parameter
-  order rules out (column-major `innov`), plus Mint's narrow data; neither
-  was isolated.
-- Stan's gradient is 14 to 15x Mint's on the time-series model, 1.8x on
-  logistic regression and about 20x on eight schools. On eight schools
-  Mint's gradient takes 24 ns, so the timing loop's own overhead is a large
-  part of that ratio. `stanc --O1` already rewrites the logistic likelihood
-  to `bernoulli_logit_glm`.
-- On the large model, subtracting the gradient (the 3-thread figure where
-  the gradient is threaded) from the median per-gradient cost leaves about
-  51 to 55 µs per gradient per chain for Mint and both Rust versions. For
-  Stan it leaves about 150 µs, over the two quiet seeds. Why Stan's is larger was not
-  established.
-- **nutpie, same Stan gradient** (a sampler comparison):
-  - **Overhead.** On one pinned chain, nutpie's overhead per gradient was
-    7.5 to 9.4 µs on the small time series, against Mint's 4.2 to 5.3. On
-    eight schools it was 2.0 to 2.5 µs against 0.2. Its figure includes
-    setup and trace storage.
-  - **Efficiency.** nutpie got more ESS per gradient on logistic (104 to 114
-    against 91 to 97 per 1000) and on eight schools (37 to 42 against 28 to
-    30). It got less on the small time series (0.73 to 0.76 against 0.91 to
-    1.09), with half-length trajectories.
+- **Same sampler, same work.** All runs did the same amount of sampler work:
+  trajectories almost always hit a fixed length (255 leapfrog steps per
+  draw on the small time series, 511 on the large one, 7 on logistic), so
+  gradient counts agree to within 1.6% at a given seed. That follows from
+  the shared sampler and similar step sizes; it is not by itself evidence
+  that the posteriors match (`bench/dynpois` compares posterior means). On
+  eight schools, where tree depth varies, counts at a seed differ by 3 to
+  17%. ESS per gradient agrees within the spread between seeds.
+- **The new Rust baseline.** Its gradient is 5% slower than Mint's on one
+  thread and 8% slower on three, where `dynpois_max.rs` is 15 to 19% slower.
+  On the large model its whole run is within 5% of Mint's (65.2 against
+  62.4 s); `dynpois_max.rs`, which does not split its gradient across the
+  chain's threads, takes 1.6x as long. What the remaining 5 to 8% is was not
+  established. Mint without its column-major layout is 2.1x slower than
+  Mint, so its own code depends on that layout. Mint without narrow data is
+  no slower.
+- **Stan's gradient is 14 to 15x Mint's** on the time-series model, 1.8x on
+  logistic regression, and about 20x on eight schools. At 25 ns per Mint
+  gradient, the timing loop's own overhead is a large part of the eight
+  schools ratio. Two things inflate Stan's gradient time and were not
+  measured. One is BridgeStan's per-call cost: it copies the parameters and
+  catches exceptions. The other is `STAN_THREADS`, which concurrent chains
+  in one process require. On the large model the comparison also pits
+  Stan's single gradient thread against three for Mint and Rust v2, because
+  the Stan program has no `reduce_sum`. `stanc --O1` already rewrites the
+  logistic likelihood to `bernoulli_logit_glm`.
+- **Whole-run cost per gradient is not gradient plus a fixed sampler cost.**
+  Subtracting the pinned gradient time leaves about 51 to 55 µs per
+  gradient per chain for Mint and both Rust versions on the large model,
+  and about 150 µs for Stan. A constant of about 48 µs plus 16% of the
+  gradient time fits all four. That suggests every gradient runs about 16%
+  slower inside a 12-thread run than pinned alone, which would make Stan's
+  extra residual the same effect rather than sampler overhead. This was not
+  measured. The per-gradient figure is also wall time to the slowest chain,
+  so it includes chain imbalance.
+- **nutpie, same Stan gradient.** This is a sampler comparison, with 3 seeds
+  per cell.
+  - **Time per gradient.** nutpie's time per gradient was higher on all
+    three problems. On one pinned chain it was 58 to 60 µs against Mint's
+    54.7 to 55.8 µs on the small time series, and 2.5 to 3.0 µs against
+    0.70 µs on eight schools. nutpie's time covers the whole `sample()`
+    call, including setup and storing 2000 draws per chain. Mint's covers
+    the sampling loop only. So the gap is an upper bound on any difference
+    in per-gradient sampler overhead, and on eight schools (13,500
+    gradients, 30 to 40 ms) it is mostly fixed cost.
+  - **ESS per gradient.** On the small time series nutpie's trajectories
+    are half as long (127 steps), but its lowest bulk ESS per 1000
+    gradients was lower in every seed: 0.73 to 0.76 against 0.91 to 1.09
+    with 4 chains, and 0.47 to 0.66 against 0.86 to 1.27 with one chain.
+    On eight schools nutpie was higher in 3 of 3 seeds (37 to 42 against 28
+    to 30). On logistic it was higher in 3 of 3 seeds (104 to 114 against
+    91 to 97), but Mint's own range over 5 seeds of the same estimator
+    reaches 105, so logistic is not a finding.
   - **A reproducible failure.** With seed 3 on the small time series, one
-    nutpie chain's step size collapsed to 7e-189 and the chain never moved
-    (R-hat 1.55, lowest ESS 7), in both runs of that seed.
+    of nutpie's chains had its step size collapse to 7e-189. It never moved
+    (R-hat 1.55, lowest ESS 7), and the same happened in both runs of that
+    seed.
 
 **Caveats.**
 
-- Initial points differ on the time-series model. Mint draws its initial
-  point and momenta in its internal column-major order, so its chains start
-  from a permutation of the Rust and Stan point.
-- Each implementation uses its own compiler: clang 22, LLVM 21 and g++ 16.
-- Stan was built with `--O1` and `-march=native`, not CmdStan's defaults.
-- The ESS in the whole-run tables is the runtime's lowest over all
-  parameters, and it varies by more than 1.5x between seeds. ESS-per-second
-  ratios between implementations are not findings.
-- One machine, one dataset per problem.
+- **Initial points.** These differ on the time-series model: Mint draws its
+  initial point and momenta in its internal column-major order, so its
+  chains start from a permutation of the Rust and Stan point. After the
+  first rounding-dependent branch, every implementation's chains use the
+  random stream differently anyway.
+- **Compilers.** Each implementation uses its own: clang 22, LLVM 21 and
+  g++ 16. Stan was built with `--O1` and `-march=native`, not CmdStan's
+  defaults.
+- **ESS.** The runtime's ESS (Geyer, on raw draws) reads higher than ArviZ's
+  rank-normalised bulk ESS, by up to 38% on eight schools. The whole-run
+  ESS is the lowest over all parameters and varies by more than 1.5x
+  between seeds, so ESS-per-second ratios between implementations are not
+  findings.
+- **Order of the large runs.** Stan's large runs were not interleaved with
+  the others: seed 1 ran first, under load, and seeds 2 and 3 ran last.
+- **Thread safety.** This was checked by byte-identical draws on short runs
+  of both time-series sizes. That is evidence, not proof.
+- **Scope.** One machine and one dataset per problem.

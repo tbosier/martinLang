@@ -22,6 +22,9 @@ NAMES = {
     "rust": "Rust, straightforward (eight_schools.rs)",
     "stan": "Stan 2.40 via BridgeStan (stanc --O1)",
     "stan_glm": "Stan, bernoulli_logit_glm written by hand",
+    "mint[no-scan-layout]": "Mint, mintc --no-scan-layout (innov row-major)",
+    "mint[no-narrow-data]": "Mint, mintc --no-narrow-data (counts read as double)",
+    "mint[no-scan-layout+no-narrow-data]": "Mint, both of the above",
 }
 
 
@@ -78,12 +81,15 @@ def whole_section(w, title, out, note=""):
     loads = [r["before"]["loadavg"][0] for r in runs]
     out.append(f"{s['chains']} chains in parallel, {s['warmup']} warmup + {s['draws']} draws, seeds "
                f"{', '.join(map(str, seeds))}, every implementation under the same runtime NUTS with the same "
-               f"settings and seed; runs interleaved. Machine load before each run: 1-minute load average "
-               f"{min(loads):.1f} to {max(loads):.1f} (it includes this harness's own previous run), and "
-               f"{min(map(busy, runs)):.1f} to {max(map(busy, runs)):.1f} of the 24 hardware threads busy in the "
-               "second before the run started (other work only). "
-               "Medians over seeds, with the range. ESS and R-hat are the runtime's (rank-normalised bulk ESS, "
-               "split R-hat), lowest and highest over all parameters.\n")
+               f"settings and seed. Within one invocation of run_whole.py the runs are interleaved (a shuffled "
+               "order per seed); the per-run list below gives each run's seed and load. Machine load "
+               f"before each run: 1-minute load average {min(loads):.1f} to {max(loads):.1f} (it includes this "
+               f"harness's own previous run), and {min(map(busy, runs)):.1f} to {max(map(busy, runs)):.1f} of the "
+               "24 hardware threads busy in the second before the run started (other work only; load during a "
+               "run is not recorded). Medians over seeds, with the range. ESS and R-hat are the runtime's "
+               "own: split R-hat, and an autocorrelation-based ESS (Geyer's initial positive sequence) on the "
+               "raw draws, neither rank-normalised nor split; it reads higher than ArviZ's bulk ESS (by up to "
+               "38% on eight schools, compare nutpie.json). Lowest ESS and highest R-hat over all parameters.\n")
     out.append("| problem | implementation | runs | sampling s, median (range) | gradients, median | µs per gradient per chain, median (range) | lowest ESS, range | ESS per 1000 gradients, median | highest R-hat | divergences, total |")
     out.append("|---|---|---|---|---|---|---|---|---|---|")
     keys = []
@@ -98,7 +104,9 @@ def whole_section(w, title, out, note=""):
         per = [r["us_per_gradient_per_chain"] for r in rs]
         ess = [r["min_ess"] for r in rs]
         e1k = [r["min_ess_per_1k_gradients"] for r in rs]
-        out.append(f"| {p} | {NAMES.get(impl, impl)} | {len(rs)} | {statistics.median(sec):.2f} ({rng(sec)}) | "
+        sf = "{:.4f}" if max(sec) < 0.1 else "{:.2f}"
+        out.append(f"| {p} | {NAMES.get(impl, impl)} | {len(rs)} | {sf.format(statistics.median(sec))} "
+                   f"({rng(sec, sf)}) | "
                    f"{statistics.median([r['gradients'] for r in rs]):,.0f} | {statistics.median(per):.2f} ({rng(per)}) | "
                    f"{rng(ess, '{:.0f}')} | {statistics.median(e1k):.3g} | {max(r['max_rhat'] for r in rs):.3f} | "
                    f"{sum(r['divergences'] for r in rs)} |")
@@ -107,7 +115,7 @@ def whole_section(w, title, out, note=""):
                "hardware threads busy with other work before):\n")
     for p, impl in keys:
         rs = sorted([r for r in runs if r["problem"] == p and r["impl"] == impl], key=lambda r: r["seed"])
-        cells = "; ".join(f"{r['seed']}: {r['sampling_seconds']:.2f} s, {r['gradients']:,}, {r['min_ess']:.0f}, "
+        cells = "; ".join(f"{r['seed']}: {r['sampling_seconds']:.4g} s, {r['gradients']:,}, {r['min_ess']:.0f}, "
                           f"{r['before']['loadavg'][0]:.1f}, {busy(r):.1f}" for r in rs)
         out.append(f"- {p}, {impl}: {cells}")
     out.append("")
@@ -122,7 +130,12 @@ def nutpie_section(n, out, title):
     out.append(f"nutpie {n['versions']['nutpie']}, BridgeStan {n['versions']['bridgestan']}; both run the same "
                f"compiled Stan model, {how}, 1000 warmup + 1000 draws. Bulk and tail ESS and R-hat "
                "come from the same ArviZ code over every parameter's constrained draws. nutpie's adaptation "
-               "differs from Mint's (Stan's), so this compares samplers, not languages. 1-minute load average "
+               "differs from Mint's (Stan's), so this compares samplers, not languages. The times do not cover "
+               "the same work: nutpie's is the whole nutpie.sample() call (setting up the sampler and threads, "
+               "storing warmup and kept draws, building the trace), Mint's is the runtime's sampling loop. "
+               "\"Minus the gradient alone\" subtracts the pinned single-thread gradient time (grad.json); the "
+               "residual mixes sampler cost, fixed costs and the gradient running slower inside a run, so it is "
+               "an upper bound on sampler overhead, not a measurement of it. 1-minute load average "
                f"before the runs: {min(loads):.1f} to {max(loads):.1f}.\n")
     out.append("| problem | sampler | seed | wall s | gradients | µs per gradient per chain | minus the gradient alone | lowest bulk ESS | lowest tail ESS | highest R-hat | bulk ESS per 1000 gradients | divergences |")
     out.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -168,12 +181,19 @@ def main():
                         ("whole_large.json", "Whole runs: large dynamic Poisson (37,901 parameters)")]:
         w = load(name)
         if w:
-            whole_section(w, title, out)
+            note = ""
+            if name == "whole_large.json":
+                note = ("Order of the runs: Stan seed 1 first (alone, while other work kept about 16 hardware "
+                        "threads busy), then Mint and both Rust versions for seeds 1 to 3, then Stan seeds 2 and 3 "
+                        "on a quiet machine. Stan was therefore not interleaved with the others, and its seed-1 "
+                        "time reflects the load more than the code.")
+            whole_section(w, title, out, note)
     w = load("whole_small_loaded.json")
     if w:
         whole_section(w, "The same small runs on a loaded machine (an earlier pass)", out,
-                      "The first pass of the small runs, while other agents kept 15 to 29 of the 24 hardware "
-                      "threads busy. Same seeds, so the same gradient counts and ESS as the quiet pass above (the "
+                      "The first pass of the small runs, while other agents ran (1-minute load average 15 to 29; "
+                      "6 to 24 of the 24 hardware threads busy before a run). Same seeds, so the same gradient "
+                      "counts and ESS as the quiet pass above (the "
                       "draws are deterministic); only the times differ. Kept to show how much load moves wall "
                       "times: up to 3x.")
     n = load("nutpie.json")

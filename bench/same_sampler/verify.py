@@ -12,9 +12,13 @@ models are safe to call from the chains' threads.
 2. At random points, through BridgeStan's Python interface on the same
    compiled models: Stan's log density minus a numpy reference formula must
    be that same constant at every point, and the gradients must agree.
-3. Thread safety: a short 4-chain run of the Stan model with one shared model
-   object and with one model per chain (BS_MODEL_PER_CHAIN=1), and a repeat of
-   the shared run: the draws must be byte-identical.
+3. Thread safety: short 4-chain runs of the small and the large Stan
+   time-series model (1 and 3 sampler threads per chain) with one shared
+   model object and with one model per chain (BS_MODEL_PER_CHAIN=1), and a
+   repeat of the shared run: the draws must be byte-identical. (Evidence, not
+   proof: a race need not show up in a given run.)
+Also at the benchmark point: Mint built without its column-major layout and
+narrow data, and Mint's and rust_par's gradients on 3 kernel threads.
 4. The new Rust baseline (baselines/dynpois_par.rs) against its scalar
    reference implementation, for each exp variant and several thread counts.
 
@@ -86,6 +90,17 @@ def bench_point_checks(problem, report):
         argv, env = common.command(problem, impl, draws=1000, warmup=1000, chains=4, seed=1)
         out, _ = common.run(argv, dict(env, MINT_BENCH_GRAD="1", MINT_PRINT_GRAD="1"))
         res[impl] = common.parse_printed_grad(out)
+    if problem.startswith("dynpois"):
+        # the variants timed in run_grad.py: Mint's ablations, and the
+        # threaded kernels of Mint and rust_par on 3 threads
+        flags = ["--no-scan-layout", "--no-narrow-data"]
+        argv, env = common.command(problem, "mint", mint_flags=flags)
+        out, _ = common.run(argv, dict(env, MINT_BENCH_GRAD="1", MINT_PRINT_GRAD="1"))
+        res["mint[no-scan-layout+no-narrow-data]"] = common.parse_printed_grad(out)
+        for impl in ("mint", "rust_par"):
+            argv, env = common.command(problem, impl)
+            out, _ = common.run(argv, dict(env, MINT_BENCH_GRAD="1", MINT_PRINT_GRAD="1", MINT_KERNEL_THREADS="3"))
+            res[f"{impl}, 3 kernel threads"] = common.parse_printed_grad(out)
     lp_m, g_m = res["mint"]
     g_m = np.array(g_m)
     rows = {}
@@ -145,20 +160,26 @@ def random_point_checks(problem, report):
 def thread_safety(report):
     tmp = os.path.join(common.OUT, "tmp")
     os.makedirs(tmp, exist_ok=True)
-    blobs = {}
-    for label, extra in [("shared", {}), ("per_chain", {"BS_MODEL_PER_CHAIN": "1"}), ("shared_again", {})]:
-        path = os.path.join(tmp, f"ts_{label}.draws")
-        argv, env = common.command("dynpois_small", "stan", draws=200, warmup=200, chains=4, seed=5)
-        common.run(argv, dict(env, MINT_DRAWS=path, **extra))
-        blobs[label] = open(path, "rb").read()
-        os.remove(path)
-    same = blobs["shared"] == blobs["per_chain"] == blobs["shared_again"]
-    report["thread_safety"] = {
-        "run": "dynpois_small, Stan via BridgeStan, 4 chains in threads, 200 + 200, seed 5",
-        "draws_bytes": len(blobs["shared"]),
-        "shared_model_equals_model_per_chain_and_repeat": same}
-    print(f"  thread safety: shared model, one model per chain and a repeat give identical draws: {same}")
-    return same
+    report["thread_safety"] = []
+    ok = True
+    # small: 1 sampler thread per chain; large: 3 per chain, as in the whole runs
+    for problem, n in (("dynpois_small", 200), ("dynpois_large", 100)):
+        blobs = {}
+        for label, extra in [("shared", {}), ("per_chain", {"BS_MODEL_PER_CHAIN": "1"}), ("shared_again", {})]:
+            path = os.path.join(tmp, f"ts_{label}.draws")
+            argv, env = common.command(problem, "stan", draws=n, warmup=n, chains=4, seed=5)
+            common.run(argv, dict(env, MINT_DRAWS=path, **extra))
+            blobs[label] = open(path, "rb").read()
+            os.remove(path)
+        same = blobs["shared"] == blobs["per_chain"] == blobs["shared_again"]
+        ok = ok and same
+        report["thread_safety"].append({
+            "run": f"{problem}, Stan via BridgeStan, 4 chains in threads, {n} + {n}, seed 5",
+            "draws_bytes": len(blobs["shared"]),
+            "shared_model_equals_model_per_chain_and_repeat": same})
+        print(f"  thread safety, {problem}: shared model, one model per chain and a repeat give identical "
+              f"draws: {same}")
+    return ok
 
 
 def rust_par_selftests(report):

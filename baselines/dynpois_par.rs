@@ -186,7 +186,7 @@ impl Ws {
 thread_local! {
     static WS: RefCell<Ws> = const { RefCell::new(Ws { r: Vec::new(), zero: Vec::new(), sink: Vec::new() }) };
     /// The calling chain's per-thread slots: shared-gradient partial sums
-    /// (T vectors per slot) and log densities (one cache line per slot).
+    /// (T vectors per slot) and log densities (one 64-byte cell per slot).
     static SLOTS: RefCell<(Vec<__m256d>, Vec<[f64; 8]>)> = const { RefCell::new((Vec::new(), Vec::new())) };
 }
 

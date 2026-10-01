@@ -36,6 +36,33 @@
     "grad_max_rel_diff_vs_mint": 1.0492701149060463e-14,
     "grad_norm_rel_diff_vs_mint": 1.498180161814831e-16,
     "dim": 3171
+   },
+   "mint[no-scan-layout+no-narrow-data]": {
+    "logp": 4505.884377492704,
+    "logp_mint_minus_this": 4.547473508864641e-12,
+    "expected_constant": 0.0,
+    "constant_error": 1.0092299597343586e-15,
+    "grad_max_rel_diff_vs_mint": 1.3115876436325578e-14,
+    "grad_norm_rel_diff_vs_mint": 1.7733311227932755e-16,
+    "dim": 3171
+   },
+   "mint, 3 kernel threads": {
+    "logp": 4505.884377492717,
+    "logp_mint_minus_this": -9.094947017729282e-12,
+    "expected_constant": 0.0,
+    "constant_error": 2.0184599194687172e-15,
+    "grad_max_rel_diff_vs_mint": 3.0931113826086555e-16,
+    "grad_norm_rel_diff_vs_mint": 9.589217507195611e-17,
+    "dim": 3171
+   },
+   "rust_par, 3 kernel threads": {
+    "logp": 4505.884377492722,
+    "logp_mint_minus_this": -1.3642420526593924e-11,
+    "expected_constant": 0.0,
+    "constant_error": 3.027689879203076e-15,
+    "grad_max_rel_diff_vs_mint": 4.440892098500626e-16,
+    "grad_norm_rel_diff_vs_mint": 7.506458350497632e-17,
+    "dim": 3171
    }
   },
   "dynpois_large": {
@@ -73,6 +100,33 @@
     "constant_error": 6.785808811721291e-14,
     "grad_max_rel_diff_vs_mint": 8.881784197001252e-15,
     "grad_norm_rel_diff_vs_mint": 1.035642979058715e-15,
+    "dim": 37901
+   },
+   "mint[no-scan-layout+no-narrow-data]": {
+    "logp": 49751.539229186834,
+    "logp_mint_minus_this": -3.710738383233547e-10,
+    "expected_constant": 0.0,
+    "constant_error": 7.4585398577109e-15,
+    "grad_max_rel_diff_vs_mint": 2.930988785010413e-14,
+    "grad_norm_rel_diff_vs_mint": 1.0728708060390472e-15,
+    "dim": 37901
+   },
+   "mint, 3 kernel threads": {
+    "logp": 49751.53922918196,
+    "logp_mint_minus_this": 4.503817763179541e-09,
+    "expected_constant": 0.0,
+    "constant_error": 9.052619944947153e-14,
+    "grad_max_rel_diff_vs_mint": 3.5986412701767007e-16,
+    "grad_norm_rel_diff_vs_mint": 1.451631503661573e-16,
+    "dim": 37901
+   },
+   "rust_par, 3 kernel threads": {
+    "logp": 49751.539229183094,
+    "logp_mint_minus_this": 3.368768375366926e-09,
+    "expected_constant": 0.0,
+    "constant_error": 6.771184223764994e-14,
+    "grad_max_rel_diff_vs_mint": 6.344502811749602e-15,
+    "grad_norm_rel_diff_vs_mint": 1.4051589838175284e-16,
     "dim": 37901
    }
   },
@@ -217,15 +271,22 @@
   }
  },
  "loadavg": [
-  15.66,
-  12.71,
-  10.73
+  0.59,
+  0.64,
+  2.15
  ],
- "thread_safety": {
-  "run": "dynpois_small, Stan via BridgeStan, 4 chains in threads, 200 + 200, seed 5",
-  "draws_bytes": 20294424,
-  "shared_model_equals_model_per_chain_and_repeat": true
- },
+ "thread_safety": [
+  {
+   "run": "dynpois_small, Stan via BridgeStan, 4 chains in threads, 200 + 200, seed 5",
+   "draws_bytes": 20294424,
+   "shared_model_equals_model_per_chain_and_repeat": true
+  },
+  {
+   "run": "dynpois_large, Stan via BridgeStan, 4 chains in threads, 100 + 100, seed 5",
+   "draws_bytes": 121283224,
+   "shared_model_equals_model_per_chain_and_repeat": true
+  }
+ ],
  "rust_par_selftest": [
   {
    "exp": "table",
@@ -270,7 +331,7 @@
  ],
  "summary": {
   "worst_grad_vs_mint": 2.930988785010413e-14,
-  "worst_constant_error": 6.785808811721291e-14,
+  "worst_constant_error": 9.052619944947153e-14,
   "worst_random_point_grad": 5.595524044110789e-14,
   "worst_random_point_constant": 2.9103830456733704e-11,
   "thread_safety": true,
