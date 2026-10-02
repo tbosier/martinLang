@@ -42,8 +42,26 @@ pub fn set_prep_seconds(s: f64) {
     unsafe { mint_set_prep_seconds(s) }
 }
 
+/// The value of environment variable `name` as an integer, or `dflt` when it
+/// is unset. bench/same_sampler sets MINT_BASELINE_{DRAWS,WARMUP,CHAINS,SEED}
+/// so that every baseline runs with the same sampler settings as the Mint
+/// and Stan programs it is compared with; unset, each baseline keeps its own.
+fn env_or(name: &str, dflt: i64) -> i64 {
+    match std::env::var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| panic!("{name} must be an integer, got {v:?}")),
+        Err(_) => dflt,
+    }
+}
+
 /// sizes[j] < 0 marks a scalar parameter.
 pub fn sample_and_print(f: LogpFn, c: ConstrainFn, d: usize, names: &[&str], sizes: &[i64], draws: i64, warmup: i64, chains: i64, seed: i64) {
+    let draws = env_or("MINT_BASELINE_DRAWS", draws);
+    let warmup = env_or("MINT_BASELINE_WARMUP", warmup);
+    let chains = env_or("MINT_BASELINE_CHAINS", chains);
+    let seed = env_or("MINT_BASELINE_SEED", seed);
+    if std::env::vars().any(|(k, _)| k.starts_with("MINT_BASELINE_")) {
+        eprintln!("baseline: draws={draws} warmup={warmup} chains={chains} seed={seed}");
+    }
     let cnames: Vec<CString> = names.iter().map(|n| CString::new(*n).unwrap()).collect();
     let ptrs: Vec<*const c_char> = cnames.iter().map(|c| c.as_ptr()).collect();
     unsafe {
