@@ -159,7 +159,8 @@ clang 22.1 and glibc 2.44; other versions are untested.
 ./build/logistic_bayes
 ```
 
-`mintc check FILE` type-checks only; `mintc emit FILE` writes the LLVM IR.
+`mintc check FILE` type-checks only; `mintc emit FILE` writes the LLVM IR;
+`mintc explain FILE` reports what the compiler found and did (below).
 
 The full benchmark (it builds everything, generates data and runs about 6
 minutes; the max-effort baselines need nightly Rust) and the test suite:
@@ -256,6 +257,50 @@ The logistic gradient did not change measurably, because its real-valued X
 is not exact in float and stays double. It costs build time:
 those two models now take 0.56 and 0.37 s to build instead of 0.22 and
 0.14 s. See [architecture.md](docs/architecture.md#narrow-data).
+
+## What the compiler did: `mintc explain`
+
+`mintc explain FILE [flags]` compiles the program as `build` does, with the
+same flags (a test checks that `explain -o` writes the same IR as `emit`),
+and prints what the compiler decided: per model, the parameters and their
+transforms, how each `~` statement was compiled (including which latent
+random walk the Kalman collapse integrated out, with which filter, and what
+NUTS samples instead, or why a candidate was refused), the data layouts and
+the data that may be read narrow; per function, the row fusion groups, the
+kernels and the type facts behind `solve`. The decisions and their reasons
+are recorded by the code generators where they make them; the descriptions
+of what a chosen kernel does are fixed text kept next to its code. Sizes that
+depend on the data are symbolic. An excerpt for
+`examples/dynamic_poisson.mint` (`...` marks omitted lines):
+
+```
+model DynamicPoisson
+  ...
+  parameters: NUTS samples G x T + G + T + 1 unconstrained values
+  ...
+    line 20: y ~ PoissonLog(beta + state)
+      with state = cumsum(shared + innov, T)
+      ...
+      fused scan kernel over Matrix[G, T]: 1 running sum along T, each carried in a register along its row
+      vector code: 4 lanes (<4 x double>), one row per lane, in groups of 8 rows (2 vectors); ...
+      ...
+      absorbed: line 17 (innov ~ Normal(0, 0.08)), in the reverse loop
+      owned gradient: innov; ...
+```
+
+and for the Newton example, why `solve` may use Cholesky:
+
+```
+      solve(H, g): Cholesky solve (mint_chol_solve), allowed because H is proved SPD:
+        H = X' * diag(mu .* (1 - mu)) * X + lambda * I(p) is SPD: PSD + SPD
+          X' * diag(mu .* (1 - mu)) * X is PSD: a Gram product with weights >= 0 (the weights are Prob)
+            mu .* (1 - mu) is Prob: Prob .* Prob
+            ...
+          lambda * I(p) is SPD: Positive * SPD
+```
+
+Choices that depend on the data values, such as narrow copies, are reported
+as the checks that `sample()` makes when it starts.
 
 ## The language in one page
 

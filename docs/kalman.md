@@ -192,6 +192,10 @@ to 21 gradients' worth; its collapsed times are correspondingly
 pessimistic.) The sampling times reported include it; the per-gradient
 ratios do not.
 
+`mintc explain` reports the same decisions on the statements concerned:
+what was collapsed, by which kernel and why that one, the dimension NUTS
+samples and the length of a draw, or why a candidate was refused.
+
 ## Where the code is
 
 - `compiler/src/model.rs`, section "Kalman collapse": `detect_kalman` (the

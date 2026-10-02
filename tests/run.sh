@@ -39,6 +39,12 @@ for b in logistic_bayes_max logistic_newton_max; do
     -C link-arg="$PWD/build/mint_rt.o" -C link-arg=-lomp -l m -l mvec || bad "build baselines/$b.rs (nightly)"
 done
 
+# ---- mintc explain: compiles what emit compiles, reports every statement
+# and the key decisions (compiler/tests/explain.rs)
+
+(cd compiler && cargo test --release -q --test explain >/dev/null 2>&1) && pass "mintc explain (cargo test --test explain)" \
+  || bad "mintc explain: run (cd compiler && cargo test --release --test explain)"
+
 # ---- compile-time errors
 
 expect_compile_error() { # file substring

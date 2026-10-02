@@ -19,6 +19,16 @@ pub enum Func {
 }
 
 impl Func {
+    pub fn name(self) -> &'static str {
+        match self {
+            Func::Exp => "exp",
+            Func::Log => "log",
+            Func::Log1p => "log1p",
+            Func::Sqrt => "sqrt",
+            Func::Sigmoid => "sigmoid",
+            Func::Abs => "abs",
+        }
+    }
     fn from_name(s: &str) -> Option<Func> {
         Some(match s {
             "exp" => Func::Exp,
