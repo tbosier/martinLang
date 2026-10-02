@@ -923,6 +923,7 @@ static void rng_normals(Rng *r, double *out, int64_t n) {
 void mint_kalman_ffbs(int64_t G, int64_t T, double c, const double *restrict y, const double *restrict a,
                       const double *restrict d, const double *restrict q, const double *restrict r,
                       int64_t shared, double *restrict ws, void *rng, double *restrict e) {
+  if (T <= 0) return;  // no increments to draw (and no last time step)
   double *restrict Ms = ws, *restrict Ps = ws + G * T, *restrict Z = ws + 2 * G * T;
   double *restrict m = ws + 3 * G * T, *restrict P = m + G, *restrict x = P + G;
   const int64_t qs = shared ? 0 : 1;  // stride of q and r within a time step

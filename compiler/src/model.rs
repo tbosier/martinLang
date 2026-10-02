@@ -1283,6 +1283,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     // Lower the body, inlining `let`s.
     let mut low = Lowering { tm, lets: HashMap::new() };
     let mut stmts = Vec::new();
+    let mut low_span: Vec<(usize, usize)> = Vec::new();
     for s in &tm.body {
         match s {
             TModelStmt::Let { name, value } => {
@@ -1299,6 +1300,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                     // its support could not be checked before sampling
                     panic_model(tm, "the outcome of BernoulliLogit and PoissonLog cannot contain cumsum");
                 }
+                let n0 = rep(m).map_or(0, |r| r.stmts[k].lines.len());
                 let try_ss = plan_suffstats(*dist, &l, &a, shape);
                 match (&try_ss, opts.suffstats) {
                     (Ok(plan), true) => {
@@ -1321,6 +1323,9 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
                     Err(why) if ss.is_none() && why != "no matrix-vector product" => note(m, k, format!("loop fission: no, {why}; {} inside the loop, one row dot product per element", mv_list(&l, &a))),
                     _ => {}
                 }
+                // (the report lines just added: dropped again if a Kalman
+                // collapse removes the statement, whose code is then the filter's)
+                low_span.push((n0, rep(m).map_or(0, |r| r.stmts[k].lines.len())));
                 stmts.push(Stmt::Tilde { dist: *dist, lhs: l, args: a, shape: shape.clone(), ss, fission });
             }
         }
@@ -1365,6 +1370,12 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
         });
         if let Some(r) = rep(m) {
             r.stmt_ix = kept;
+            // the sufficient-statistics and fission decisions of the two
+            // removed statements no longer describe any code
+            for &i in &gone {
+                let (n0, n1) = low_span[i];
+                r.stmts[i].lines.drain(n0..n1);
+            }
         }
         // one line per collapse; the last also says what NUTS samples
         for (j, k) in kal.iter().enumerate() {
@@ -1987,9 +1998,14 @@ fn gen_logp(m: &mut Module, tm: &TModel, stmts: &[Stmt], kal: &[Kalman], opts: &
                 let in_scans_only = !mentions_outside_scans(lhs, n) && !args.iter().any(|a| mentions_outside_scans(a, n));
                 // a Kalman collapse adds to the gradient after every kernel
                 let in_kalman = kal.iter().any(|k| k.mentions(n));
+                // (for the report: the kernel or a statement it absorbs uses it)
+                let used_here = stmts.iter().enumerate().any(|(t, s2)| {
+                    let Stmt::Tilde { lhs: l2, args: a2, .. } = s2;
+                    (t == h || absorbed[t] == Some(h)) && (mentions(l2, n) || a2.iter().any(|a| mentions(a, n)))
+                });
                 if only_here && in_scans_only && !in_kalman {
                     owned.entry(h).or_default().push(n.clone());
-                } else if mentions(lhs, n) || args.iter().any(|a| mentions(a, n)) {
+                } else if used_here {
                     let why = if only_here && in_scans_only {
                         // (in_kalman)
                         let k = kal.iter().find(|k| k.mentions(n)).unwrap();
@@ -4802,18 +4818,22 @@ fn detect_kalman(m: &mut Module, tm: &TModel, stmts: &[Stmt]) -> (Vec<Kalman>, V
             let (obs_line, prior_line) = (line(m, k.obs), line(m, k.prior));
             let p = &k.param;
             let factor = |e: &Option<M>| e.as_ref().map(|e| format!("{} * ", show_m(e))).unwrap_or_default();
-            // the increments' mean B + k m_w (B alone when m_w is 0)
-            let d = match (&k.drift, &k.mw) {
-                (Some(b), M::Const(z)) if *z == 0.0 => show_m(b),
-                (b, _) => format!("{}{}{}", b.as_ref().map(|e| format!("{} + ", show_m(e))).unwrap_or_default(), factor(&k.k), show_m(&k.mw)),
+            // the increments' mean B + k m_w (without the second term when
+            // m_w is 0) and variance (k s_w)^2, as kal_inputs computes them
+            let mut dt: Vec<String> = k.drift.iter().map(show_m).collect();
+            if !matches!(k.mw, M::Const(z) if z == 0.0) {
+                dt.push(format!("{}{}", factor(&k.k), show_m(&k.mw)));
+            }
+            let d = if dt.is_empty() { "0".to_string() } else { dt.join(" + ") };
+            let var = match &k.k {
+                Some(e) => format!("({} * {})^2", show_m(e), show_m(&k.sw)),
+                None => format!("{}^2", show_m(&k.sw)),
             };
             let series = if k.vec { "the one series".to_string() } else { format!("each of the {} series (rows)", k.rows) };
             note_at(m, k.obs, format!(
-                "Kalman collapse: {p} ({}, {} latent scalars) integrated out: given the other parameters, {series} is a local-level model, state x[t] = x[t-1] + e[t] with e[t] ~ Normal({d}, {}{}) independent, observed as {} ~ Normal({}{}x[t], {}); logp adds the log density of {} with {p} integrated out, from a Kalman filter, in place of this statement and line {prior_line}",
+                "Kalman collapse: {p} ({}, {} latent scalars) integrated out: given the other parameters, {series} is a local-level model, state x[t] = x[t-1] + e[t] with independent Normal increments e[t] of mean {d} and variance {var}, observed as {} ~ Normal({}{}x[t], {}); logp adds the log density of {} with {p} integrated out, from a Kalman filter, in place of this statement and line {prior_line}",
                 explain::src_ty(ty),
                 Poly::size_of(ty),
-                factor(&k.k),
-                show_m(&k.sw),
                 show_m(&k.y),
                 k.a.as_ref().map(|e| format!("{} + ", show_m(e))).unwrap_or_default(),
                 if k.c == 1.0 { String::new() } else { format!("{} * ", explain::num(k.c)) },
@@ -4900,7 +4920,10 @@ fn kal_bufs(g: &mut Mg, model: &str, j: usize, k: &Kalman, slot: &mut usize) -> 
         r
     };
     let y = g.f.load_ptr(&kal_y_global(model, j));
-    KalBufs { y, a: buf(g, &n), d: buf(g, &n), q: buf(g, &n), r: buf(g, &n), ws: buf(g, &w) }
+    // q and r hold G T values, or T when they are shared (more than G T
+    // when G is 0)
+    let nq = g.f.iadd(&n, &td);
+    KalBufs { y, a: buf(g, &n), d: buf(g, &n), q: buf(g, &nq), r: buf(g, &nq), ws: buf(g, &w) }
 }
 
 /// For every element: the filter's inputs a, d = B + k m_w, q = (k s_w)^2
@@ -4962,15 +4985,22 @@ fn gen_kalman_logp(g: &mut Mg, k: &Kalman, b: &KalBufs, lp: &str) {
     let kern = if k.shared { "mint_kalman_ll_shared" } else { "mint_kalman_ll" };
     g.m.declare(&format!("declare double @{kern}(i64, i64, double, ptr, ptr, ptr, ptr, ptr, ptr)"));
     if g.rec {
+        // (the same test as the one below that skips the derivative loop)
+        let active = [k.a.as_ref(), k.drift.as_ref(), k.k.as_ref(), Some(&k.mw), Some(&k.sw), Some(&k.sy)].into_iter().flatten().any(|e| e.active());
         let grads: Vec<String> = g.leap_tm_params.iter().filter(|(n, _)| k.mentions(n)).map(|(n, _)| n.clone()).collect();
-        let to = if grads.is_empty() { "no parameter (the filter's inputs are data)".to_string() } else { grads.join(", ") };
+        let back = if active {
+            format!("a second loop pushes those back through the expressions to {}", grads.join(", "))
+        } else {
+            "no loop follows, since no input depends on a parameter".to_string()
+        };
         note_at(
             g.m,
             k.obs,
             format!(
-                "logp: one loop computes the filter's inputs (mean offset, drift, the two variances) for every element into time-major buffers ({} is copied time-major by init), then {kern} {}, and returns the log density and the adjoints of its inputs; a second loop pushes those back through the expressions to {to}",
+                "logp: one loop computes the filter's inputs into time-major buffers ({} is copied time-major by init): the mean offset and the increments' mean for every element, and the two variances {}; then {kern} {} and returns the log density and the adjoints of its inputs; {back}",
                 show_m(&k.y),
-                if k.vec { "filters the series" } else { "filters every series, vectorised across series" }
+                if k.shared { "once per time step" } else { "for every element" },
+                if k.vec { "filters the series" } else { "filters every series, vectorised across series," }
             ),
         );
     }

@@ -264,9 +264,11 @@ All in `tests/run.sh` (section "Kalman collapse"):
 - **Streaming summaries**: on the example with 1 and 3 threads per chain,
   the summary printed with only the shown rows' draws kept equals the one
   computed from every draw, `MINT_DRAWS` holds all 3,023 values per draw
-  (the same file both ways, and through a pipe), and the streaming mean, sd,
-  R-hat and ESS of every value, innovations included, equal the draw-level
-  ones.
+  (the same file both ways, and through a pipe), and the streaming mean, sd
+  and R-hat of every value, innovations included, equal the draw-level ones
+  to 1e-9, and the ESS to 1e-6 where it comes from the lagged sums (every
+  value in the runs we looked at; the test allows up to 30 batch-means
+  estimates, checked more loosely).
 - **Eligibility**: nine models that must not be collapsed build, print the
   reason, and run to the end sampled as written.
 - `--strict-fp` gives the example's log density and gradient to 1e-12, and

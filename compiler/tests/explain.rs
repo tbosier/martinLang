@@ -337,7 +337,7 @@ fn main() {
     let vc = explain_src("vcumsum", vsrc, &[]);
     has(&vc, "Kalman collapse: z (Vector[n], n latent scalars) integrated out: given the other parameters, the one series is a local-level model");
     has(&vc, "one series, so the filter's variance recursion runs once (mint_kalman_ll_shared)");
-    has(&vc, "mint_kalman_ll_shared filters the series,");
+    has(&vc, "mint_kalman_ll_shared filters the series and returns");
     has(&vc, "parameters: NUTS samples 1 unconstrained values");
     lacks(&vc, "running sum of z");
 
@@ -410,9 +410,9 @@ fn kalman_collapse() {
     has(&out, "innov    Matrix[G, T]  G x T  not sampled by NUTS: integrated out by a Kalman filter (line 25), drawn by FFBS for each kept draw");
     has(&out, "line 23: innov ~ Normal(0, sigma_w)\n      scale sigma_w is Positive: param declared Positive\n      integrated out with line 25 (Kalman collapse of innov)");
     has(&out, "line 25: y ~ Normal(beta + cumsum(innov, T), sigma_y)");
-    has(&out, "Kalman collapse: innov (Matrix[G, T], G x T latent scalars) integrated out: given the other parameters, each of the G series (rows) is a local-level model, state x[t] = x[t-1] + e[t] with e[t] ~ Normal(0, sigma_w) independent, observed as y ~ Normal(beta + x[t], sigma_y)");
+    has(&out, "Kalman collapse: innov (Matrix[G, T], G x T latent scalars) integrated out: given the other parameters, each of the G series (rows) is a local-level model, state x[t] = x[t-1] + e[t] with independent Normal increments e[t] of mean 0 and variance sigma_w^2, observed as y ~ Normal(beta + x[t], sigma_y)");
     has(&out, "so they are the same for every series: the variance recursion runs once per time step and only the means are filtered per series (mint_kalman_ll_shared)");
-    has(&out, "then mint_kalman_ll_shared filters every series, vectorised across series, and returns the log density and the adjoints of its inputs; a second loop pushes those back through the expressions to beta, sigma_w, sigma_y");
+    has(&out, "the two variances once per time step; then mint_kalman_ll_shared filters every series, vectorised across series, and returns the log density and the adjoints of its inputs; a second loop pushes those back through the expressions to beta, sigma_w, sigma_y");
     has(&out, "the collapse function draws innov from its posterior given that draw of the other parameters, by forward filtering, backward sampling (mint_kalman_ffbs)");
     has(&out, "draws: G x T + G + 3 values each, every parameter as written: the G + 3 values NUTS samples, and innov (G x T) drawn for each kept draw");
     lacks(&out, "not integrated out");
@@ -470,6 +470,54 @@ fn main() {
     has(&z, "line 5: y ~ Normal(cumsum(innov, T), 0.5)");
     has(&z, "Kalman collapse: innov not integrated out: no other parameter would be left for NUTS to sample");
     has(&z, "parameters: NUTS samples G x T unconstrained values");
+
+    // a negated walk with a product next to it: the variance is that of the
+    // scaled increments, and the observation's fission decision is gone with
+    // the statement; fixed filter inputs have no derivative loop
+    let n = explain_src(
+        "kalneg",
+        "model N {
+    data y: Vector[n]
+    data X: Matrix[n, p]
+    param b: Vector[p]
+    param z: Vector[n]
+    b ~ Normal(0, 1)
+    z ~ Normal(0, 1)
+    y ~ Normal(X * b + cumsum(-z), 2)
+}
+fn main() {
+    let y: Vector[n] = read(\"y.f64\")
+    let X: Matrix[n, p] = read(\"x.f64\")
+    print(sample(N(y, X), draws = 4, warmup = 0, chains = 1, seed = 1))
+}
+",
+        &[],
+    );
+    has(&n, "independent Normal increments e[t] of mean 0 and variance (-1 * 1)^2, observed as y ~ Normal(X * b + x[t], 2)");
+    has(&n, "a second loop pushes those back through the expressions to b");
+    lacks(&n, "loop fission");
+    let fixed = explain_src(
+        "kalfixed",
+        "model F {
+    data y: Vector[n]
+    param s: Positive
+    param z: Vector[n]
+    s ~ Normal(0, 1)
+    z ~ Normal(0, 1)
+    y ~ Normal(cumsum(z), 2)
+}
+fn main() {
+    let y: Vector[n] = read(\"y.f64\")
+    print(sample(F(y), draws = 4, warmup = 0, chains = 1, seed = 1))
+}
+",
+        &[],
+    );
+    has(&fixed, "no loop follows, since no input depends on a parameter");
+    // twoowned: u's prior is absorbed by the Poisson kernel and the filter
+    // that integrates out w adds to u's gradient, so the kernel does not own it
+    let two = explain("tests/scan/twoowned.mint", &["--fused-leapfrog"]);
+    has(&two, "gradient of u accumulated in memory, not owned: the Kalman filter that integrates out w (line 16) also adds to it, after the kernel");
 
     // with the fused leapfrog, the line about it says what the runtime decides
     let lf = explain("examples/dynamic_poisson.mint", &["--fused-leapfrog"]);

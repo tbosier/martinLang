@@ -755,6 +755,8 @@ import math, sys
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1])][1:]
 maxfb, exact = int(sys.argv[2]), sys.argv[3] == "exact"
 ok = len(rows) == int(sys.argv[4]) and all(r[1] == "1" for r in rows)
+# (a NaN would pass every max() below unnoticed)
+ok &= all(math.isfinite(float(x)) for r in rows for x in r[2:10])
 dm = dr = de = 0.0
 fb = []
 for r in rows:
@@ -1008,6 +1010,35 @@ sw = [l.split() for l in sys.argv[1].splitlines() if l.startswith('sigma_w ')][0
 sys.exit(0 if d == 3023 and np.all(np.isfinite(x)) and abs(float(sw[1]) - 0.0972) < 0.0015 else 1)" "$out" \
   && pass "random_walk_panel: 3 threads per chain, finite draws, same sigma_w" || { bad "random_walk_panel, 3 threads per chain"; echo "$out" | grep sigma_w; }
 
+# An empty panel (no series, or no time steps) collapses and samples the
+# prior of what is left: the shared variances get T slots even when G is 0,
+# and FFBS has nothing to draw when T is 0.
+for gt in "0 5" "3 0"; do
+  set -- $gt
+  python3 -c "import struct; open('build/kal_empty.f64','wb').write(struct.pack('<QQ', $1, $2))"
+  not_empty_src='model W {
+    data y: Matrix[G, T]
+    param s: Positive
+    param innov: Matrix[G, T]
+    s ~ Normal(0, 1)
+    innov ~ Normal(0, s)
+    y ~ Normal(cumsum(innov, T), 0.5)
+}
+fn main() {
+    let y: Matrix[G, T] = read("build/kal_empty.f64")
+    print(sample(W(y), draws = 50, warmup = 50, chains = 2))
+}'
+  printf '%s\n' "$not_empty_src" > build/kal_empty.mint
+  if build build/kal_empty.mint kal_empty && grep -qF "collapsed innov" build/kal_empty.log; then
+    out=$(MINT_DRAWS=build/kal_empty.draws ./build/kal_empty 2>&1) && grep -q "^all 1 parameters" <<<"$out" \
+      && [ "$(stat -c %s build/kal_empty.draws)" = $((24 + 2 * 50 * (1 + $1 * $2) * 8)) ] \
+      && pass "kalman: an empty panel (G = $1, T = $2) collapses and samples" || { bad "kalman: empty panel G = $1, T = $2"; echo "$out" | tail -3; }
+  else
+    bad "kalman: empty panel G = $1, T = $2 did not build or collapse"
+  fi
+done
+set --
+
 # Streaming summaries with the collapse: a draw holds the 23 values NUTS
 # samples and the 3,000 innovations FFBS draws for it, and all of them are
 # kept, summarised and written like any other parameter's. With 1 and 3
@@ -1015,8 +1046,10 @@ sys.exit(0 if d == 3023 and np.all(np.isfinite(x)) and abs(float(sw[1]) - 0.0972
 # 3 of beta, sigma_w, sigma_y, the first 3 of innov); the summary is the one
 # computed with every draw kept; MINT_DRAWS writes the same 3,023 values per
 # draw both ways (and into a pipe), the summarised ones; per value, the
-# streaming statistics equal the draw-level ones; MINT_KEEP_DRAWS=innov keeps
-# every innovation.
+# streaming mean, sd and R-hat equal the draw-level ones to 1e-9 and so does
+# the ESS to 1e-6, except for the values whose ESS comes from batch means
+# (none in the runs we looked at; at most 30 are allowed, and they get the
+# fallback's looser check); MINT_KEEP_DRAWS=innov keeps every innovation.
 for t in 1 3; do
   rm -f build/kal_stream_a.draws build/kal_stream_b.draws
   MINT_THREADS_PER_CHAIN=$t MINT_DRAWS=build/kal_stream_a.draws ./build/rwp > build/kal_stream_a.out 2> build/kal_stream_a.err
@@ -1035,8 +1068,8 @@ for t in 1 3; do
   draws_match build/kal_stream_a.draws build/kal_stream_b.tsv \
     && pass "kalman + streaming ($t threads per chain): the MINT_DRAWS file holds the summarised draws" \
     || bad "kalman + streaming ($t threads per chain): the MINT_DRAWS file does not match the summary"
-  stream_dump_check build/kal_stream_b.tsv 3023 "" 3023 \
-    && pass "kalman + streaming ($t threads per chain): streaming statistics of every value, innovations included, equal the draw-level ones" \
+  stream_dump_check build/kal_stream_b.tsv 30 "" 3023 \
+    && pass "kalman + streaming ($t threads per chain): streaming statistics of every value, innovations included, match the draw-level ones" \
     || bad "kalman + streaming ($t threads per chain): streaming statistics"
 done
 rm -f build/kal_stream_fifo build/kal_stream_p.draws
