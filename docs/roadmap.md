@@ -43,7 +43,9 @@ and would be reported separately.
 4. **Gibbs updates for conjugate blocks.** Exact conditional distributions
    where the model has them, alternated with NUTS on the rest. Prior art:
    JAGS and NIMBLE assign conjugate samplers automatically.
-5. **Batched chains.** Several chains through one gradient call, reading the
+5. **Batched chains.** (The [roofline estimate](roofline.md) suggests the
+   logistic and time-series kernels are latency-bound, which interleaving
+   chains would address.) Several chains through one gradient call, reading the
    data once for all of them. The repository's own measurement found these
    kernels were not limited by shared memory bandwidth with four processes
    ([compiler-round.md](compiler-round.md)), so the gain would come per core

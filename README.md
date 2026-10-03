@@ -333,5 +333,6 @@ followed by row-major little-endian f64.
 - [Flagship demo plan](docs/flagship-demo.md): where the project is going
 - [Roadmap](docs/roadmap.md): further optimisations and what other tools
   already do
+- [Roofline](docs/roofline.md): how close the kernels are to the hardware
 - [Next milestone](docs/next-milestone.md)
 - [Tony](docs/mascot.md): the mascot and its artwork
