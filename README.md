@@ -17,6 +17,9 @@ I/O, printing, a Cholesky solve and the NUTS sampler that calls the compiled
 model. (The tools still carry the earlier name: the compiler is `mintc`,
 programs end in `.mint`, and the runtime's variables start with `MINT_`.)
 
+Martin is named after the author's father, and Tony the eagle after him
+too: [why Martin?](docs/why-martin.md)
+
 It is a research prototype: one machine (Ryzen 9 5900X, Linux), a handful of
 models, and every number below comes from files in `bench/`.
 

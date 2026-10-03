@@ -121,6 +121,13 @@ and would be reported separately.
 20. **Build time.** Compile model variants in parallel; cache LLVM output per
     model hash.
 
+## Later
+
+21. **Beyond sampling.** Optimisation as something a user asks for (today it
+    runs only inside the fast warmup's starting point), and models with
+    ordinary differential equations, with the same compiler-derived
+    gradients (sensitivities).
+
 ## Order
 
 1. The Laplace collapse (item 1) and the forecasting Kalman collapse
