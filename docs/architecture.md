@@ -509,8 +509,9 @@ Martin treats arithmetic as arithmetic on reals, within documented limits:
   glibc's 4-lane versions, which glibc documents as accurate to within 4 ulp.
   The scalar versions are under 1 ulp.
 - In vector code Martin emits itself (the scan kernel, the fission kernel) and
-  in the fused row loop, `exp` is Martin's own (`ir.rs`, `mint_exp_fast`): at
-  most 2 ulp over 3e7 test inputs, with NaN, infinities, overflow and
+  in the fused row loop, `exp` is Martin's own (`ir.rs`, `mint_exp_fast`): about
+  2 ulp over 3e7 test inputs against a rounded long double reference (up to
+  2.13 ulp against the unrounded one, for |x| > 708), with NaN, infinities, overflow and
   subnormal results as in libm. `--no-inline-exp` uses `llvm.exp` everywhere.
 - In the fission kernel, `log` is Martin's own too (`ir.rs`, `mint_log`):
   x = 2^k z with z in about [0.684, 1.371), z/c - 1 = r from a 128-entry
@@ -889,7 +890,11 @@ is checked against the exact formula at both sizes.
   On the 37,901-parameter model both are at the mixing bar, as before:
   highest R-hat 1.005 to 1.015 with Stan's warmup and 1.001 to 1.012 with
   fast, lowest ESS 309 to 409 and 323 to 543. Divergences in eight
-  schools: 5 in 8 runs with Stan's warmup, 0 with fast.
+  schools: 5 in 8 runs with Stan's warmup, 0 with fast. The fast warmup
+  moves every chain to an L-BFGS point near the mode and pools their
+  adaptation, so the chains no longer start far apart, which is where split
+  R-hat gets its power; a low R-hat under it is a weaker check than under
+  Stan's warmup.
 
   Correctness: the eight schools means are within 4 MCSE of the exact values (`tests/run.sh`,
   4000 draws, serial and 3 threads per chain); on the 3,171-parameter time
@@ -965,7 +970,11 @@ is checked against the exact formula at both sizes.
   stopped at lag 22 at the latest on the small model and 36 on the large
   one (half of all parameters by lag 6 and 8).
 
-  The fallback is the weak part. These parameters mix fast; on simulated
+  The fallback is the weak part, and it reads low. On a centred
+  hierarchical model with 30 groups, 22 of 32 parameters took it and their
+  ESS was 0.66 to 1.0 times the draw-level value (14 of 22 below 0.8), so
+  the printed lowest ESS was 260 against about 386 from all the draws. The
+  dynamic Poisson parameters mix fast; on simulated
   AR(1) chains (4 x 1000 draws, 2,000 parameters per setting) with
   autocorrelation 0.8, 0.9 and 0.95 (integrated autocorrelation time 9 to
   39), 26%, 77% and 100% of the parameters took it, and over all of them

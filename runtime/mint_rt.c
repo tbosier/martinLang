@@ -2768,6 +2768,9 @@ static void restore_team(int nt) {
 // than asked for or a thread could not be moved. Returns 1 when bound.
 static int bind_team(int nt, const cpu_set_t *set) {
   if (omp_get_dynamic()) return 0;
+  // a team larger than the L3 group would crowd its CPUs (one chain asking
+  // for half the machine, say): leave it unbound
+  if (nt > CPU_COUNT(set)) return 0;
   int used = 0, fails = 0;
 #pragma omp parallel num_threads(nt) reduction(+ : fails)
   {
@@ -3623,7 +3626,8 @@ static double var_plus(const double *cm, const double *cv, int64_t C, int64_t N,
 
 // Geyer's initial monotone sequence on the chain-averaged autocovariances of
 // C series of N values (value i of chain c at x[(c N + i) stride]), as
-// Stan's ESS does: the integrated autocorrelation time relative to var_plus,
+// Stan's ESS does (without its final antithetic correction, which only
+// matters for very short chains): the integrated autocorrelation time relative to var_plus,
 // which goes to *vp (NAN, and *vp not positive, when the series are
 // constant). cm and cv are C doubles of scratch.
 static double geyer_tau(const double *x, int64_t C, int64_t N, int64_t stride, double *cm, double *cv, double *vp) {

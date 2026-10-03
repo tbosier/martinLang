@@ -91,11 +91,14 @@ does and the shared sampler allows:
   adds them in thread order, so the result is deterministic for a given
   thread count.
 
-What it cannot do: **Martin's column-major storage of `innov`**. Martin's
+What it does not do: **Martin's column-major storage of `innov`**. Martin's
 compiled program stores the matrix by columns internally and converts at the
 sampler's boundary (`mint_set_layout`), so four series at one time step are
-one contiguous load. The Rust baseline must keep the user's row-major order,
-because the parameter vector's order is part of the shared interface. It
+one contiguous load. The Rust baseline keeps the user's row-major order. That is
+a choice of this harness, not a limit of the runtime: `mint_set_layout` is
+public, and a Rust baseline could register its own permutation and store
+`innov` the same way (not tried). With the layout switched off Martin is
+slower than both Rust versions (see the ablation rows in the results). It
 brings rows into column form with half-width loads and unpacks, and writes
 the gradient back with 4x4 transposes.
 
@@ -247,8 +250,7 @@ large model:
     with 4 chains, and 0.47 to 0.66 against 0.86 to 1.27 with one chain.
     On eight schools nutpie was higher in 3 of 3 seeds (37 to 42 against 28
     to 30). On logistic it was higher in 3 of 3 seeds (104 to 114 against
-    91 to 97), but Martin's own range over 5 seeds of the same estimator
-    reaches 105, so logistic is not a finding.
+    91 to 97, both ArviZ bulk ESS on the same seeds).
   - **A reproducible failure.** With seed 3 on the small time series, one
     of nutpie's chains had its step size collapse to 7e-189. It never moved
     (R-hat 1.55, lowest ESS 7), and the same happened in both runs of that

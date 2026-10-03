@@ -1,5 +1,8 @@
 # Hierarchical time series: Martin against rustmc, Stan and hand-written Rust
 
+> **Status, 2026-10-02.** This report records the time-series comparison as it stood after the early rounds; Martin's gradient and sampler have since become faster, and the comparison with hand-written Rust was redone under one sampler. The current figures are in the
+> [README](../README.md) and the [same-sampler benchmark](../bench/same_sampler/README.md).
+
 ## The problem
 
 A panel of G series observed at T = 150 times: counts with a series-specific
@@ -148,11 +151,11 @@ differs by more than 3 MCSE in any pair where both runs mixed.
   review (R-hat 2.1 to 2.3 at this size). Martin's posterior means agree with
   Stan's; rustmc's do not. How long rustmc would need to converge was not
   measured.
-- **Martin against the best hand-written Rust: the Rust is slightly faster.**
-  The gradient alone takes 4.22 µs against 4.07 µs on the small model and
-  53.4 against 52.2 µs on the large one, and the Rust was faster in nearly
-  every run ([compiler-round.md](compiler-round.md); before this round it was
-  1.8x faster). Whole small runs take 6.6 to
+- **Martin against the best hand-written Rust, at the time of this report:
+  the Rust was slightly faster.** The gradient alone took 4.22 µs against
+  4.07 µs on the small model and 53.4 against 52.2 µs on the large one
+  ([compiler-round.md](compiler-round.md); before that round it was 1.8x
+  faster). Martin has since moved ahead (3.5 and 44 µs; see the README). Whole small runs take 6.6 to
   6.7 s for both over three seeds. The Rust uses 591 lines of intrinsics
   against Martin's 18 lines of model.
 

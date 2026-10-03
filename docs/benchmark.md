@@ -1,13 +1,17 @@
 # Benchmark report
 
+> **Status, 2026-10-02.** This report records the first benchmark rounds; later compiler work changed several of its numbers (the logistic gradient is now 23.6 µs, Newton 0.114 s, the time-series gradient 3.5 / 44 µs). The current figures are in the
+> [README](../README.md) and the [same-sampler benchmark](../bench/same_sampler/README.md).
+
 ## Verdict
 
 The original gate asked two things. Can Martin express a realistic small
 numerical problem materially more clearly than equivalent Rust? Does it run
 within about 2x of a straightforward Rust implementation? It does both, with
 room to spare. Against expert, hand-vectorised Rust, Martin is now faster on
-the logistic gradient and on Newton's method, and 2 to 4% slower on the
-time-series gradient ([compiler-round.md](compiler-round.md)).
+the logistic gradient, on Newton's method and on the time-series gradient
+(see the README; the time-series lead comes from a memory layout the Rust
+baselines did not use).
 
 | problem | Martin | straightforward Rust | tuned Rust | max-effort Rust |
 |---|---|---|---|---|
@@ -257,6 +261,9 @@ Line counts are a crude measure, so here is what the extra Rust lines are.
 - Domain types such as Positive are facts about real numbers. Plain arithmetic
   that underflows (`exp(-1000)` is 0) is not checked at run time; see
   [architecture.md](architecture.md).
-- Compiling a Martin program takes 60 to 160 ms; the runtime is compiled once and
-  cached. rustc takes about 200 to 260 ms for these single-file baselines.
-- Kernels are single-threaded; chains run in parallel.
+- Compiling a Martin program took 60 to 160 ms in these rounds; models that
+  now get narrow-data variants take 0.4 to 1 s (four copies of the model
+  code). The runtime is compiled once and cached. rustc takes about 200 to
+  260 ms for these single-file baselines.
+- In these rounds kernels were single-threaded and chains ran in parallel;
+  the fused scan kernel can now also split across a chain's threads.

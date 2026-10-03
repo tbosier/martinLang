@@ -304,8 +304,8 @@ only the times differ.
 
 Other agents' jobs shared the 12-core, 24-thread Ryzen 9 5900X throughout:
 the load average was 15.6 to 23.5 in the first run and 23.5 to 32.0 in the
-second, so wall times, and so ESS per second, are noisy (the same full run
-took 67 s in the first and 470 s in the second). Gradients per effective
+second, so wall times, and so ESS per second, are noisy (full-NUTS runs at
+G = 250 took anywhere from 67 to 500 s). Gradients per effective
 draw do not depend on load and are the steadier comparison.
 `bench/kalman/results.json` (second run) and `results_run1.json` (first)
 hold everything; `report.py` prints the tables.

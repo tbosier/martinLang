@@ -2,7 +2,7 @@
 
 ## The goal
 
-The long-term aim is the fastest system there is for numerical
+The long-term aim is a system that is as fast as possible for numerical
 computation: models, optimisation and statistical machine learning, with
 every layer below the source language open to specialisation. It starts
 with one domain, because depth in one domain is what makes the speed

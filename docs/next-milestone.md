@@ -1,5 +1,8 @@
 # Next milestone: do first-class mathematical types pay for themselves?
 
+> **Status, 2026-10-02.** Written before the later compiler rounds; the gaps listed under "Known performance gaps" have since moved (see compiler-round.md). The current figures are in the
+> [README](../README.md) and the [same-sampler benchmark](../bench/same_sampler/README.md).
+
 ## Where the prototype leaves the question
 
 The prototype already has four optimisations that come from mathematical
@@ -57,8 +60,8 @@ exposed places where hand-written code was faster than Martin. None needed new
 language features.
 
 1. **Scans across many series: mostly closed.** The dynamic Poisson gradient
-   was 1.8x slower than the Rust; it is now 2 to 4% slower (consistently, over
-   11 runs), through a column-major layout the compiler chooses and a
+   was 1.8x slower than the Rust; it was then 2 to 4% slower (consistently, over
+   11 runs), and is now about 15% faster, through a column-major layout the compiler chooses and a
    vectorised, fused scan kernel. See
    [compiler-round.md](compiler-round.md).
 2. **Several kernels streaming the same large matrix: closed.** Newton's

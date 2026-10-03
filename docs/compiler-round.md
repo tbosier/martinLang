@@ -1,5 +1,8 @@
 # Compiler round: closing the gaps with max-effort Rust
 
+> **Status, 2026-10-02.** This file is a log of the compiler rounds, each with the numbers measured at the time; later rounds supersede earlier figures. The current figures are in the
+> [README](../README.md) and the [same-sampler benchmark](../bench/same_sampler/README.md).
+
 The previous round left two problems where hand-written Rust (AVX2
 intrinsics, glibc vector math) beat Martin: the dynamic Poisson gradient (Rust
 1.8x faster) and Newton's method (Rust 1.55x faster). This round changed only
@@ -355,11 +358,10 @@ pass.
 
 ### Not done
 
-- The README's gradient table (4.22 / 53.4 µs against the max-effort
-  Rust's 4.07 / 52.2 µs) predates the blocked layout and was not re-run
-  with `bench/compiler_bench.py`; the measurements above suggest Martin's
-  large-model gradient is now faster than that Rust figure, but they were
-  not taken under the benchmark's conditions.
+- At the time, the README's gradient table (4.22 / 53.4 µs against the
+  max-effort Rust's 4.07 / 52.2 µs) predated the blocked layout. It has
+  since been replaced by the same-sampler results (3.56 / 44.4 µs against
+  4.10 / 52.9 µs).
 - The leaf benchmark covers steady-state leaves only (no merges, eps = 0);
   the whole runs are the measurement that counts.
 

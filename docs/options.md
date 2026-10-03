@@ -63,6 +63,20 @@
   Runtime section of [architecture.md](architecture.md)). Stan's warmup
   stays the default.
 
+- `MINT_PRINT_GRAD=1`, with `MINT_BENCH_GRAD`, prints the log density and
+  every gradient component at the benchmark point.
+- `MINT_THETA=FILE` evaluates at a given unconstrained point instead (see
+  [kalman.md](kalman.md)).
+- `MINT_TARGET_ACCEPT` sets the step-size adaptation's target acceptance
+  (default 0.8); `MINT_METRIC_INIT=0` starts the `grad` metric from the
+  identity; `MINT_WARMUP_ITERS` and the other `MINT_WARMUP_*` variables
+  override parts of the fast warmup, and `MINT_LOWRANK_*` parts of the
+  low-rank metric, for experiments (see the Runtime section of
+  [architecture.md](architecture.md)). Most of these are read with `atoi`
+  or `atof` and not validated: a malformed value silently becomes 0.
+- Under `MINT_WARMUP=fast` every chain starts near the same point, so split
+  R-hat is a weaker convergence check than under Stan's warmup.
+
 ## Compiler switches
 
 Each turns one optimisation off, for measuring it:
@@ -70,13 +84,14 @@ Each turns one optimisation off, for measuring it:
 `--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
 `--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`,
 `--no-narrow-data`, `--no-negzero-sums`, `--no-collapse` (sample a latent
-random walk with NUTS instead of integrating it out), and `--strict-fp` (strict IEEE
-evaluation order, no vector math). `--fused-leapfrog` turns one on (see
+random walk with NUTS instead of integrating it out), and `--strict-fp` (no reassociation, FMA
+contraction or vector math; loop fission, sufficient statistics and the scan
+layout stay on and still change the order of some sums). `--fused-leapfrog` turns one on (see
 `MINT_FUSED_LEAPFROG` above).
 
 ## Narrow data
 
- When `sample()` starts, the generated code checks the data
+When `sample()` starts, the generated code checks the data
 vectors and matrices that the model's vector kernels read (up to a limit of
 four variants of the model code), and where every value is exactly an int8,
 int16 or float, the kernels read a copy in that type and convert in
@@ -89,4 +104,7 @@ sums that start at -0.0, `--no-negzero-sums`; each alone gives 1 to 2%).
 The logistic gradient did not change measurably, because its real-valued X
 is not exact in float and stays double. It costs build time:
 those two models now take 0.56 and 0.37 s to build instead of 0.22 and
-0.14 s. See [architecture.md](architecture.md#narrow-data).
+0.14 s, and a large model can take much longer (a 70-statement model: 47 s
+instead of 15 s). In the later same-sampler measurements `--no-narrow-data`
+was no slower (3.49 against 3.56 µs, 44.6 against 44.4 µs), so the gain
+credited above is not established on its own. See [architecture.md](architecture.md#narrow-data).

@@ -24,9 +24,13 @@ models, and every number below comes from files in `bench/`.
 
 **Same sampler, different languages.** Martin, hand-written Rust and Stan's
 C++ (through BridgeStan) were run under the same NUTS implementation, with the
-same warmup, settings and seeds; only the code computing the log density and
-its gradient differs, and all of them agree on the gradient to about 3e-14
-([rules and full results](bench/same_sampler/README.md)).
+same warmup, settings, seeds and thread budget; what differs is the code
+computing the log density and its gradient (and, for Martin, the parameter
+order inside the sampler: see below). All of them agree on the gradient to
+about 3e-14 ([rules and full results](bench/same_sampler/README.md)). These
+runs were made at commit de58040; the runtime has changed since (streaming
+summaries, the Kalman collapse, the low-rank merge), and a quick rerun at the
+current commit gave similar ratios.
 
 Time per gradient, µs:
 
@@ -48,21 +52,42 @@ the large model):
 | logistic regression | **0.38 s** | 0.59 s | | 0.64 s |
 | eight schools | 5.5 ms | 5.7 ms | | 16.6 ms |
 
+What to read into this:
+
+- **On the time series, Martin's lead comes from its memory layout.** Its
+  compiler stores the random-walk matrix in blocks of 8 series, column by
+  column, and the runtime converts the sampler's vector to that order
+  (`mint_set_layout`). The Rust baselines kept the user's row-major order;
+  the runtime offers them the same hook, but the harness did not use it.
+  With the layout switched off, Martin is slower than both Rust versions
+  (7.35 µs against 4.10 and 3.73 µs, and 96.2 µs against 52.9 and 46.6 µs).
+  So the result is that Martin's compiler finds this layout from 18 lines,
+  not that Rust cannot have it.
 - "Rust, max effort" is hand-written with AVX2 intrinsics and glibc's vector
-  math. "Rust with Martin's tricks" also has Martin's table-driven `exp` and
-  splits its gradient across threads; against it Martin's lead is 5 to 8%.
-  The Rust keeps the parameter order the shared sampler fixes, so it cannot
-  use the column-major layout Martin's compiler chooses; nobody has
-  established what the remaining gap comes from.
-- Stan's gradient on the large model ran on one thread (no `reduce_sum`
-  version was written), and its large runs were not interleaved with the
-  others.
+  math. "Rust with Martin's tricks" (`baselines/dynpois_par.rs`, 827 lines)
+  also has Martin's table-driven `exp` and splits its gradient across threads;
+  against it Martin's lead is 5 to 8%.
+- On the large model every implementation gets 3 sampler threads per chain,
+  but the max-effort Rust and Stan compute their gradient on one of them, so
+  the like-for-like whole-run comparison is 62.4 s against 65.2 s for the
+  threaded Rust, not against 98.6 s. Stan's large runs were not interleaved
+  with the others. On eight schools, Stan's column is mostly BridgeStan's
+  per-call cost.
+- The logistic and Newton Rust baselines were written early and not re-tuned
+  while Martin's compiler gained the techniques behind these numbers (its own
+  vector `exp` and `log1p`, the tiled Gram kernel, row fusion). On the time
+  series, giving the Rust Martin's tricks cut the gap from 15 to 19% to 5 to
+  8%; a similar effort on these two was not made.
 - Newton's method for logistic regression (200,000 rows, 50 features, 10
   iterations) takes 0.114 s against 0.209 s for the max-effort Rust
   ([merged build](bench/merged_vs_ref.md); the Rust figure was measured once
   and frozen).
-- The Martin programs are 15 to 18 lines; the Rust is 92 to 105 lines plus
-  shared SIMD helpers, and 591 lines for the time series.
+- The Martin programs are 15 to 18 lines; the max-effort Rust is 92 to 105
+  lines plus shared SIMD helpers, and 592 lines for the time series. The
+  eight-schools Rust is plain Rust.
+- A pass of the small whole runs taken while other jobs loaded the machine
+  reversed the time-series ranking (max-effort Rust 7.28 s, Martin 9.98 s;
+  `bench/same_sampler/results/whole_small_loaded.json`).
 
 ## Work the compiler removes
 
@@ -71,24 +96,35 @@ the large model):
 with Gaussian noise and unknown scales, `mintc` finds the walk, integrates it
 out exactly with a Kalman filter per series, and NUTS samples the 23 (G = 20)
 or 253 (G = 250) remaining parameters instead of 3,023 or 37,753; the walk is
-drawn back afterwards. Over three seeds the lowest effective sample size of
-the remaining parameters per gradient was 100 to 146 times that of full NUTS
-on the non-centred form, and 400 to 790 times on the centred form as written,
-though each collapsed gradient costs 1.8 to 3.5 times as much. The log density
-matches a dense Gaussian computation to about 1e-15 on small panels, and the
-posterior matches full NUTS within Monte Carlo error. Only a local-level walk
-with Gaussian observations is recognised so far.
+drawn back afterwards. Over three sampler seeds, on one simulated data set per size, the lowest effective
+sample size of the remaining parameters per gradient was 100 to 146 times
+that of full NUTS on the non-centred form. (The centred form as written did
+not converge in some runs, so its larger ratios are not quoted.) Each
+collapsed gradient costs 1.8 to 3.6 times as much, and drawing the walk back
+afterwards costs further gradients' worth per kept draw, which these ratios
+leave out; the recorded runs were also made before that step was rewritten.
+No hand-collapsed baseline (such as Stan's `gaussian_dlm_obs`) was run. The
+log density matches a dense Gaussian computation to about 1e-15 on small
+panels, and the posterior matches full NUTS within Monte Carlo error on small
+panels (see [kalman.md](docs/kalman.md) for how the threshold was set). Only a
+local-level walk with Gaussian observations is recognised so far.
 
 **Sampler options** ([details](docs/architecture.md)). Two opt-in changes to
 the runtime's NUTS cut the gradients needed per effective draw:
 `MINT_WARMUP=fast` (an L-BFGS starting point, a shorter warmup, chains pooling
 their adaptation) and `MINT_METRIC=lowrank` (Stan's diagonal metric plus up to
 24 directions estimated from warmup gradients). On the small time-series
-model, one seed, effective draws per second went from 517 with the defaults
-to 850 with the fast warmup and 1,470 with the low-rank metric
-([data](bench/wave_benchmarks.json)). They are not the defaults yet: four
-models is too few to rule out posteriors where they do worse. They are part
-of the shared runtime, so they speed up the Rust baselines too.
+model, over six seeds, the low-rank metric raised effective draws per second
+from 546 to 1,232 (median; [data](bench/metric_results.json)), and the fast
+warmup gave 1.35 to 1.90 times as many effective draws per gradient over eight
+seeds ([data](bench/warmup_results.json)). Both were measured before the
+streaming summaries, whose ESS estimate can read low for slowly mixing
+parameters, so reruns are not directly comparable. They are not the defaults
+yet: four models is too few to rule out posteriors where they do worse, and
+the fast warmup starts every chain near the same point, which weakens split
+R-hat as a convergence check. They are runtime algorithms, not compiler
+output: a Rust gradient linked to the same runtime would get them too
+(not measured).
 
 ## Two examples
 
