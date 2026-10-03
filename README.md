@@ -331,5 +331,7 @@ followed by row-major little-endian f64.
   Gaussian random walk out of a model
 - [Runtime and compiler options](docs/options.md)
 - [Flagship demo plan](docs/flagship-demo.md): where the project is going
+- [Roadmap](docs/roadmap.md): further optimisations and what other tools
+  already do
 - [Next milestone](docs/next-milestone.md)
 - [Tony](docs/mascot.md): the mascot and its artwork
