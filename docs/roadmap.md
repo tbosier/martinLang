@@ -127,6 +127,24 @@ and would be reported separately.
     runs only inside the fast warmup's starting point), and models with
     ordinary differential equations, with the same compiler-derived
     gradients (sensitivities).
+22. **Distributions and functions written in Martin.** Distributions are built
+    into the compiler today. Letting users define distributions and
+    functions in Martin, with their gradients derived by the compiler like
+    everything else, would grow the language where models need it.
+23. **The sampler in generated code, not in C.** The NUTS sampler is generic
+    C in the runtime and calls the model through a function pointer. Item 6
+    (a sampler generated with the model) moves it into code the compiler
+    emits for each model, which is where moving more of the system into
+    Martin's own code would buy speed.
+
+## Not planned
+
+- **Writing the compiler in Martin.** Martin is a language for mathematics;
+  a compiler needs strings, hash maps and general data structures, and
+  adding them would make it a general-purpose language without making any
+  model faster. `mintc` stays in Rust.
+- **Replacing LLVM.** No measured kernel has shown LLVM's instruction choice
+  to be the limit ([roofline.md](roofline.md)).
 
 ## Order
 
