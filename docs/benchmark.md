@@ -2,14 +2,14 @@
 
 ## Verdict
 
-The original gate asked two things. Can Mint express a realistic small
+The original gate asked two things. Can Martin express a realistic small
 numerical problem materially more clearly than equivalent Rust? Does it run
 within about 2x of a straightforward Rust implementation? It does both, with
-room to spare. Against expert, hand-vectorised Rust, Mint is now faster on
+room to spare. Against expert, hand-vectorised Rust, Martin is now faster on
 the logistic gradient and on Newton's method, and 2 to 4% slower on the
 time-series gradient ([compiler-round.md](compiler-round.md)).
 
-| problem | Mint | straightforward Rust | tuned Rust | max-effort Rust |
+| problem | Martin | straightforward Rust | tuned Rust | max-effort Rust |
 |---|---|---|---|---|
 | logistic gradient (n=5000, p=20) | **32.8 µs** | 178 µs | 139 µs | 37.7 µs |
 | logistic, full NUTS run | **0.48 s** | 2.57 s | 1.92 s | 0.56 s |
@@ -22,10 +22,10 @@ The Rust baselines come in three levels of effort:
 - **Straightforward.** What a competent Rust programmer writes first.
 - **Tuned.** My best plain scalar Rust.
 - **Max effort.** Nightly Rust (LLVM 21) with AVX2 intrinsics and the same
-  glibc vector `exp` and `log` Mint uses. Its logistic version came from trying
+  glibc vector `exp` and `log` Martin uses. Its logistic version came from trying
   three structures and keeping the fastest.
 
-Two of the tricks the max-effort Rust used first are now in Mint's compiler:
+Two of the tricks the max-effort Rust used first are now in Martin's compiler:
 computing four row dot products that share loads of the parameter vector, and
 four-row gradient updates. Before that, the Rust was 18% faster on the logistic
 gradient.
@@ -35,9 +35,9 @@ For the hierarchical time-series model against rustmc and Stan, see
 
 ## What is and is not being compared
 
-- **Same sampler on both sides.** The Rust baselines call the Mint runtime's
+- **Same sampler on both sides.** The Rust baselines call the Martin runtime's
   NUTS through FFI, standing in for a sampler crate. The only difference is the
-  model code: Mint's compiled log density and gradient against Rust written by
+  model code: Martin's compiled log density and gradient against Rust written by
   hand. The gradient tables measure exactly that, at one fixed parameter point
   shared by every implementation (the runtime's `MINT_BENCH_GRAD`). The
   sampling tables add sampler overhead and model preparation (for sufficient
@@ -45,14 +45,14 @@ For the hierarchical time-series model against rustmc and Stan, see
   because the arithmetic differs in the last bits, so gradient counts differ by
   up to 4%. The counts are listed.
 - **Same answers.** `tests/run.sh` checks this at a fixed test point for every
-  benchmarked logistic and linear configuration, including each Mint flag
+  benchmarked logistic and linear configuration, including each Martin flag
   variant and the max-effort Rust: the log density and every gradient
   component agree with the Rust baselines to 1e-9 relative. Every Newton
-  variant, Mint's and the max-effort Rust's, produces the same coefficients to
+  variant, Martin's and the max-effort Rust's, produces the same coefficients to
   1e-8.
-- **LLVM versions.** Mint's IR goes through clang 22 (LLVM 22). Stable rustc
+- **LLVM versions.** Martin's IR goes through clang 22 (LLVM 22). Stable rustc
   1.89 uses LLVM 20 and nightly uses LLVM 21, so the max-effort baselines are
-  within one LLVM version of Mint.
+  within one LLVM version of Martin.
 - **One machine, one author.** I wrote the compiler, the examples and all the
   Rust baselines, apart from the hierarchical time-series comparison, where
   Stan and rustmc are external.
@@ -169,8 +169,8 @@ Each cell is 7 runs, interleaved, pinned to core 5; load average at start 1.54, 
 
 ## Where the speed comes from
 
-Most of Mint's own choices have a switch, so they can be measured. For the
-logistic gradient (n=5000, p=20; Mint 33 µs, tuned Rust 139 µs):
+Most of Martin's own choices have a switch, so they can be measured. For the
+logistic gradient (n=5000, p=20; Martin 33 µs, tuned Rust 139 µs):
 
 - **Loop fission.** `--no-fission` gives 97 µs. The row dot products, the
   elementwise density pass and the row gradient updates run as separate loops,
@@ -186,7 +186,7 @@ logistic gradient (n=5000, p=20; Mint 33 µs, tuned Rust 139 µs):
 
 Other choices:
 
-- **Newton.** Mint takes 0.160 s against the max-effort Rust's 0.206 s. Row
+- **Newton.** Martin takes 0.160 s against the max-effort Rust's 0.206 s. Row
   fusion runs the three statements that stream X as one loop over chunks of
   rows, so X is read once per iteration, and the Gram kernel updates 4 x 8
   tiles of H held in registers. `--no-gram-blocking` (the older row-by-row
@@ -194,9 +194,9 @@ Other choices:
   [compiler-round.md](compiler-round.md).
 - **Linear regression.** The sufficient-statistics rewrite changes the
   algorithm, not the code quality: each gradient is O(p²) instead of O(np).
-  Without it, Mint is still 2.7x faster than straightforward Rust (330 µs
+  Without it, Martin is still 2.7x faster than straightforward Rust (330 µs
   against 896 µs). Against allocation-free Rust using the same rewrite with
-  four-accumulator dot products, Mint is 2.5x faster per gradient (102 ns
+  four-accumulator dot products, Martin is 2.5x faster per gradient (102 ns
   against 258 ns); I have not isolated why. For a whole run the gap is 1.8x
   (7.8 ms against 13.9 ms), because the sampler dominates at this size.
 - **The sampler.** The runtime's NUTS was rewritten to share immutable states
@@ -206,7 +206,7 @@ Other choices:
   37,901-dimension model; the later changes in
   [hierarchical.md](hierarchical.md) (recomputed momenta, threads within a
   chain) take the large model to 4.5 to 5.2x. The logistic full-run numbers
-  above use the current runtime, for Mint and every Rust baseline alike.
+  above use the current runtime, for Martin and every Rust baseline alike.
 
 ## Clarity
 
@@ -223,13 +223,13 @@ Line counts are a crude measure, so here is what the extra Rust lines are.
   - the packing of the parameters into one vector.
 
   A wrong derivative does not crash; the sampler just explores the wrong
-  distribution. In Mint the model block states the model, and the compiler
+  distribution. In Martin the model block states the model, and the compiler
   derives the rest (checked against finite differences by `MINT_GRADCHECK=1`).
   The max-effort Rust adds intrinsics, transposes and tail handling on top of
   all of that.
-- **Newton.** The Mint version is the textbook update. The Rust versions are
+- **Newton.** The Martin version is the textbook update. The Rust versions are
   index loops over the Hessian and a hand-written Cholesky.
-- **Checked before running.** Mint rejects several things Rust accepts and
+- **Checked before running.** Martin rejects several things Rust accepts and
   runs, each a compile error with a hint (`examples/errors/`):
   - shape mismatches;
   - solving with `X' X`, which is only PSD;
@@ -257,6 +257,6 @@ Line counts are a crude measure, so here is what the extra Rust lines are.
 - Domain types such as Positive are facts about real numbers. Plain arithmetic
   that underflows (`exp(-1000)` is 0) is not checked at run time; see
   [architecture.md](architecture.md).
-- Compiling a Mint program takes 60 to 160 ms; the runtime is compiled once and
+- Compiling a Martin program takes 60 to 160 ms; the runtime is compiled once and
   cached. rustc takes about 200 to 260 ms for these single-file baselines.
 - Kernels are single-threaded; chains run in parallel.

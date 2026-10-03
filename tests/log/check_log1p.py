@@ -1,4 +1,4 @@
-"""Accuracy of Mint's vector log1p on [0, 1] (BernoulliLogit's softplus) as
+"""Accuracy of Martin's vector log1p on [0, 1] (BernoulliLogit's softplus) as
 the compiler emits it.
 
 Extracts @mint_log1p01_v4 from the IR of a program whose model uses it,

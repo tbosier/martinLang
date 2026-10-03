@@ -23,10 +23,10 @@ measure them separately:
   work the inference needs. Other systems can do this too (Stan's
   `gaussian_dlm_obs`, bssm, R-INLA, TMB), usually when the user writes the
   collapsed model by hand or picks the method;
-- **compiler:** Mint detects the structure from the plain model, chooses the
+- **compiler:** Martin detects the structure from the plain model, chooses the
   method, and generates faster code for whatever algorithm is chosen.
 
-## Where Mint is today
+## Where Martin is today
 
 Measured on one machine (Ryzen 9 5900X); see
 [compiler-round.md](compiler-round.md), [hierarchical.md](hierarchical.md)
@@ -80,7 +80,7 @@ million latent states without collapsing. That is the reduction to aim at;
 
 What exists is marked as such; everything else is planned.
 
-1. **Source.** Mint models: types for shapes, positivity and SPD matrices;
+1. **Source.** Martin models: types for shapes, positivity and SPD matrices;
    data and parameters declared separately. (Exists.)
 2. **Structure detection** in the typed model:
    - Kalman eligibility: transitions linear in the states with Gaussian
@@ -150,7 +150,7 @@ marginal.
   kernels generated. Every number it prints is computed from the model and
   data, not estimated.
 - **Baselines, two groups:**
-  - same algorithm as Mint's chosen plan, to isolate the compiler: collapsed
+  - same algorithm as Martin's chosen plan, to isolate the compiler: collapsed
     Stan (`gaussian_dlm_obs` where the model fits it), collapsed JAX/NumPyro,
     bssm (Laplace with importance correction), and a hand-optimised Rust
     implementation of the same collapsed algorithm;

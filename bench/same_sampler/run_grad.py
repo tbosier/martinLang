@@ -5,7 +5,7 @@ program's own logp entry point; no sampler).
 
 Runs are interleaved (every configuration once, in a shuffled order, then
 again), each pinned with taskset: single-threaded configurations to one
-hardware thread, the three-thread kernel configurations (Mint's parallel
+hardware thread, the three-thread kernel configurations (Martin's parallel
 fused kernel and rust_par with MINT_KERNEL_THREADS=3: what each chain uses
 during a large run) to three physical cores of one L3. Each run takes about
 --seconds; the repetition count is calibrated once per configuration.
@@ -21,7 +21,7 @@ clean runs with their count.
 
 The new Rust baseline's exp variants (DYNPOIS_EXP, see baselines/dynpois_par.rs)
 are measured as separate configurations, rust_par[fused] etc.; plain rust_par
-is its default (table). Mint is also built without the column-major layout
+is its default (table). Martin is also built without the column-major layout
 and without narrow data (mint[no-scan-layout] etc., mintc flags), the two
 things the Rust baseline cannot do under the shared parameter order. Before each round the busy fraction of every CPU is
 recorded (other work shares the machine).
@@ -51,7 +51,7 @@ for p in args.problems.split(","):
         configs.append((p, impl, 1))
     if p.startswith("dynpois"):
         configs += [(p, f"rust_par[{m}]", 1) for m in ("fused", "back", "glibc")]
-        # Mint without the two things the Rust cannot do: the column-major
+        # Martin without the two things the Rust cannot do: the column-major
         # layout of innov and the int8 copy of the counts
         configs += [(p, f"mint[{m}]", 1) for m in ("no-scan-layout", "no-narrow-data",
                                                     "no-scan-layout+no-narrow-data")]

@@ -11,7 +11,7 @@ OUT = os.path.join(ROOT, "build", "same_sampler")
 RESULTS = os.path.join(ROOT, "bench", "same_sampler", "results")
 MINTC = os.path.join(ROOT, "compiler", "target", "release", "mintc")
 
-# problem -> (Mint source, data-path rewrite, Stan model, Stan data, Rust baselines)
+# problem -> (Martin source, data-path rewrite, Stan model, Stan data, Rust baselines)
 PROBLEMS = {
     "dynpois_small": dict(mint="examples/dynamic_poisson.mint", mint_data=("data_small", "data_small"),
                           stan={"stan": "dynpois"}, json="dynpois_small",
@@ -94,7 +94,7 @@ def cpu_busy(seconds=1.0):
 
 
 def mint_program(problem, draws, warmup, chains, seed, flags=()):
-    """Builds (once) the Mint program for these sampler settings (and mintc
+    """Builds (once) the Martin program for these sampler settings (and mintc
     flags, for ablations); returns its path."""
     p = PROBLEMS[problem]
     src = open(os.path.join(ROOT, p["mint"])).read()

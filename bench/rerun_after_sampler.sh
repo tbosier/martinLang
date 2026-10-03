@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reruns everything that uses the Mint runtime after the sampler rewrite
+# Reruns everything that uses the Martin runtime after the sampler rewrite
 # and records the sampler settings in each result. SKIP_BENCH=1 skips bench.py.
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -1328,7 +1328,7 @@ impl Checker {
                 return err_help(
                     a.span,
                     format!("the {what} of {dist} must be Positive, but {who} is {}", a.ty.dom()),
-                    "declare the parameter as `param sigma: Positive`; Mint then samples log(sigma) and adds the Jacobian itself",
+                    "declare the parameter as `param sigma: Positive`; Martin then samples log(sigma) and adds the Jacobian itself",
                 );
             }
             Ok(())

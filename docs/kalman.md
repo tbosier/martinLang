@@ -1,6 +1,6 @@
 # Kalman collapse: integrating out a latent random walk
 
-This is the first case where Mint's compiler removes most of an inference
+This is the first case where Martin's compiler removes most of an inference
 problem instead of making it faster. In an unmodified model it finds a latent
 Gaussian random walk observed with Gaussian noise, integrates it out exactly
 with a Kalman filter, and lets NUTS sample only what is left. On the panel
@@ -105,7 +105,7 @@ the lower-triangular matrix of ones), which the Kalman filter evaluates in
 O(T) instead of O(T^3). The change of variables from `X` to the increments
 needs no Jacobian, because only the density of `y` is kept.
 
-Mint drops normalising constants (each `Normal` term lacks -0.5 log 2 pi),
+Martin drops normalising constants (each `Normal` term lacks -0.5 log 2 pi),
 and the collapsed term does too: it is the Gaussian log density of `y`
 without them. So the collapsed log density equals log of the integral of the
 full one over `X`, up to the constant G T log(2 pi) / 2, which sampling
@@ -123,7 +123,7 @@ K  = c Pp / F          m' = mp + K v          P' = Pp r[t] / F
 ```
 
 `P' = Pp r / F` is the update `Pp - K c Pp` written so that it stays
-positive. Compile-time differentiation in Mint is per observation, and this
+positive. Compile-time differentiation in Martin is per observation, and this
 recursion couples the observations, so the adjoint is written out by hand
 and runs as the filter's reverse pass, from t = T - 1 down, carrying the
 adjoints `mb`, `Pb` of `m'` and `P'` (both 0 after the last step):

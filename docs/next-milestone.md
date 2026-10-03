@@ -19,7 +19,7 @@ remove.
 
 ## The milestone
 
-Take models Mint did not choose, and let every type-driven optimisation be
+Take models Martin did not choose, and let every type-driven optimisation be
 switched off independently.
 
 1. **A fixed external benchmark set.** Take 10 models from
@@ -53,7 +53,7 @@ switched off independently.
 ## Known performance gaps
 
 Maximum-effort Rust (nightly, AVX2 intrinsics, the same glibc vector math)
-exposed places where hand-written code was faster than Mint. None needed new
+exposed places where hand-written code was faster than Martin. None needed new
 language features.
 
 1. **Scans across many series: mostly closed.** The dynamic Poisson gradient
@@ -87,7 +87,7 @@ These are fixed before the work starts:
 - **Pass:** at least 3 of the 10 models get at least 1.5x faster gradients from
   a type-driven pass (the median over 7 runs, with ranges not overlapping the
   pass-off configuration). All 10 must match the posteriordb reference
-  posteriors within 4 Monte Carlo standard errors. And Mint must be within 2x
+  posteriors within 4 Monte Carlo standard errors. And Martin must be within 2x
   of BridgeStan on gradient time for every model it can express.
 - **Stop:** if fewer than 3 models benefit, first-class types are a convenience
   for correctness (the SPD and Positive errors are still worth having) but not

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Times the current Mint build against the frozen Rust reference
+"""Times the current Martin build against the frozen Rust reference
 (bench/rust_reference.json), for quick iteration on the compiler.
 
 The Rust numbers were measured once; machine conditions drift by a few per
@@ -48,7 +48,7 @@ for _ in range(args.reps):
     for name, _, k in cases:
         res[name].append(run(name, k))
 print(f"load average {open('/proc/loadavg').read().split()[0]}; {args.reps} runs each")
-print("| problem | Mint median (range) | Rust reference median | Rust / Mint |")
+print("| problem | Martin median (range) | Rust reference median | Rust / Martin |")
 print("|---|---|---|---|")
 for name, _, k in cases:
     xs = res[name]

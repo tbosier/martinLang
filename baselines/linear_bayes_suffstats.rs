@@ -1,6 +1,6 @@
 //! Hand-optimised Rust: linear regression using sufficient statistics
 //! Z'Z, Z'y and y'y (Z = [1, X]) computed once, so each gradient is O(p^2).
-//! This is the rewrite Mint's compiler performs automatically. The gradient
+//! This is the rewrite Martin's compiler performs automatically. The gradient
 //! does not allocate and its dot products use four accumulators.
 use std::cell::RefCell;
 use std::sync::OnceLock;

@@ -1,4 +1,4 @@
-"""Accuracy of Mint's vector exp as the compiler emits it.
+"""Accuracy of Martin's vector exp as the compiler emits it.
 
 Extracts @mint_exp_v4 (and what it needs) from the IR of a program whose
 model uses it, links it into a C driver with clang, and compares against

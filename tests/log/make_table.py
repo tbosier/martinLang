@@ -1,4 +1,4 @@
-"""Generates the table of Mint's vector log (LOG_TAB in compiler/src/ir.rs).
+"""Generates the table of Martin's vector log (LOG_TAB in compiler/src/ir.rs).
 
 x = 2^k z with z in [0x3FE5F00000000000, 0x3FF5F00000000000) as bit patterns
 (about [0.6875, 1.375)); that range is split into 128 equal steps of the bit

@@ -1,17 +1,17 @@
 //! Max-effort Rust (nightly), second version: hierarchical dynamic Poisson
 //! panel (bench/dynpois/SPEC.md), log density and gradient written by hand
-//! with AVX2/FMA intrinsics, brought to the algorithmic level of Mint's
+//! with AVX2/FMA intrinsics, brought to the algorithmic level of Martin's
 //! compiled kernel where the shared sampler allows it.
 //!
 //! theta = [pop, beta[G], shared[T], innov[G*T] (row-major g*T + t)]: the
-//! user's order, which the shared sampler fixes. (Mint's compiled program
+//! user's order, which the shared sampler fixes. (Martin's compiled program
 //! stores innov column-major internally and converts at the sampler's
 //! boundary; that layout is not available here, see bench/same_sampler/README.md.)
 //!
 //! Against baselines/dynpois_max.rs (kept unchanged) this version adds the
-//! two tricks Mint's compiler uses that the first version did not:
+//! two tricks Martin's compiler uses that the first version did not:
 //!
-//! 1. Mint's table-driven exp (compiler/src/ir.rs, mint_exp_fast): x =
+//! 1. Martin's table-driven exp (compiler/src/ir.rs, mint_exp_fast): x =
 //!    (256 k + j) ln2/256 + r, e^x = 2^k * T[j] * (1 + q(r)) with the same
 //!    256-entry table (EXP_TAB, copied bit for bit), the same degree-4
 //!    polynomial and the same AVX2 gather, inline. Inputs with |x| > 708 or
@@ -20,12 +20,12 @@
 //!      table  (the default) a separate tight pass over the block's eta,
 //!             replacing dynpois_max.rs's glibc calls: the fastest;
 //!      fused  inside the forward pass (eta, exp, the density terms and
-//!             r = y - exp(eta) per step, storing r), as Mint does with its
+//!             r = y - exp(eta) per step, storing r), as Martin does with its
 //!             column-major layout: about 20% slower here;
 //!      back   inside the backward pass: slower than table;
 //!      glibc  glibc's _ZGVdN4v_exp in the separate pass, i.e. dynpois_max.rs's
 //!             kernel with only the threading added.
-//! 2. The gradient is split across the chain's threads like Mint's parallel
+//! 2. The gradient is split across the chain's threads like Martin's parallel
 //!    fused scan kernel (compiler/src/model.rs, gen_fused_scan and
 //!    par_kernel_call): blocks of eight rows (two AVX2 vectors of four
 //!    groups) are handed to the runtime's mint_par_groups with the thread
@@ -38,7 +38,7 @@
 //!    blocks of eight run on the calling thread.
 //!
 //! What it still does not do (not available under the shared sampler's
-//! parameter order): Mint's column-major storage of innov, which makes four
+//! parameter order): Martin's column-major storage of innov, which makes four
 //! groups at one time step one contiguous load. Here rows are brought into
 //! column form with half-width loads and unpacks, and the gradient goes back
 //! with 4x4 transposes, as in dynpois_max.rs.
@@ -137,7 +137,7 @@ unsafe fn exp4_slow(x: __m256d, fast: __m256d, out: __m256d) -> __m256d {
     std::mem::transmute(fv)
 }
 
-/// Mint's fast exp (compiler/src/ir.rs, mint_exp_fast), four lanes.
+/// Martin's fast exp (compiler/src/ir.rs, mint_exp_fast), four lanes.
 #[inline(always)]
 unsafe fn exp4(x: __m256d) -> __m256d {
     let shift = _mm256_set1_pd(6755399441055744.0); // 0x1.8p52
@@ -228,10 +228,10 @@ unsafe fn store_col1(r: &[*mut f64; 4], t: usize, c: __m256d) {
 }
 
 /// How exp(eta) is computed (DYNPOIS_EXP, read once; see the file header).
-const EXP_FUSED: u8 = 0; // Mint's table exp inside the forward pass
-const EXP_TABLE: u8 = 1; // Mint's table exp in a separate pass over the block
+const EXP_FUSED: u8 = 0; // Martin's table exp inside the forward pass
+const EXP_TABLE: u8 = 1; // Martin's table exp in a separate pass over the block
 const EXP_GLIBC: u8 = 2; // glibc's _ZGVdN4v_exp in a separate pass (dynpois_max.rs)
-const EXP_BACK: u8 = 3; // Mint's table exp inside the backward pass
+const EXP_BACK: u8 = 3; // Martin's table exp inside the backward pass
 
 /// One block of 4*V groups. Writes d/d innov for its rows, adds its
 /// reverse cumsums into acc (T vectors), and returns (per lane: sum over t
@@ -626,7 +626,7 @@ extern "C" fn constrain(unc: *const f64, out: *mut f64) {
 
 // ------------------------------------------------------------------ the exp table
 
-/// 2^(j/256) for j = 0..255, each correctly rounded: Mint's table
+/// 2^(j/256) for j = 0..255, each correctly rounded: Martin's table
 /// (compiler/src/ir.rs, EXP_TAB), copied bit for bit.
 #[repr(align(64))]
 struct Tab([u64; 256]);

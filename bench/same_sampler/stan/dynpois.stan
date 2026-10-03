@@ -4,7 +4,7 @@
 // log_density_gradient never does, and draws are taken with include_gq =
 // false).
 // Unconstrained order: pop, beta[1:G], shared[1:T], innov[1][1:T], ...,
-// innov[G][1:T], which is Mint's user order (innov row-major g*T + t).
+// innov[G][1:T], which is Martin's user order (innov row-major g*T + t).
 data {
   int<lower=1> G;
   int<lower=1> T;

@@ -168,7 +168,7 @@ fn dynamic_poisson() {
     has(&out, "gradients of beta (indexed by G): summed in registers");
     has(&out, "gradients of shared (indexed by T): per-lane partial sums");
     has(&out, "threads: the groups of 8 rows are split across the chain's threads");
-    has(&out, "math: Mint's exp (4 lanes)");
+    has(&out, "math: Martin's exp (4 lanes)");
     has(&out, "narrow data (checked when sample() starts):\n    y: tries int8, then int16, then float");
     has(&out, "4 variants of logp are compiled");
     has(&out, "sample() at line 25 in fn main: G, T known at run time");
@@ -183,7 +183,7 @@ fn dynamic_poisson() {
     has(&off, "line 17: innov ~ Normal(0, 0.08)\n      one flat loop over the G x T elements");
     // the vector kernels are gone, so nothing is read narrow
     lacks(&off, "narrow data (checked");
-    has(&off, "narrow data: none, no data is read by Mint's own vector kernels");
+    has(&off, "narrow data: none, no data is read by Martin's own vector kernels");
 
     let row_major = explain(f, &["--no-scan-layout"]);
     has(&row_major, "Matrix[G, T]: row-major (--no-scan-layout)");
@@ -253,7 +253,7 @@ fn logistic_bayes_and_linear() {
     has(&out, "fission kernel: one loop over chunks of 32 rows; per chunk, the row dot products of X * beta (4 rows at a time)");
     has(&out, "the density's exp(-|eta|) runs first, in a loop of its own over the chunk");
     has(&out, "rows left over: the last n mod 32 in groups of 4");
-    has(&out, "math: Mint's exp (4 lanes), Mint's log1p (4 lanes)");
+    has(&out, "math: Martin's exp (4 lanes), Martin's log1p (4 lanes)");
     has(&out, "the outcome is checked to be 0 or 1 when sample() starts");
     has(&out, "y: tries int8; ");
     has(&out, "(a BernoulliLogit outcome, checked to be 0 or 1, so int8 only)");
@@ -368,7 +368,7 @@ fn main() {
         &[],
     );
     has(&r, "row fusion: lines 5 to 7 run as one loop");
-    lacks(&r, "math: Mint's exp");
+    lacks(&r, "math: Martin's exp");
     lacks(&r, "exp inline");
     has(&r, "X' * X is PSD: a Gram product");
     has(&r, "norm(v) is NonNeg: a norm is always >= 0");

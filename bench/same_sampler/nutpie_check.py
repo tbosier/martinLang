@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Sanity check of Mint's sampler against nutpie, on the same gradient code.
+"""Sanity check of Martin's sampler against nutpie, on the same gradient code.
 
 Both samplers run the same compiled Stan model (BridgeStan .so from
-build.sh, STAN_THREADS) on the same data: Mint's runtime NUTS through
+build.sh, STAN_THREADS) on the same data: Martin's runtime NUTS through
 bs_driver, and nutpie's NUTS through its own BridgeStan binding. So the
 gradient code is identical and what differs is the sampler: its overhead
 per gradient and its adaptation (nutpie adapts the mass matrix from draws
-and gradients; Mint ports Stan's windowed warmup). This is a sampler
+and gradients; Martin ports Stan's windowed warmup). This is a sampler
 comparison, not a language comparison.
 
 Settings for both: 4 chains in parallel threads, 1000 warmup + 1000 draws,
@@ -14,9 +14,9 @@ the same seeds (the two samplers' random streams differ anyway), maximum
 tree depth 10, target acceptance 0.8 (both defaults).
 
 Measured per run:
-  - wall seconds: Mint, the runtime's own sampling time; nutpie, the
+  - wall seconds: Martin, the runtime's own sampling time; nutpie, the
     nutpie.sample() call (which also stores the trace in memory);
-  - gradients: Mint, the runtime's count; nutpie, the sum of n_steps over
+  - gradients: Martin, the runtime's count; nutpie, the sum of n_steps over
     warmup and kept draws (leapfrog steps, one gradient each), plus one per
     chain for the initial point;
   - microseconds per gradient per chain (wall x chains / gradients), and
@@ -127,7 +127,7 @@ if os.path.exists(gpath):
             grad_ns[row["problem"]] = row["ns_median_clean"] or row["ns_median"]
 
 out_path = os.path.join(common.ROOT, "bench", "same_sampler", args.out)
-res = {"what": "Mint's NUTS vs nutpie's NUTS on the same BridgeStan gradient", "versions": {},
+res = {"what": "Martin's NUTS vs nutpie's NUTS on the same BridgeStan gradient", "versions": {},
        "settings": {"chains": CHAINS, "warmup": WARMUP, "draws": DRAWS, "pinned": args.pin}, "runs": []}
 import nutpie  # noqa: E402
 import bridgestan  # noqa: E402

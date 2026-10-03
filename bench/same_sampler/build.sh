@@ -6,8 +6,8 @@
 #     installed CmdStan 2.40 (its Stan, Stan Math and stanc);
 #   - bs_driver, which runs a BridgeStan model under mint_sample;
 #   - the Stan (JSON) copies of the data.
-# Mint programs are built by the run scripts, one per seed (the seed is part
-# of a Mint program's source).
+# Martin programs are built by the run scripts, one per seed (the seed is part
+# of a Martin program's source).
 #
 # usage: bench/same_sampler/build.sh   (Python with numpy in $PY, default .venv/bin/python)
 set -euo pipefail
@@ -40,7 +40,7 @@ fi
 mkdir -p "$BS/make"
 # STAN_THREADS: the chains call one model concurrently (see bs_driver.c).
 # --O1 is the stanc optimisation level Stan recommends; -march=native as for
-# Mint's runtime and the Rust baselines.
+# Martin's runtime and the Rust baselines.
 cat > "$BS/make/local" <<EOF
 CMDSTAN = $CMDSTAN/
 STAN = \$(CMDSTAN)stan/

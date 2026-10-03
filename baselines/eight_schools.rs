@@ -1,9 +1,9 @@
 //! Straightforward Rust: eight schools, non-centred (examples/eight_schools.mint).
 //! The log density and its gradient are written by hand; the sampler is the
-//! Mint runtime's NUTS. With J = 8 there is nothing to vectorise.
+//! Martin runtime's NUTS. With J = 8 there is nothing to vectorise.
 //!
 //! theta = [mu, log tau, eta[J]]; tau = exp(theta[1]), with the log Jacobian
-//! log tau added (Mint does the same for a Positive parameter).
+//! log tau added (Martin does the same for a Positive parameter).
 
 #[path = "common.rs"]
 mod common;

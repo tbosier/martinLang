@@ -31,28 +31,28 @@ CORE = "2"
 # (problem, metric, K, {label: command})
 cases = [
     ("dynamic Poisson gradient, 3,171 parameters", "ns", 20000, {
-        "Mint before": [f"{old}/old_dynamic_poisson"],
-        "Mint after": ["build/cmp/new_dynamic_poisson"],
+        "Martin before": [f"{old}/old_dynamic_poisson"],
+        "Martin after": ["build/cmp/new_dynamic_poisson"],
         "max-effort Rust": ["build/rs_dynpois_max", "bench/dynpois/data_small/y.f64"],
     }),
     ("dynamic Poisson gradient, 37,901 parameters", "ns", 3000, {
-        "Mint before": [f"{old}/old_dpl"],
-        "Mint after": ["build/cmp/new_dpl"],
+        "Martin before": [f"{old}/old_dpl"],
+        "Martin after": ["build/cmp/new_dpl"],
         "max-effort Rust": ["build/rs_dynpois_max", "bench/dynpois/data_large/y.f64"],
     }),
     ("logistic gradient (n=5000, p=20)", "ns", 20000, {
-        "Mint before": [f"{old}/old_logistic_bayes"],
-        "Mint after": ["build/cmp/new_logistic_bayes"],
+        "Martin before": [f"{old}/old_logistic_bayes"],
+        "Martin after": ["build/cmp/new_logistic_bayes"],
         "max-effort Rust": ["build/rs_logistic_bayes_max"],
     }),
     ("linear regression gradient (sufficient statistics)", "ns", 200000, {
-        "Mint before": [f"{old}/old_linear_bayes"],
-        "Mint after": ["build/cmp/new_linear_bayes"],
+        "Martin before": [f"{old}/old_linear_bayes"],
+        "Martin after": ["build/cmp/new_linear_bayes"],
         "tuned Rust, same rewrite": ["build/rs_linear_bayes_suffstats"],
     }),
     ("Newton's method (n=200000, p=50), 10 iterations", "s", None, {
-        "Mint before": [f"{old}/old_logistic_newton"],
-        "Mint after": ["build/cmp/new_logistic_newton"],
+        "Martin before": [f"{old}/old_logistic_newton"],
+        "Martin after": ["build/cmp/new_logistic_newton"],
         "max-effort Rust": ["build/rs_logistic_newton_max"],
     }),
 ]

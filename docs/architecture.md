@@ -1,6 +1,6 @@
 # Compiler architecture
 
-Mint's compiler (`mintc`, about 5,800 lines of Rust with no dependencies) owns
+Martin's compiler (`mintc`, about 5,800 lines of Rust with no dependencies) owns
 every stage from source text to LLVM IR. LLVM, invoked through `clang -O3
 -march=native`, does the last step: instruction selection, register
 allocation, loop vectorisation and unrolling. A small C runtime (about 1,160
@@ -144,7 +144,7 @@ them.
   `X' * diag(w) * X + ...`, which may use earlier producers elementwise). Each
   chunk of X is read from memory once. Newton's three passes over X become
   one. Within a chunk, the producers' dot products run first (four rows per
-  pass over w), then the per-row values (the sigmoid with Mint's `exp`, the
+  pass over w), then the per-row values (the sigmoid with Martin's `exp`, the
   weights and coefficients) four rows at a time in vector registers.
 - The runtime allocator is declared `noalias` (fresh memory, like `malloc`)
   and returns 64-byte aligned buffers, so LLVM knows a new buffer overlaps
@@ -218,14 +218,14 @@ observations, and LLVM vectorises the middle one, calling glibc's vector
 the only materialised nodes are matrix-vector products and every operation
 has a vector form (everything but `log1p`), the statement runs as a
 **fission kernel** instead (`gen_fission_kernel` in `model.rs`): one loop
-over chunks of 32 rows, each taking the three steps in Mint's own
+over chunks of 32 rows, each taking the three steps in Martin's own
 `<4 x double>` code:
 
 1. the dot products, four rows at a time: one accumulator per row along the
    columns (a masked tail when p is not a multiple of 4), then a 4 x 4
    transpose-and-add that leaves the four results in one vector;
 2. the density and its derivatives on four observations at a time, with
-   Mint's `exp` and `log` inline, so they make no calls (a power other than
+   Martin's `exp` and `log` inline, so they make no calls (a power other than
    `^2` still calls glibc's vector `pow`). The density's own `exp`
    (BernoulliLogit's exp(-|eta|), PoissonLog's exp(eta)) and BernoulliLogit's
    `log1p` each run in a loop of their own over the chunk first, into L1
@@ -290,7 +290,7 @@ groups of 8 series, two vectors of four:
 - C and R, backward in time: the density and its derivatives, and the reverse
   running sums of the adjoints pushed through the scan's expression.
 
-Mint emits this as `<4 x double>` IR itself (`Fb::lanes`); LLVM's loop
+Martin emits this as `<4 x double>` IR itself (`Fb::lanes`); LLVM's loop
 vectoriser does not produce vector lanes across rows with the loop over time.
 Series left over run through the same generator with one lane, and so do
 statements with BernoulliLogit, `abs` or `log1p`. (`log1p` has no vector
@@ -330,7 +330,7 @@ Around the kernel:
   With more threads the log density and the gradients of scalar and
   column-indexed parameters are summed in a different order. That is
   deterministic for a given team size, and usually changes only the last
-  bits, but like Mint's other reassociated sums it can change a component
+  bits, but like Martin's other reassociated sums it can change a component
   by more when large terms cancel.
 - On the large dynamic Poisson model (250 series, 31 groups) the gradient
   took 53 µs on one thread and 21.5 µs on three cores that share an L3
@@ -391,7 +391,7 @@ every kernel.
 
 Data reaches a model through `sample()`, and the generated `init` already
 copies some of it (the scan layout's transposed matrices). It also looks at
-the values. For each data vector or matrix that Mint's own vector kernels
+the values. For each data vector or matrix that Martin's own vector kernels
 load (the vectorised scan kernel and the statements it absorbs, and the
 fission kernel), up to a limit described below, the runtime's `mint_narrow`
 tries the types allowed for that buffer, narrowest first, and makes a copy
@@ -427,7 +427,7 @@ changed in the last bit (found by the independent review). So each
 converted value passes through an empty inline asm, which emits no
 instruction but makes the value as opaque to the optimiser as a load
 (`llvm.arithmetic.fence` did not prevent the difference). And only vector
-code (lanes > 1), which is Mint's own, reads the copy: scalar loops
+code (lanes > 1), which is Martin's own, reads the copy: scalar loops
 (leftover rows, the fission kernel's last n mod 4 rows, statements that are
 not vector kernels) keep reading doubles, because LLVM vectorises those and
 its choice of vector width and interleaving, and so the order of a
@@ -455,7 +455,7 @@ arithmetic once multiplies are fused into adds: with the add gone, the
 product that was its operand can be fused into the next add without being
 rounded, which can change a result in the last bits (it does on
 `x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`, found by the
-second review). Mint's floating-point rules allow that (every add and
+second review). Martin's floating-point rules allow that (every add and
 multiply carries `contract`, below). On the benchmark models the log
 densities, gradients and draws are byte-identical to the previous
 compiler's, and with `--no-narrow-data --no-negzero-sums` their IR is the
@@ -498,21 +498,21 @@ across 8 series with 4 x 4 in-register transposes.
 
 ## Floating-point semantics
 
-Mint treats arithmetic as arithmetic on reals, within documented limits:
+Martin treats arithmetic as arithmetic on reals, within documented limits:
 
 - Every `fadd`/`fmul` carries `contract`, which allows fused multiply-add.
 - Reductions (sums, dot products) carry `reassoc`, so LLVM may reorder them and
-  use several vector accumulators. This is the main reason Mint's dot products
+  use several vector accumulators. This is the main reason Martin's dot products
   are faster than a plain Rust `iter().sum()`, which must add strictly left to
   right.
 - With `-fveclib=libmvec`, `exp` and `log` in loops LLVM vectorises call
   glibc's 4-lane versions, which glibc documents as accurate to within 4 ulp.
   The scalar versions are under 1 ulp.
-- In vector code Mint emits itself (the scan kernel, the fission kernel) and
-  in the fused row loop, `exp` is Mint's own (`ir.rs`, `mint_exp_fast`): at
+- In vector code Martin emits itself (the scan kernel, the fission kernel) and
+  in the fused row loop, `exp` is Martin's own (`ir.rs`, `mint_exp_fast`): at
   most 2 ulp over 3e7 test inputs, with NaN, infinities, overflow and
   subnormal results as in libm. `--no-inline-exp` uses `llvm.exp` everywhere.
-- In the fission kernel, `log` is Mint's own too (`ir.rs`, `mint_log`):
+- In the fission kernel, `log` is Martin's own too (`ir.rs`, `mint_log`):
   x = 2^k z with z in about [0.684, 1.371), z/c - 1 = r from a 128-entry
   table of 1/c and log c (two gathers; the step that holds 1 has c = 1, so
   there is no cancellation near 1), and a degree-7 polynomial for
@@ -531,7 +531,7 @@ Mint treats arithmetic as arithmetic on reals, within documented limits:
   `--no-fission-kernel`, `log1p(e)` is computed as `log(1 + e)`, because `log`
   has a vector version; that costs an absolute error of up to about 1e-16
   per observation. In the fission kernel's vector code (every row but the
-  last n mod 4, which run in scalar code) it is Mint's own `log1p` on [0, 1]
+  last n mod 4, which run in scalar code) it is Martin's own `log1p` on [0, 1]
   (`mint_log1p01`), which takes q = 1/(1 + e) (computed once, for the
   sigmoid too): m = round(256 (1 - q)), 1 - m/256 is exact, and
   r = e (1 - m/256) - m/256 is one fused multiply-add on the exact e, so

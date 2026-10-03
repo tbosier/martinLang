@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Checks that every implementation computes the same log density (up to the
-constant each one drops) and the same gradient as Mint, and that the Stan
+constant each one drops) and the same gradient as Martin, and that the Stan
 models are safe to call from the chains' threads.
 
 1. At the runtime's benchmark point, through each program's own entry point
    (MINT_BENCH_GRAD=1 MINT_PRINT_GRAD=1, so the code path is the one the
-   sampler calls, including Mint's layout conversion): the gradient of every
-   implementation against Mint's, component by component, and the log
+   sampler calls, including Martin's layout conversion): the gradient of every
+   implementation against Martin's, component by component, and the log
    density difference against the constant that implementation is known to
    drop (computed here from the model's scales).
 2. At random points, through BridgeStan's Python interface on the same
@@ -17,8 +17,8 @@ models are safe to call from the chains' threads.
    model object and with one model per chain (BS_MODEL_PER_CHAIN=1), and a
    repeat of the shared run: the draws must be byte-identical. (Evidence, not
    proof: a race need not show up in a given run.)
-Also at the benchmark point: Mint built without its column-major layout and
-narrow data, and Mint's and rust_par's gradients on 3 kernel threads.
+Also at the benchmark point: Martin built without its column-major layout and
+narrow data, and Martin's and rust_par's gradients on 3 kernel threads.
 4. The new Rust baseline (baselines/dynpois_par.rs) against its scalar
    reference implementation, for each exp variant and several thread counts.
 
@@ -53,7 +53,7 @@ def dynpois_y(problem):
 
 
 def stan_constant(problem):
-    """log density kept by Mint minus Stan's (propto = true drops every term
+    """log density kept by Martin minus Stan's (propto = true drops every term
     that does not depend on the parameters: here each Normal's -log(scale))."""
     if problem.startswith("dynpois"):
         G, T = dynpois_y(problem).shape
@@ -65,7 +65,7 @@ def stan_constant(problem):
     raise KeyError(problem)
 
 
-# numpy references (Mint's convention: every Normal keeps -log(scale))
+# numpy references (Martin's convention: every Normal keeps -log(scale))
 def ref_logistic(theta, X, y):
     a, b = theta[0], theta[1:]
     eta = a + X @ b
@@ -91,8 +91,8 @@ def bench_point_checks(problem, report):
         out, _ = common.run(argv, dict(env, MINT_BENCH_GRAD="1", MINT_PRINT_GRAD="1"))
         res[impl] = common.parse_printed_grad(out)
     if problem.startswith("dynpois"):
-        # the variants timed in run_grad.py: Mint's ablations, and the
-        # threaded kernels of Mint and rust_par on 3 threads
+        # the variants timed in run_grad.py: Martin's ablations, and the
+        # threaded kernels of Martin and rust_par on 3 threads
         flags = ["--no-scan-layout", "--no-narrow-data"]
         argv, env = common.command(problem, "mint", mint_flags=flags)
         out, _ = common.run(argv, dict(env, MINT_BENCH_GRAD="1", MINT_PRINT_GRAD="1"))
@@ -117,7 +117,7 @@ def bench_point_checks(problem, report):
             "dim": len(g),
         }
         print(f"  {problem:14s} {impl:9s} D={len(g):6d} lp={lp:.12e} mint-lp={lp_m - lp:.10f} "
-              f"(expected {const:.10f}) grad max rel diff vs Mint {rows[impl]['grad_max_rel_diff_vs_mint']:.2e}")
+              f"(expected {const:.10f}) grad max rel diff vs Martin {rows[impl]['grad_max_rel_diff_vs_mint']:.2e}")
     report["bench_point"][problem] = rows
 
 

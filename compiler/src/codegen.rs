@@ -28,16 +28,16 @@ pub struct Opts {
     pub gram_block: usize,
     /// store matrices that are scanned along their last dimension column-major
     pub scan_layout: bool,
-    /// Mint's own inlinable exp instead of the vector math library's
+    /// Martin's own inlinable exp instead of the vector math library's
     pub inline_exp: bool,
     /// fuse consecutive statements that stream the rows of one matrix
     pub row_fusion: bool,
     /// run scan statements as one fused, row-blocked loop nest
     pub scan_fusion: bool,
     /// run a split likelihood (loop fission) as one loop over chunks of rows,
-    /// with the elementwise pass emitted as Mint's own vector code
+    /// with the elementwise pass emitted as Martin's own vector code
     pub fission_kernel: bool,
-    /// Mint's own vector log in the fission kernel instead of the vector
+    /// Martin's own vector log in the fission kernel instead of the vector
     /// math library's
     pub inline_log: bool,
     /// split a fused scan kernel's groups of rows across the chain's threads
@@ -390,9 +390,9 @@ fn switches(o: &Opts) -> Vec<String> {
 fn global_lines(m: &Module, o: &Opts) -> Vec<String> {
     let off = |flag: &str| if o.strict_fp { "--strict-fp".to_string() } else { flag.to_string() };
     let mut v = Vec::new();
-    v.push(if m.avx2 { "host: AVX2 and FMA (Mint's exp and log use its gathers; narrow data needs it)".to_string() } else { "host: no AVX2 and FMA (narrow data off)".to_string() });
-    v.push(if m.inline_exp { "exp: Mint's own in the vector code Mint emits (scan and fission kernels, fused row loops); llvm.exp elsewhere".to_string() } else { format!("exp: llvm.exp everywhere ({})", off("--no-inline-exp")) });
-    v.push(if m.inline_log { "log: Mint's own in the fission kernel's vector code; llvm.log elsewhere".to_string() } else { format!("log: llvm.log everywhere ({})", off("--no-inline-log")) });
+    v.push(if m.avx2 { "host: AVX2 and FMA (Martin's exp and log use its gathers; narrow data needs it)".to_string() } else { "host: no AVX2 and FMA (narrow data off)".to_string() });
+    v.push(if m.inline_exp { "exp: Martin's own in the vector code Martin emits (scan and fission kernels, fused row loops); llvm.exp elsewhere".to_string() } else { format!("exp: llvm.exp everywhere ({})", off("--no-inline-exp")) });
+    v.push(if m.inline_log { "log: Martin's own in the fission kernel's vector code; llvm.log elsewhere".to_string() } else { format!("log: llvm.log everywhere ({})", off("--no-inline-log")) });
     v.push(if uses_vecmath(o) {
         "llvm.exp and llvm.log in loops LLVM vectorises: glibc's vector versions (build passes -fveclib=libmvec to clang)".to_string()
     } else {
@@ -1633,7 +1633,7 @@ impl Cg<'_> {
             }
             // 2: per row, the producers' values, then the consumers'
             // coefficients and weights, in vector registers four rows at a
-            // time (Mint's own exp), leftover rows one at a time
+            // time (Martin's own exp), leftover rows one at a time
             let per_row = |cg: &mut Cg, ii: &str| {
                 let i = cg.f.iadd(&i0, ii);
                 for (k, r) in group.iter().enumerate() {

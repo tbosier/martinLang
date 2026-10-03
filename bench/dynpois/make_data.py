@@ -2,7 +2,7 @@
 
 Usage: python make_data.py G T SEED OUTDIR
 
-Writes OUTDIR/y.f64 (Mint format: u64 rows, u64 cols, little-endian, then
+Writes OUTDIR/y.f64 (Martin format: u64 rows, u64 cols, little-endian, then
 row-major little-endian f64), OUTDIR/y.npy (same array, shape (G, T)) and
 OUTDIR/truth.json (pop, beta[G], terminal state[G] = state[g, T]).
 

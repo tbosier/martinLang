@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs the Mint dynamic Poisson model on one dataset and writes the SPEC
+"""Runs the Martin dynamic Poisson model on one dataset and writes the SPEC
 results JSON and draws npz.
 
 usage: run_mint.py SIZE [WARMUP DRAWS] [--variant NAME --flags "..."]
@@ -79,8 +79,8 @@ json.dump({
     "implementation": args.variant, "G": G, "T": T, "chains": C, "warmup": args.warmup, "draws": N, "thin": 1,
     "wall_seconds": sampling, "gradients": grads,
     "extra": {"seed": 7 if args.rust else args.seed, "sampler": "mint runtime NUTS", **sampler_cfg},
-    "notes": ("hand-written AVX2 Rust log density (baselines/dynpois_max.rs), " if args.rust else "Mint-compiled log density, ")
-             + f"NUTS (Mint runtime), 4 chains in parallel threads; wall_seconds is the sample() call; "
+    "notes": ("hand-written AVX2 Rust log density (baselines/dynpois_max.rs), " if args.rust else "Martin-compiled log density, ")
+             + f"NUTS (Martin runtime), 4 chains in parallel threads; wall_seconds is the sample() call; "
              f"process wall {wall:.2f} s incl. data load and summary; compile {compile_s:.2f} s; flags '{args.flags}'",
 }, open(base + ".json", "w"), indent=2)
 os.remove(draws_path)

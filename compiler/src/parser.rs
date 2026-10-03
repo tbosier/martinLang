@@ -86,7 +86,7 @@ impl Parser {
                     return err_help(
                         self.span(),
                         format!("expected `fn` or `model`, found {}", describe(&t)),
-                        "a Mint file is a list of `fn` and `model` declarations",
+                        "a Martin file is a list of `fn` and `model` declarations",
                     )
                 }
             }

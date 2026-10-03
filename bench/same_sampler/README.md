@@ -1,10 +1,10 @@
 # One sampler, many gradient backends
 
-This harness compares Mint, hand-written Rust and Stan with identical
+This harness compares Martin, hand-written Rust and Stan with identical
 sampling algorithms. Everything except the code that computes the model's log
 density and gradient is shared:
 
-- the NUTS implementation (the Mint runtime's `mint_sample` in
+- the NUTS implementation (the Martin runtime's `mint_sample` in
   `runtime/mint_rt.c`, a port of Stan's `base_nuts`);
 - the warmup and metric adaptation (Stan's windowed warmup: step-size dual
   averaging and a diagonal metric);
@@ -27,20 +27,20 @@ the same unconstrained parameter vector, in the same order.
 
 | name | log density and gradient |
 |---|---|
-| `mint` | Mint's compiled model (`examples/*.mint`, settings rewritten per run) |
+| `mint` | Martin's compiled model (`examples/*.mint`, settings rewritten per run) |
 | `rust_max` | `baselines/dynpois_max.rs`, `baselines/logistic_bayes_max.rs`: nightly Rust, AVX2 intrinsics, glibc's vector `exp`/`log`, gradients by hand |
-| `rust_par` | `baselines/dynpois_par.rs`: the dynamic Poisson baseline brought up to Mint's algorithmic level (below) |
+| `rust_par` | `baselines/dynpois_par.rs`: the dynamic Poisson baseline brought up to Martin's algorithmic level (below) |
 | `rust` | `baselines/eight_schools.rs`: plain Rust (eight schools has 10 parameters; there is nothing to vectorise) |
 | `stan` | the Stan program in `stan/`, compiled by BridgeStan 2.9.0 against the installed CmdStan 2.40 (its Stan, Stan Math and stanc), `stanc --O1`, `g++ -O3 -march=native`, `STAN_THREADS`, and run by `bs_driver` |
 | `stan_glm` | logistic regression written with `bernoulli_logit_glm` (it turned out that `stanc --O1` already makes this rewrite: the two produce identical draws) |
 
-### Stan under Mint's sampler (`bs_driver.c`)
+### Stan under Martin's sampler (`bs_driver.c`)
 
 `bs_driver MODEL_model.so DATA.json DRAWS WARMUP CHAINS SEED` loads a
 BridgeStan model with `dlopen` and calls `mint_sample` with:
 
 - `logp` = `bs_log_density_gradient(model, propto = true, jacobian = true, ...)`.
-  Stan then drops every constant term, while Mint keeps each Normal's
+  Stan then drops every constant term, while Martin keeps each Normal's
   `-log(scale)`. The two log densities therefore differ by a constant, which
   the sampler never sees. `verify.py` checks that the difference is the
   expected constant, to 1e-13 relative (3.4e-9 absolute on the large model's
@@ -60,29 +60,29 @@ the model object is read-only. By default the chains share one model object.
 `verify.py` checks that a shared model, one model per chain and a repeat
 produce byte-identical draws.
 
-**Parameter order.** The Stan programs declare their parameters in Mint's
+**Parameter order.** The Stan programs declare their parameters in Martin's
 order. `bench/dynpois/dynpois.stan`'s `array[G] vector[T] innov`
-unconstrains row by row, which is Mint's user order for `innov: Matrix[G, T]`
+unconstrains row by row, which is Martin's user order for `innov: Matrix[G, T]`
 (a Stan `matrix[G, T]` would have been column-major and the wrong order).
 The copy in `stan/dynpois.stan` has the same model block and drops the
 generated quantities. The gradients agree component by component.
 
 ### The new Rust baseline (`baselines/dynpois_par.rs`)
 
-`dynpois_max.rs` is kept unchanged. The new file adds what Mint's compiler
+`dynpois_max.rs` is kept unchanged. The new file adds what Martin's compiler
 does and the shared sampler allows:
 
-- **Mint's table-driven exp**, with the same 256-entry table (copied bit for
+- **Martin's table-driven exp**, with the same 256-entry table (copied bit for
   bit), the same degree-4 polynomial and the same AVX2 gather, inline. Where
   to put it was measured. `DYNPOIS_EXP` selects:
   - `table` (the default): a separate tight pass over each block's `eta`,
     replacing `dynpois_max.rs`'s glibc calls. This is the fastest.
-  - `fused`: inside the forward pass, as Mint does. It measured about 20%
+  - `fused`: inside the forward pass, as Martin does. It measured about 20%
     slower than `table` here (1.19 to 1.24x over the passes). Why fusing
-    pays in Mint's code and not here was not established.
+    pays in Martin's code and not here was not established.
   - `back`: inside the backward pass.
   - `glibc`: `dynpois_max.rs`'s kernel with only the threading added.
-- **The gradient split across the chain's threads**, like Mint's parallel
+- **The gradient split across the chain's threads**, like Martin's parallel
   fused scan kernel. Blocks of eight series go to the runtime's
   `mint_par_groups`, with the thread count `mint_par_threads()` reports for
   the calling chain. That count is 3 per chain during a large run, and 1 (or
@@ -91,7 +91,7 @@ does and the shared sampler allows:
   adds them in thread order, so the result is deterministic for a given
   thread count.
 
-What it cannot do: **Mint's column-major storage of `innov`**. Mint's
+What it cannot do: **Martin's column-major storage of `innov`**. Martin's
 compiled program stores the matrix by columns internally and converts at the
 sampler's boundary (`mint_set_layout`), so four series at one time step are
 one contiguous load. The Rust baseline must keep the user's row-major order,
@@ -99,30 +99,30 @@ because the parameter vector's order is part of the shared interface. It
 brings rows into column form with half-width loads and unpacks, and writes
 the gradient back with 4x4 transposes.
 
-A consequence for the shared random numbers: Mint's initial points and
+A consequence for the shared random numbers: Martin's initial points and
 momenta for `innov` are drawn in its internal (column-major) order. On the
-dynamic Poisson model, Mint's chains therefore start from a permutation of
+dynamic Poisson model, Martin's chains therefore start from a permutation of
 the point the Rust and Stan chains start from. That is statistically
 equivalent, but not the same coordinates. On the other models all
 implementations start from the same point.
 
 ### Which tricks each implementation uses (dynamic Poisson)
 
-| | Mint | rust_max | rust_par | Stan |
+| | Martin | rust_max | rust_par | Stan |
 |---|---|---|---|---|
 | gradient | compile-time AD | by hand | by hand | reverse-mode autodiff at run time |
 | vectorised across series (4 per AVX2 vector) | yes | yes | yes | no (Eigen expressions within a series) |
 | column-major `innov` | yes | no (fixed order) | no (fixed order) | no |
-| exp | own table exp, fused into the pass | glibc vector exp, separate pass | own table exp (Mint's), separate pass | Eigen's vectorised exp on the values; `poisson_log_lpmf` forms its partials analytically |
+| exp | own table exp, fused into the pass | glibc vector exp, separate pass | own table exp (Martin's), separate pass | Eigen's vectorised exp on the values; `poisson_log_lpmf` forms its partials analytically |
 | narrow data (counts read as int8) | yes | no | no | no |
 | gradient split across the chain's threads | yes (3 per chain on the large model) | no | yes | no: the Stan program has no `reduce_sum`; a version with it was not written |
 
-Mint's two layout-dependent tricks were measured by turning them off
+Martin's two layout-dependent tricks were measured by turning them off
 (`run_grad.py`, `mint[no-scan-layout]`, `mint[no-narrow-data]`). Without the
-column-major layout, Mint's gradient takes 2.1 to 2.2x as long: 7.35 and
-96.2 µs, slower than both Rust versions. So Mint's code generator depends on
+column-major layout, Martin's gradient takes 2.1 to 2.2x as long: 7.35 and
+96.2 µs, slower than both Rust versions. So Martin's code generator depends on
 that layout, but the layout alone does not explain the remaining 5% between
-Mint and `dynpois_par.rs`, which gets close without it by transposing in
+Martin and `dynpois_par.rs`, which gets close without it by transposing in
 registers. Reading the counts as int8 made no measurable difference here:
 3.49 against 3.56 µs, and 44.6 against 44.4 µs. What the remaining 5% is
 was not established.
@@ -132,7 +132,7 @@ was not established.
 1. Only the `logp` function may differ. Never change sampler settings for one
    implementation. A new backend goes through `mint_sample`, or it is
    reported as a sampler comparison (like nutpie), not a language comparison.
-2. Keep the parameter order. Verify the gradient against Mint's at the
+2. Keep the parameter order. Verify the gradient against Martin's at the
    benchmark point and the log density difference against the expected
    constant (`verify.py`) before timing anything.
 3. Machine load is part of every number. Record the load average and CPU
@@ -174,7 +174,7 @@ not recorded. `results/results.md` has every row, with ranges.
 latest pass 12 to 15 of the 15 rounds were clean for each configuration;
 the clean medians are shown.
 
-| problem | Mint | Rust max effort | Rust v2 (`dynpois_par.rs`) | Stan via BridgeStan |
+| problem | Martin | Rust max effort | Rust v2 (`dynpois_par.rs`) | Stan via BridgeStan |
 |---|---|---|---|---|
 | dynamic Poisson, D = 3,171 | 3.56 | 4.10 (1.15x) | 3.73 (1.05x) | 51.0 (14.3x) |
 | dynamic Poisson, D = 37,901 | 44.4 | 52.9 (1.19x) | 46.6 (1.05x) | 654 (14.7x) |
@@ -189,7 +189,7 @@ quiet and was overwritten by this one.
 **Whole runs.** 4 chains, 1000 + 1000. Medians over 5 seeds, 3 for the
 large model:
 
-| problem | Mint | Rust max effort | Rust v2 | Stan |
+| problem | Martin | Rust max effort | Rust v2 | Stan |
 |---|---|---|---|---|
 | dynamic Poisson, small | 3.32 s | 3.76 s | 3.50 s | 28.3 s |
 | dynamic Poisson, large | 62.4 s | 98.6 s | 65.2 s | 737 and 741 s (two quiet seeds); 3887 s for a third seed run while about 16 threads were busy |
@@ -204,27 +204,27 @@ large model:
   that the posteriors match (`bench/dynpois` compares posterior means). On
   eight schools, where tree depth varies, counts at a seed differ by 3 to
   17%. ESS per gradient agrees within the spread between seeds.
-- **The new Rust baseline.** Its gradient is 5% slower than Mint's on one
+- **The new Rust baseline.** Its gradient is 5% slower than Martin's on one
   thread and 8% slower on three, where `dynpois_max.rs` is 15 to 19% slower.
-  On the large model its whole run is within 5% of Mint's (65.2 against
+  On the large model its whole run is within 5% of Martin's (65.2 against
   62.4 s); `dynpois_max.rs`, which does not split its gradient across the
   chain's threads, takes 1.6x as long. What the remaining 5 to 8% is was not
-  established. Mint without its column-major layout is 2.1x slower than
-  Mint, so its own code depends on that layout. Mint without narrow data is
+  established. Martin without its column-major layout is 2.1x slower than
+  Martin, so its own code depends on that layout. Martin without narrow data is
   no slower.
-- **Stan's gradient is 14 to 15x Mint's** on the time-series model, 1.8x on
-  logistic regression, and about 20x on eight schools. At 25 ns per Mint
+- **Stan's gradient is 14 to 15x Martin's** on the time-series model, 1.8x on
+  logistic regression, and about 20x on eight schools. At 25 ns per Martin
   gradient, the timing loop's own overhead is a large part of the eight
   schools ratio. Two things inflate Stan's gradient time and were not
   measured. One is BridgeStan's per-call cost: it copies the parameters and
   catches exceptions. The other is `STAN_THREADS`, which concurrent chains
   in one process require. On the large model the comparison also pits
-  Stan's single gradient thread against three for Mint and Rust v2, because
+  Stan's single gradient thread against three for Martin and Rust v2, because
   the Stan program has no `reduce_sum`. `stanc --O1` already rewrites the
   logistic likelihood to `bernoulli_logit_glm`.
 - **Whole-run cost per gradient is not gradient plus a fixed sampler cost.**
   Subtracting the pinned gradient time leaves about 51 to 55 µs per
-  gradient per chain for Mint and both Rust versions on the large model,
+  gradient per chain for Martin and both Rust versions on the large model,
   and about 150 µs for Stan. A constant of about 48 µs plus 16% of the
   gradient time fits all four. That suggests every gradient runs about 16%
   slower inside a 12-thread run than pinned alone, which would make Stan's
@@ -234,10 +234,10 @@ large model:
 - **nutpie, same Stan gradient.** This is a sampler comparison, with 3 seeds
   per cell.
   - **Time per gradient.** nutpie's time per gradient was higher on all
-    three problems. On one pinned chain it was 58 to 60 µs against Mint's
+    three problems. On one pinned chain it was 58 to 60 µs against Martin's
     54.7 to 55.8 µs on the small time series, and 2.5 to 3.0 µs against
     0.70 µs on eight schools. nutpie's time covers the whole `sample()`
-    call, including setup and storing 2000 draws per chain. Mint's covers
+    call, including setup and storing 2000 draws per chain. Martin's covers
     the sampling loop only. So the gap is an upper bound on any difference
     in per-gradient sampler overhead, and on eight schools (13,500
     gradients, 30 to 40 ms) it is mostly fixed cost.
@@ -247,7 +247,7 @@ large model:
     with 4 chains, and 0.47 to 0.66 against 0.86 to 1.27 with one chain.
     On eight schools nutpie was higher in 3 of 3 seeds (37 to 42 against 28
     to 30). On logistic it was higher in 3 of 3 seeds (104 to 114 against
-    91 to 97), but Mint's own range over 5 seeds of the same estimator
+    91 to 97), but Martin's own range over 5 seeds of the same estimator
     reaches 105, so logistic is not a finding.
   - **A reproducible failure.** With seed 3 on the small time series, one
     of nutpie's chains had its step size collapse to 7e-189. It never moved
@@ -256,7 +256,7 @@ large model:
 
 **Caveats.**
 
-- **Initial points.** These differ on the time-series model: Mint draws its
+- **Initial points.** These differ on the time-series model: Martin draws its
   initial point and momenta in its internal column-major order, so its
   chains start from a permutation of the Rust and Stan point. After the
   first rounding-dependent branch, every implementation's chains use the

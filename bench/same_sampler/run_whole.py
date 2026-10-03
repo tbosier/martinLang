@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Whole sampling runs with identical sampler settings: every implementation
-of a problem runs under the Mint runtime's NUTS (mint_sample) with the same
+of a problem runs under the Martin runtime's NUTS (mint_sample) with the same
 draws, warmup, chains and seed, so the sampler code, warmup, metric
 adaptation, initialisation and random number stream are the same; only the
 log density and gradient code differ.
@@ -42,7 +42,7 @@ args = ap.parse_args()
 out_path = args.out if os.path.isabs(args.out) else os.path.join(common.ROOT, "bench", "same_sampler", args.out)
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 res = json.load(open(out_path)) if os.path.exists(out_path) else {
-    "what": "whole runs under the shared Mint runtime NUTS, identical settings, interleaved",
+    "what": "whole runs under the shared Martin runtime NUTS, identical settings, interleaved",
     "settings": {"draws": args.draws, "warmup": args.warmup, "chains": args.chains}, "runs": []}
 assert res["settings"] == {"draws": args.draws, "warmup": args.warmup, "chains": args.chains}, \
     "settings differ from the runs already in this file"

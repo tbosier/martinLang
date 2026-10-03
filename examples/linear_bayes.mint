@@ -1,6 +1,6 @@
 // Bayesian linear regression with an unknown noise scale, sampled with NUTS.
 //
-// sigma is declared Positive, so Mint samples log(sigma), adds the Jacobian,
+// sigma is declared Positive, so Martin samples log(sigma), adds the Jacobian,
 // and the Normal(0, 5) prior becomes a half-normal automatically.
 //
 // Because y and X are data, the scale is one scalar, and the mean is linear

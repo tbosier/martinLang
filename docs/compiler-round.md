@@ -1,9 +1,9 @@
 # Compiler round: closing the gaps with max-effort Rust
 
 The previous round left two problems where hand-written Rust (AVX2
-intrinsics, glibc vector math) beat Mint: the dynamic Poisson gradient (Rust
+intrinsics, glibc vector math) beat Martin: the dynamic Poisson gradient (Rust
 1.8x faster) and Newton's method (Rust 1.55x faster). This round changed only
-the compiler and runtime, not the language: the Mint programs are the same
+the compiler and runtime, not the language: the Martin programs are the same
 text as before.
 
 ## Results
@@ -15,7 +15,7 @@ fixed point thousands of times, so no seed is involved. "Before" is the
 previous commit's compiler and runtime. The binaries' checksums, the commands
 and every measurement are in `bench/compiler_bench.json`.
 
-| problem | Mint before | Mint after | max-effort Rust |
+| problem | Martin before | Martin after | max-effort Rust |
 |---|---|---|---|
 | dynamic Poisson gradient, 3,171 parameters | 7.17 µs | 4.22 µs | **4.07 µs** |
 | dynamic Poisson gradient, 37,901 parameters | 95.6 µs | 53.4 µs | **52.2 µs** |
@@ -26,12 +26,12 @@ and every measurement are in `bench/compiler_bench.json`.
 - **Dynamic Poisson: 1.7 to 1.8x faster than before; the Rust is still
   slightly faster.** By medians the Rust is 3.7% faster on the small model and
   2.4% on the large one, and it is consistently so: all 11 of its runs on the
-  small model, and 10 of 11 on the large one, were faster than every Mint run.
+  small model, and 10 of 11 on the large one, were faster than every Martin run.
   Before this round the Rust was 1.8x faster.
 - **Newton: 1.9x faster than before, and 1.30x faster than the Rust.** Every
-  Mint run was faster than every Rust run. The coefficients agree with the
+  Martin run was faster than every Rust run. The coefficients agree with the
   Rust's to 4e-10.
-- **Logistic gradient: 1.15x faster than the Rust.** 10 of the 11 Mint runs
+- **Logistic gradient: 1.15x faster than the Rust.** 10 of the 11 Martin runs
   were faster than every Rust run. In this same measurement the previous
   compiler was already 1.09x faster than the Rust (the previous report called
   it a tie, from an earlier measurement); the further gain comes from the
@@ -42,13 +42,13 @@ Whole sampling runs of the small dynamic Poisson model, 4 chains,
 
 | program | sampling time, seeds 1 / 2 / 3 | µs per gradient per chain |
 |---|---|---|
-| Mint before | 8.42 / 8.51 / 8.50 s | 16.5 to 16.9 |
-| Mint after | 6.73 / 6.74 / 6.69 s | 13.3 |
+| Martin before | 8.42 / 8.51 / 8.50 s | 16.5 to 16.9 |
+| Martin after | 6.73 / 6.74 / 6.69 s | 13.3 |
 | max-effort Rust | 6.63 / 6.59 / 6.65 s | 13.1 to 13.2 |
 
 All nine runs mixed (highest R-hat 1.004). The Rust run had the higher lowest
-ESS for all three seeds (Mint after 2070, 1933, 1598; Rust 2294, 2663, 2455),
-and so did the Rust against the previous Mint, whose parameter layout is the
+ESS for all three seeds (Martin after 2070, 1933, 1598; Rust 2294, 2663, 2455),
+and so did the Rust against the previous Martin, whose parameter layout is the
 Rust's; with three seeds that could be chance, and it was not investigated.
 
 ## What changed
@@ -83,14 +83,14 @@ Each item has a switch, so its effect can be measured by turning it off.
    every gradient contribution to a matrix parameter happens there, its
    gradient is summed in a register and stored once, and is not zeroed first.
    Only the gradients that are accumulated are zeroed now.
-4. **Mint's own `exp`** (`--no-inline-exp`). In the vector code Mint emits,
+4. **Martin's own `exp`** (`--no-inline-exp`). In the vector code Martin emits,
    `exp` is a table-driven function in the IR: 2^(j/256) from a 256-entry table
    (one AVX2 gather), a 3-FMA polynomial, and a branch to a full-range version
    for |x| > 708 or NaN. Worst error found against a long double reference,
    3e7 inputs: 2 ulp; special values match libm. `tests/run.sh` repeats the
    check on the emitted IR (3e6 inputs and the special values). In isolation it takes
    0.57 ns per value against glibc's vector `exp` at 0.86 ns. It is used only
-   where Mint emits the vector code: in loops LLVM vectorises, its branch
+   where Martin emits the vector code: in loops LLVM vectorises, its branch
    would stop the vectoriser (that regression was caught and fixed during the
    round; see below).
 5. **Row fusion** (`--no-row-fusion`, and off under `--strict-fp`).
@@ -113,9 +113,9 @@ Each item has a switch, so its effect can be measured by turning it off.
 
 - Blocking the scan's rows by 16 in scalar code, with LLVM vectorising the
   inner loop: slower (inner loops too short).
-- Mint's `exp` as a Taylor polynomial (degree 13, Estrin): 0.96 ns per value,
+- Martin's `exp` as a Taylor polynomial (degree 13, Estrin): 0.96 ns per value,
   slower than glibc's.
-- Letting LLVM vectorise loops that call Mint's scalar `exp`: its
+- Letting LLVM vectorise loops that call Martin's scalar `exp`: its
   out-of-range branch blocks the vectoriser, and the logistic gradient went
   from 33 to 62 µs. Scalar code now keeps `llvm.exp` (glibc's vector version).
 - In row fusion, computing the chunk's dot products in a separate blocked
@@ -142,17 +142,17 @@ on the unfixed code:
 It also found that "level with the Rust" overstated the dynamic Poisson
 result, that the logistic "it was a tie" did not match this measurement, that
 the benchmark ran programs in a fixed order (now shuffled), and that the test
-suite did not exercise several of these paths or Mint's `exp` as emitted.
+suite did not exercise several of these paths or Martin's `exp` as emitted.
 Those are corrected above and in `tests/run.sh`.
 
 ## Caveats
 
 - **The Rust baselines were not changed.** Everything above could be written
   by hand in Rust: the column-major layout (which the Rust cannot choose,
-  because it shares Mint's parameter vector), a table-driven `exp`, a tiled
+  because it shares Martin's parameter vector), a table-driven `exp`, a tiled
   Gram kernel, or a call to a BLAS `dsyrk`. The comparison is with the Rust
   as written in the previous round, which already used intrinsics and glibc's
-  vector math. The claim is that Mint's compiler produces this from the
+  vector math. The claim is that Martin's compiler produces this from the
   18-line and 15-line programs; not that Rust cannot.
 - One machine (Ryzen 9 5900X, AVX2, no AVX-512), one data set per problem.
 - The dynamic Poisson large model's whole runs are dominated by the sampler,
@@ -178,8 +178,8 @@ Those are corrected above and in `tests/run.sh`.
 ## Follow-up: the fission kernel (logistic gradient)
 
 The logistic gradient's three fission passes (dot products, elementwise
-density, gradient updates) became one loop over chunks of 32 rows in Mint's
-own vector code, with Mint's `exp` and a new Mint `log` inline (see
+density, gradient updates) became one loop over chunks of 32 rows in Martin's
+own vector code, with Martin's `exp` and a new Martin `log` inline (see
 "Loop fission" in [architecture.md](architecture.md)). Switches:
 `--no-fission-kernel` (the three passes as before) and `--no-inline-log`.
 
@@ -221,7 +221,7 @@ What did not help (each measured, then removed):
   gather instead of two, as glibc does): slower in isolation (1.56 against
   1.36 ns per value) and less accurate (2.5 ulp).
 
-Mint's general `log` is still slower than glibc's vector `log` in isolation
+Martin's general `log` is still slower than glibc's vector `log` in isolation
 (about 1.25 to 1.35 against 1.1 ns per value). Inside the kernel, where
 glibc's calls spill every vector register, the two measured the same on a
 Normal model with an indexed scale and on a model with `log(u)`. The
@@ -357,7 +357,7 @@ pass.
 
 - The README's gradient table (4.22 / 53.4 µs against the max-effort
   Rust's 4.07 / 52.2 µs) predates the blocked layout and was not re-run
-  with `bench/compiler_bench.py`; the measurements above suggest Mint's
+  with `bench/compiler_bench.py`; the measurements above suggest Martin's
   large-model gradient is now faster than that Rust figure, but they were
   not taken under the benchmark's conditions.
 - The leaf benchmark covers steady-state leaves only (no merges, eps = 0);

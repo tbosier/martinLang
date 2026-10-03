@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Simulates a Gaussian random-walk panel from the model in
-examples/random_walk_panel.mint and writes it as Mint .f64 files.
+examples/random_walk_panel.mint and writes it as Martin .f64 files.
 
 usage: make_data.py G T SEED OUTDIR [--shared]
 

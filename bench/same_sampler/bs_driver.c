@@ -1,15 +1,15 @@
 // Runs a Stan model, compiled to a shared library by BridgeStan, under the
-// Mint runtime's NUTS sampler (runtime/mint_rt.c, mint_sample): the same
-// sampler, warmup, metric adaptation and random number stream that Mint's
+// Martin runtime's NUTS sampler (runtime/mint_rt.c, mint_sample): the same
+// sampler, warmup, metric adaptation and random number stream that Martin's
 // compiled programs and the Rust baselines use. Only the log density and
 // gradient differ: here they come from bs_log_density_gradient.
 //
 // usage: bs_driver MODEL_model.so DATA.json DRAWS WARMUP CHAINS SEED
 //
 // The log density is bs_log_density_gradient(propto = true, jacobian = true):
-// Stan drops constant terms (Mint keeps each Normal's -log(scale), so the two
+// Stan drops constant terms (Martin keeps each Normal's -log(scale), so the two
 // differ by a constant, which the sampler never sees) and adds the log
-// Jacobian of its constraining transforms, as Mint does. Draws are
+// Jacobian of its constraining transforms, as Martin does. Draws are
 // constrained with bs_param_constrain (no transformed parameters or
 // generated quantities). Parameter blocks for the runtime's summary are read
 // from bs_param_names ("beta.3" belongs to block "beta").
@@ -19,7 +19,7 @@
 // gradient, MINT_GRADCHECK=1 checks it against finite differences,
 // MINT_DRAWS=FILE dumps the draws.
 //
-// Threads. Mint's runtime runs each chain on its own thread and calls the
+// Threads. Martin's runtime runs each chain on its own thread and calls the
 // log density from it. BridgeStan documents that a model built with
 // STAN_THREADS=true may be called concurrently from several threads (Stan's
 // autodiff tape is then thread-local, and the model object is read-only).

@@ -1,4 +1,4 @@
-//! Writes synthetic benchmark data in Mint's .f64 format:
+//! Writes synthetic benchmark data in Martin's .f64 format:
 //! two little-endian u64 (rows, cols) followed by row-major f64.
 //!
 //!   gen_data logistic N P SEED PREFIX ALPHA

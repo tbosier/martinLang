@@ -1025,7 +1025,7 @@ impl<'a> Mg<'a> {
                     Some(e) => e,
                     None => self.bl_exp(eta),
                 };
-                // In vector code with Mint's log: log1p(e) from Mint's log1p on
+                // In vector code with Martin's log: log1p(e) from Martin's log1p on
                 // [0, 1], with q = 1/(1 + e) shared with the sigmoid
                 let mint_l1p = self.f.lanes > 1 && self.f.inline_log && self.m.inline_log;
                 let l1p = match self.log_override.take() {
@@ -1123,7 +1123,7 @@ pub fn math_summary(names: &[String]) -> Option<String> {
         let l = if let Some(rest) = n.strip_prefix("mint_") {
             let (base, v) = rest.split_once("_v").map(|(b, v)| (b, format!("v{v}"))).unwrap_or((rest, String::new()));
             let base = if base == "log1p01" { "log1p" } else { base };
-            format!("Mint's {base} ({})", lanes(&v))
+            format!("Martin's {base} ({})", lanes(&v))
         } else if let Some(rest) = n.strip_prefix("llvm.") {
             let (base, v) = rest.split_once('.').unwrap_or((rest, "f64"));
             format!("llvm.{base} ({})", lanes(v))
@@ -1462,7 +1462,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
     }
     if let Some(r) = rep(m) {
         if nlog.is_empty() {
-            r.other.push("narrow data: none, no data is read by Mint's own vector kernels".into());
+            r.other.push("narrow data: none, no data is read by Martin's own vector kernels".into());
         }
         r.narrow = nlog;
     }
@@ -1513,7 +1513,7 @@ pub fn gen_model(m: &mut Module, tm: &TModel, opts: &Opts) {
 /// 0.73 s with 8.
 const MAX_NARROW_VARIANTS: usize = 4;
 
-/// The data buffers that Mint's own vector kernels load (the vectorised
+/// The data buffers that Martin's own vector kernels load (the vectorised
 /// fused scan kernel, with the statements it absorbs, and the fission
 /// kernel), each with the narrow types to try for it, narrowest first.
 /// Which one is used, if any, is decided at run time from the values.
@@ -2700,7 +2700,7 @@ fn leap_hook_calls(g: &mut Mg, owned: &[String], slot: &str, r0: &str, r1: &str,
 /// same arithmetic after contraction: with the add gone, the product that
 /// was its operand can be fused into the next add, unrounded, which can
 /// change the result in the last bits (it does on
-/// `x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`). Mint's
+/// `x ~ Normal(c * y, 1); y ~ Normal(cumsum(a * x, T), exp(b))`). Martin's
 /// floating-point rules allow that (every add and multiply carries
 /// `contract`). `--no-negzero-sums` and `--strict-fp` keep 0.0.
 fn adj_zero(negzero: bool) -> String {
@@ -2742,9 +2742,9 @@ fn fission_kernel_why_not(lhs: &M, args: &[M], nodes: &[&M]) -> Option<&'static 
 /// A split likelihood over n observations as one loop over chunks of CHUNK
 /// rows. For each chunk:
 ///
-///   - the row dot products, four rows at a time, in Mint's vector form;
+///   - the row dot products, four rows at a time, in Martin's vector form;
 ///   - the density, its derivatives and the elementwise part of the backward
-///     sweep as Mint's own <4 x double> code with Mint's exp and log inline
+///     sweep as Martin's own <4 x double> code with Martin's exp and log inline
 ///     (no calls for them, so nothing is spilled around them; a power other
 ///     than ^2 still calls the vector math library's pow). For BernoulliLogit
 ///     and PoissonLog the density's exp, and BernoulliLogit's log1p, run in
@@ -2760,7 +2760,7 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
     const L: u32 = 4;
     let keys: Vec<usize> = nodes.iter().map(|n| *n as *const M as usize).collect();
     let bufs: Vec<(String, Option<String>)> = keys.iter().map(|k| g.split[k].clone()).collect();
-    // row dot products and gradient updates for rows lo..hi: Mint's vector
+    // row dot products and gradient updates for rows lo..hi: Martin's vector
     // form when hi - lo is a multiple of 4, LLVM's otherwise
     let dots = |g: &mut Mg, lo: &str, hi: &str, vec: bool| {
         for (node, (fw, _)) in nodes.iter().zip(&bufs) {
@@ -2835,7 +2835,7 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
         // (the gradient updates run for the products with an adjoint buffer, as in `axpys`)
         let grads: Vec<String> = nodes.iter().zip(&bufs).filter(|(_, (_, ad))| ad.is_some()).map(|(n, _)| show_m(n)).collect();
         let upd = if grads.is_empty() { String::new() } else { format!(", then the gradient updates of {} ({L} rows at a time, reading the chunk's rows of the matrix again, now from cache)", products(&grads)) };
-        g.note(format!("fission kernel: one loop over chunks of {CHUNK} rows; per chunk, the row dot products of {} ({L} rows at a time), then the density and its derivatives on {L} rows per vector{upd}; all in Mint's own <{L} x double> code", products(&prods)));
+        g.note(format!("fission kernel: one loop over chunks of {CHUNK} rows; per chunk, the row dot products of {} ({L} rows at a time), then the density and its derivatives on {L} rows per vector{upd}; all in Martin's own <{L} x double> code", products(&prods)));
         if scr_e.is_some() {
             g.note(format!("the density's {} runs first, in a loop of its own over the chunk, into a {CHUNK}-value scratch", if dist == Dist::PoissonLog { "exp(eta)" } else { "exp(-|eta|)" }));
         } else if matches!(dist, Dist::BernoulliLogit | Dist::PoissonLog) {
@@ -2872,7 +2872,7 @@ fn gen_fission_kernel(g: &mut Mg, dist: Dist, lhs: &M, args: &[M], nodes: &[&M],
                 let o = g.f.imul(j, &L.to_string());
                 let e = g.f.load(se, &o);
                 let l = match &scr_q {
-                    // 1/(1 + e) once, for the sigmoid and for Mint's log1p
+                    // 1/(1 + e) once, for the sigmoid and for Martin's log1p
                     Some(sq) => {
                         let u = g.f.fadd(&fconst(1.0), &e);
                         let q = g.f.fdiv(&fconst(1.0), &u);
@@ -3016,7 +3016,7 @@ fn vec_cols(g: &mut Mg, c: &str, body: &mut dyn FnMut(&mut Mg, &str), tail: &mut
 }
 
 /// fw[i] = M[i, :] . v for rows lo..hi (hi - lo a multiple of 4), four rows
-/// at a time in Mint's vector form: one accumulator per row, vectorised
+/// at a time in Martin's vector form: one accumulator per row, vectorised
 /// along the columns (a masked tail when c is not a multiple of 4), so each
 /// load of v feeds four FMAs; then a 4 x 4 transpose-and-add leaves the four
 /// dot products in one vector, stored with one instruction. (Eight rows per
@@ -3091,7 +3091,7 @@ fn dot4_vec(g: &mut Mg, mp: &str, vp: &str, c: &str, lo: &str, hi: &str, fw: &st
 }
 
 /// gp[:] += sum_i ad[i] M[i, :] for rows lo..hi (hi - lo a multiple of 4),
-/// four rows per pass over gp, in Mint's vector form (a masked tail when c
+/// four rows per pass over gp, in Martin's vector form (a masked tail when c
 /// is not a multiple of 4).
 fn axpy4_vec(g: &mut Mg, mp: &str, c: &str, lo: &str, hi: &str, ad: &str, gp: &str) {
     let r = 4usize;

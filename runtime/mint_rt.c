@@ -1,4 +1,4 @@
-// Mint runtime: memory, binary I/O, printing, Cholesky solve, RNG and a NUTS sampler.
+// Martin runtime: memory, binary I/O, printing, Cholesky solve, RNG and a NUTS sampler.
 //
 // Generated programs call into this file for everything that is not model or
 // numeric-kernel code. The Rust baselines link the same object so that the
@@ -710,7 +710,7 @@ static int lowrank_estimate(int64_t D, int n, double *Q, double *G, const double
 //   y[t] = a[t] + c x[t] + noise,  noise ~ N(0, r[t])   (r is a variance)
 //
 // mint_kalman_ll returns log p(y | a, d, q, r) with the x integrated out,
-// without the -0.5 log(2 pi) per observation (Mint drops constants), and
+// without the -0.5 log(2 pi) per observation (Martin drops constants), and
 // overwrites a, d, q and r with the gradient of that log density with
 // respect to each of them. Every array is time-major, element (g, t) at
 // t * G + g, so the loops over series are contiguous and vectorise. ws holds

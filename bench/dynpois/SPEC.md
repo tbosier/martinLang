@@ -31,7 +31,7 @@ rustmc's `population = 0 + 1 * z0`, `beta_g = population + 0.4 * z_g`,
 `level += 0.05 * z_shared[t] + 0.08 * z_g[t]` gives exactly this distribution
 over (pop, beta, state).
 
-## Unconstrained parameter layout (Mint and the hand-written Rust baseline)
+## Unconstrained parameter layout (Martin and the hand-written Rust baseline)
 
 `theta = [pop, beta[0..G], shared[0..T], innov[0..G*T] (row-major: g*T + t)]`,
 dimension D = 1 + G + T + G*T.
@@ -53,7 +53,7 @@ lp  = -0.5*pop^2 - log(1)
 
 `bench/dynpois/make_data.py G T SEED OUTDIR` writes:
 
-- `OUTDIR/y.f64`: Mint .f64 format (two little-endian u64 rows=G, cols=T, then
+- `OUTDIR/y.f64`: Martin .f64 format (two little-endian u64 rows=G, cols=T, then
   row-major little-endian f64), counts.
 - `OUTDIR/y.npy`: same array.
 - `OUTDIR/truth.json`: true pop, beta[G], terminal state[G] (= state[g, T]).

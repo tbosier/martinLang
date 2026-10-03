@@ -1,4 +1,4 @@
-//! Max-effort Rust (nightly), three-pass variant: the same loop structure Mint
+//! Max-effort Rust (nightly), three-pass variant: the same loop structure Martin
 //! generates, written by hand with AVX2/FMA intrinsics and glibc's vector exp/log.
 #![feature(simd_ffi)]
 use std::sync::OnceLock;

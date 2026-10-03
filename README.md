@@ -1,84 +1,94 @@
-# Mint
+<img src="docs/assets/tony/src-logo.png" width="150" alt="Tony, Martin's bald eagle mascot">
 
-Mint is a prototype language for small numerical programs. You write the
-mathematics and its intent: shapes, positivity, symmetric positive
-definiteness, which quantities are data and which are unknown. The compiler
-uses those facts to reject wrong programs and to choose faster code.
+# Martin
 
-It has its own compiler (`mintc`: parser, type checker, IR, compile-time
-automatic differentiation, loop fusion and fission, a sufficient-statistics
-rewrite, and an LLVM IR emitter). LLVM turns that IR into machine code. Like
-most languages, Mint also has a small runtime library, written in C and
-compiled once. It supplies file I/O, printing, a Cholesky solve and the NUTS
-sampler that repeatedly calls your compiled model. Building a program takes
-60 to 200 ms, or up to about 0.6 s for a model that gets narrow-data
-variants (below).
+Martin is a prototype language for Bayesian inference and small numerical
+programs. You write the model as mathematics, with its intent stated in the
+types: shapes, positivity, symmetric positive definiteness, which quantities
+are data and which are unknown. The compiler uses those facts to reject wrong
+programs, to derive gradients, to lay out memory, and to decide what work the
+inference does not need at all.
 
-## What the prototype shows
+Martin has its own compiler, `mintc`, written in Rust: a parser, type checker,
+compile-time differentiation, layout and fusion passes, and an LLVM IR
+emitter. LLVM turns that IR into machine code; nothing interprets a Martin
+program while it runs. A small runtime library, written in C, supplies file
+I/O, printing, a Cholesky solve and the NUTS sampler that calls the compiled
+model. (The tools still carry the earlier name: the compiler is `mintc`,
+programs end in `.mint`, and the runtime's variables start with `MINT_`.)
 
-**Against Stan and rustmc, on a hierarchical time-series model with up to
-37,901 parameters** ([details](docs/hierarchical.md)). A panel of Poisson count
-series has a random walk per series and pooled intercepts. It is 18 lines of
-Mint, and the compiler derives the gradient.
+It is a research prototype: one machine (Ryzen 9 5900X, Linux), a handful of
+models, and every number below comes from files in `bench/`.
 
-| 3,171 parameters, 4 chains × 1000 draws | wall time | converged? | effective draws per second |
-|---|---|---|---|
-| Mint | 6.6 s | yes (R-hat 1.003) | 387 |
-| Stan (stanc `--O1`) | 48.5 s | yes (R-hat 1.002) | 38.3 |
-| rustmc (elliptical slice) | 7.0 s | **no** (R-hat 1.95) | not usable |
-| hand-written SIMD Rust, same sampler as Mint | 6.6 s | yes | 300 |
+## Speed
 
-- Mint and Stan both converged; their posterior means agree (details in the
-  report). That is means only, not variances or tails.
-- The effective-draws figure moves with the seed: across three seeds Mint's
-  lowest ESS ranged from 1,600 to 2,600. The steadier comparison is the cost
-  per gradient including the sampler: 13 µs for Mint against 97 µs for Stan.
-- rustmc's chains did not converge in these runs (1000 warmup + 1000 sweeps),
-  and its means are off by up to 0.9 posterior standard deviations.
-- At 37,901 parameters Mint's run took 226 to 238 s (two runs) and was right
-  at the mixing bar; Stan's shorter run did not reach it. See the report for
-  why the per-gradient figures there are not a like-for-like comparison.
+**Same sampler, different languages.** Martin, hand-written Rust and Stan's
+C++ (through BridgeStan) were run under the same NUTS implementation, with the
+same warmup, settings and seeds; only the code computing the log density and
+its gradient differs, and all of them agree on the gradient to about 3e-14
+([rules and full results](bench/same_sampler/README.md)).
 
-**Against hand-written Rust** ([details](docs/benchmark.md),
-[this round](docs/compiler-round.md)):
+Time per gradient, µs:
 
-| problem | Mint | straightforward Rust | tuned Rust | max-effort Rust |
+| model | Martin | Rust, max effort | Rust with Martin's tricks | Stan |
 |---|---|---|---|---|
-| logistic gradient (n=5000, p=20) | **33 µs** | 178 µs | 139 µs | 37 µs |
-| logistic, full NUTS run | **0.49 s** | 2.57 s | 1.92 s | 0.56 s |
-| Newton's method (n=200000, p=50) | **0.16 s** | 2.33 s | 0.40 s | 0.21 s |
-| time-series gradient, 3,171 / 37,901 parameters | 4.22 / 53.4 µs | | | **4.07 / 52.2 µs** |
-| lines of code | 15 to 18 | 59 to 78 | 66 to 97 | 92 to 105 plus SIMD helpers; 591 for the time series |
+| time series, 3,171 parameters | **3.56** | 4.10 | 3.73 | 51.0 |
+| time series, 37,901 parameters | **44.4** | 52.9 | 46.6 | 654 |
+| same, 3 threads | **17.0** | single-threaded | 18.4 | single-threaded |
+| logistic regression (n = 5000, p = 20) | **23.6** | 38.0 | | 42.7 |
+| eight schools | 0.025 | 0.025 | | 0.50 |
 
-The original question for this prototype was whether Mint can be clearer than
-Rust and within 2x of straightforward Rust. The answer is yes: Mint is 5 to
-14x faster than straightforward Rust on these problems. Against expert Rust
-written with SIMD intrinsics and glibc's vector math, Mint is now 1.15x faster
-on the logistic gradient and 1.3x faster on Newton, and 2 to 4% slower on the
-time-series gradient (it was 1.8x slower). The Rust takes roughly 10 to
-33 times as much code (counting its shared SIMD helpers), including
-hand-derived gradients.
+Whole runs, 4 chains, 1000 warmup + 1000 draws (medians over 5 seeds, 3 for
+the large model):
 
-That is not a claim that Rust cannot be as fast: every technique Mint's
-compiler uses could be written by hand in Rust (see the caveats in
-[compiler-round.md](docs/compiler-round.md)). The case for Mint is that its
-compiler produces this from a few lines of mathematics, with gradients derived
-for you and with shape, positivity and SPD errors caught before anything runs.
+| model | Martin | Rust, max effort | Rust with Martin's tricks | Stan |
+|---|---|---|---|---|
+| time series, 3,171 parameters | **3.32 s** | 3.76 s | 3.50 s | 28.3 s |
+| time series, 37,901 parameters | **62.4 s** | 98.6 s | 65.2 s | 737 and 741 s |
+| logistic regression | **0.38 s** | 0.59 s | | 0.64 s |
+| eight schools | 5.5 ms | 5.7 ms | | 16.6 ms |
 
-**A latent random walk integrated out by the compiler**
-([details](docs/kalman.md)). In `examples/random_walk_panel.mint`, a panel of
-Gaussian random walks observed with Gaussian noise and unknown scales, mintc
-finds the walk, integrates it out exactly with a Kalman filter per series,
-and NUTS samples the 23 (G = 20) or 253 (G = 250) remaining parameters
-instead of 3,023 or 37,753; the walk is drawn back afterwards. Over three
-seeds, the lowest effective sample size of the remaining parameters per
-gradient was 100 to 146 times that of full NUTS on the non-centred form, and
-400 to 790 times on the centred form as written, though each collapsed
-gradient costs 1.8 to 3.5 times as much (and drawing the walk back costs a
-few gradients per kept draw, which these ratios leave out). The log density matches a dense
-Gaussian computation to about 1e-15 on small panels, and the posterior
-matches full NUTS within Monte Carlo error. Wall times were taken on a
-machine shared with other jobs (load 16 to 32): see the report.
+- "Rust, max effort" is hand-written with AVX2 intrinsics and glibc's vector
+  math. "Rust with Martin's tricks" also has Martin's table-driven `exp` and
+  splits its gradient across threads; against it Martin's lead is 5 to 8%.
+  The Rust keeps the parameter order the shared sampler fixes, so it cannot
+  use the column-major layout Martin's compiler chooses; nobody has
+  established what the remaining gap comes from.
+- Stan's gradient on the large model ran on one thread (no `reduce_sum`
+  version was written), and its large runs were not interleaved with the
+  others.
+- Newton's method for logistic regression (200,000 rows, 50 features, 10
+  iterations) takes 0.114 s against 0.209 s for the max-effort Rust
+  ([merged build](bench/merged_vs_ref.md); the Rust figure was measured once
+  and frozen).
+- The Martin programs are 15 to 18 lines; the Rust is 92 to 105 lines plus
+  shared SIMD helpers, and 591 lines for the time series.
+
+## Work the compiler removes
+
+**A latent random walk integrated out** ([details](docs/kalman.md)). In
+`examples/random_walk_panel.mint`, a panel of Gaussian random walks observed
+with Gaussian noise and unknown scales, `mintc` finds the walk, integrates it
+out exactly with a Kalman filter per series, and NUTS samples the 23 (G = 20)
+or 253 (G = 250) remaining parameters instead of 3,023 or 37,753; the walk is
+drawn back afterwards. Over three seeds the lowest effective sample size of
+the remaining parameters per gradient was 100 to 146 times that of full NUTS
+on the non-centred form, and 400 to 790 times on the centred form as written,
+though each collapsed gradient costs 1.8 to 3.5 times as much. The log density
+matches a dense Gaussian computation to about 1e-15 on small panels, and the
+posterior matches full NUTS within Monte Carlo error. Only a local-level walk
+with Gaussian observations is recognised so far.
+
+**Sampler options** ([details](docs/architecture.md)). Two opt-in changes to
+the runtime's NUTS cut the gradients needed per effective draw:
+`MINT_WARMUP=fast` (an L-BFGS starting point, a shorter warmup, chains pooling
+their adaptation) and `MINT_METRIC=lowrank` (Stan's diagonal metric plus up to
+24 directions estimated from warmup gradients). On the small time-series
+model, one seed, effective draws per second went from 517 with the defaults
+to 850 with the fast warmup and 1,470 with the low-rank metric
+([data](bench/wave_benchmarks.json)). They are not the defaults yet: four
+models is too few to rule out posteriors where they do worse. They are part
+of the shared runtime, so they speed up the Rust baselines too.
 
 ## Two examples
 
@@ -135,11 +145,11 @@ The straightforward Rust equivalent of the model block is a hand-written
 `logp` function with the gradient worked out on paper: priors and their
 derivatives, the stable softplus, the residuals `y - sigmoid(eta)`, and the
 `X' r` accumulation. See `baselines/logistic_bayes.rs`. Declare a scale
-parameter `Real` instead of `Positive` and Mint refuses it:
+parameter `Real` instead of `Positive` and Martin refuses it:
 
 ```
 error: the scale of Normal must be Positive, but `sigma` is Real
-help: declare the parameter as `param sigma: Positive`; Mint then samples log(sigma) and adds the Jacobian itself
+help: declare the parameter as `param sigma: Positive`; Martin then samples log(sigma) and adds the Jacobian itself
 ```
 
 All examples are in `examples/`: `logistic_newton.mint`, `logistic_bayes.mint`,
@@ -171,92 +181,9 @@ python3 bench/bench.py 7    # writes bench/results.json
 (cd compiler && cargo test --release)
 ```
 
-Useful environment variables for compiled programs:
-
-- `MINT_GRADCHECK=1` compares the compiled gradient with finite differences.
-- `MINT_BENCH_GRAD=K` times K gradient evaluations and exits.
-- `MINT_THREADS_PER_CHAIN=N` sets how many threads each chain's sampler
-  passes use. The default is 1 below 8,192 parameters. The same threads
-  also share the fused scan kernel of the model gradient.
-- `MINT_KERNEL_THREADS=N` overrides the number of threads the fused scan
-  kernel uses: during sampling (default: the threads per chain) and in
-  `MINT_BENCH_GRAD` and `MINT_GRADCHECK` (default 1).
-- `MINT_CHAIN_AFFINITY=0` stops the runtime from keeping each threaded
-  chain's threads on the CPUs of one L3 cache.
-- `MINT_FUSED_LEAPFROG=0` turns off the fused leapfrog in a program built
-  with `mintc --fused-leapfrog` (the sampler's leaf work done by the fused
-  scan kernel's threads; not built by default, because it measured no
-  faster than the runtime's own pass, see
-  [compiler-round.md](docs/compiler-round.md)). `=exact` keeps the
-  runtime's summation order, which gave exactly the unfused draws in the
-  tests. `MINT_LEAP_TEST=1` checks one fused leaf against the runtime's own
-  and exits; `=K` also times K leaves of each.
-- `MINT_DRAWS=FILE` writes every draw of every parameter, in the
-  parameters' own (constrained) scale: three little-endian u64 values
-  (chains, draws per chain, parameters), then chains x draws x parameters
-  f64. To a regular file the chains write their draws as they produce
-  them, into `FILE.partial`, which becomes FILE when sampling has finished
-  (a run that dies leaves FILE as it was). A pipe or terminal cannot be
-  written out of order, so then every draw is kept in memory and written
-  at the end.
-- `MINT_KEEP_DRAWS` chooses which draws stay in memory. By default only
-  those of the rows `print` shows (every entry of a parameter with at most
-  12 entries, the first 3 of a larger one), which it needs for the
-  quantiles; every other parameter is summarised as it is drawn, so memory
-  no longer grows with draws times parameters (see the Runtime section of
-  [architecture.md](docs/architecture.md)). `=beta,sigma` also keeps every
-  draw of the named parameters; `=all` keeps everything and computes the
-  summary from the draws alone, as before.
-- `MINT_STATS_DUMP=FILE` writes, when the posterior is printed, every
-  parameter's summary statistics and their streaming versions side by side
-  (with `MINT_KEEP_DRAWS=all`, to compare the two on the same draws).
-  `MINT_ESS_LAGS` (default 32) and `MINT_ESS_BATCHES` (default 128) size
-  the streaming ESS; per parameter and chain they cost 1.25 doubles
-  per lag and half a double per batch.
-- `MINT_METRIC=grad` switches to the experimental gradient-based metric
-  adaptation.
-- `MINT_METRIC=lowrank` adds to Stan's diagonal metric up to 8, 16 or 24
-  directions, depending on the model's size, the threads per chain and the
-  L2 cache size (`MINT_LOWRANK_K` sets another
-  number), estimated from the gradients of the warmup draws; see
-  [hierarchical.md](docs/hierarchical.md) for what it gains and costs. It
-  works with the fused leapfrog (the low-rank part of each leaf runs in a
-  pass after the kernel) and with `MINT_WARMUP=fast`, under which the
-  chains pool their window draws for the directions as they do for the
-  diagonal.
-- `MINT_NARROW=0` keeps a model's kernels on the double data (see below);
-  `MINT_NARROW_REPORT=1` prints which narrow copy each data buffer got.
-- `MINT_WARMUP=fast` replaces Stan's warmup with a shorter one: each chain
-  starts from a Pathfinder-style L-BFGS point, warmup runs max(200, warmup / 5)
-  iterations (never more than the program's warmup), and the chains pool
-  their draws for each metric window. On the
-  examples it took 1.4 to 1.7x fewer gradients per effective draw (see the
-  Runtime section of [architecture.md](docs/architecture.md)). Stan's warmup
-  stays the default.
-
-Compiler switches, each turning one optimisation off (for measuring it):
-`--no-suffstats`, `--no-fission`, `--no-vecmath`, `--no-gram-blocking`,
-`--no-scan-layout`, `--no-scan-fusion`, `--no-inline-exp`, `--no-row-fusion`,
-`--no-fission-kernel`, `--no-inline-log`, `--no-parallel-kernel`,
-`--no-narrow-data`, `--no-negzero-sums`, `--no-collapse` (sample a latent
-random walk with NUTS instead of integrating it out), and `--strict-fp` (strict IEEE
-evaluation order, no vector math). `--fused-leapfrog` turns one on (see
-`MINT_FUSED_LEAPFROG` above).
-
-**Narrow data.** When `sample()` starts, the generated code checks the data
-vectors and matrices that the model's vector kernels read (up to a limit of
-four variants of the model code), and where every value is exactly an int8,
-int16 or float, the kernels read a copy in that type and convert in
-registers. In every test the log density, gradient and draws are
-byte-identical with and without the copies. In the benchmark data the
-time-series counts and the logistic 0/1 outcomes narrow to int8: the
-time-series gradient became 5 to 7% faster and a whole run of the small
-model 3 to 4% faster, together with a change made at the same time (adjoint
-sums that start at -0.0, `--no-negzero-sums`; each alone gives 1 to 2%).
-The logistic gradient did not change measurably, because its real-valued X
-is not exact in float and stays double. It costs build time:
-those two models now take 0.56 and 0.37 s to build instead of 0.22 and
-0.14 s. See [architecture.md](docs/architecture.md#narrow-data).
+Environment variables for compiled programs (threads, draws, the sampler's
+metric and warmup) and the compiler switches that turn each optimisation
+off are listed in [docs/options.md](docs/options.md).
 
 ## What the compiler did: `mintc explain`
 
@@ -358,11 +285,15 @@ followed by row-major little-endian f64.
 
 ## Documents
 
+- [Same-sampler benchmark](bench/same_sampler/README.md): the rules, and
+  Martin, Rust and Stan under one NUTS
 - [Hierarchical time series against rustmc and Stan](docs/hierarchical.md)
-- [Benchmark report](docs/benchmark.md)
+- [Benchmark report](docs/benchmark.md) and
+  [compiler rounds](docs/compiler-round.md)
 - [Compiler architecture](docs/architecture.md)
 - [Kalman collapse](docs/kalman.md): the compiler integrates a latent
   Gaussian random walk out of a model
-- [Next milestone](docs/next-milestone.md): the minimum work needed to test
-  whether first-class mathematical types enable useful optimisations in
-  general, not only on examples I chose.
+- [Runtime and compiler options](docs/options.md)
+- [Flagship demo plan](docs/flagship-demo.md): where the project is going
+- [Next milestone](docs/next-milestone.md)
+- [Tony](docs/mascot.md): the mascot and its artwork

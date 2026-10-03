@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Whole sampling runs of the dynamic Poisson model for several seeds:
-Mint (built with the current compiler, optionally also a previous one) and
-the max-effort Rust baseline, which shares Mint's sampler. 4 chains,
+Martin (built with the current compiler, optionally also a previous one) and
+the max-effort Rust baseline, which shares Martin's sampler. 4 chains,
 1000 warmup + 1000 draws. Reports the sampler's wall time, the number of
 gradients, the time per gradient (wall x chains / gradients) and the
 runtime's lowest ESS over all parameters.
@@ -21,9 +21,9 @@ ap.add_argument("--old")
 args = ap.parse_args()
 
 src = open("examples/dynamic_poisson.mint").read().replace("data_small", f"data_{args.size}")
-builds = {"Mint after": "compiler/target/release/mintc"}
+builds = {"Martin after": "compiler/target/release/mintc"}
 if args.old:
-    builds = {"Mint before": f"{args.old}/compiler/target/release/mintc", **builds}
+    builds = {"Martin before": f"{args.old}/compiler/target/release/mintc", **builds}
 
 
 def parse(out):

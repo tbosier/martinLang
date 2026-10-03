@@ -1,5 +1,5 @@
 // Bayesian logistic regression, examples/logistic_bayes.mint written
-// directly. Unconstrained order: alpha, beta[1:p] (Mint's order).
+// directly. Unconstrained order: alpha, beta[1:p] (Martin's order).
 data {
   int<lower=1> n;
   int<lower=1> p;

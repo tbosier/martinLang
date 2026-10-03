@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes the Stan (JSON) copies of the benchmark data, from the same files
-Mint and the Rust baselines read, to build/same_sampler/data/.
+Martin and the Rust baselines read, to build/same_sampler/data/.
 
 usage: python bench/same_sampler/prepare_data.py   (from the repository root)
 """

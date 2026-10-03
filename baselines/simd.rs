@@ -1,6 +1,6 @@
 //! Hand-written SIMD helpers for the "max effort" Rust baselines (nightly
 //! Rust): AVX2/FMA intrinsics and glibc's vector math library (the same
-//! `exp`/`log` that Mint's generated code calls).
+//! `exp`/`log` that Martin's generated code calls).
 #![allow(dead_code)]
 
 pub use std::arch::x86_64::*;

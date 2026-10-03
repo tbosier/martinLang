@@ -1,5 +1,5 @@
 //! Shared helpers for the Rust baselines: .f64 reading and the FFI surface of
-//! the Mint runtime's NUTS sampler (which stands in for a sampler crate, so
+//! the Martin runtime's NUTS sampler (which stands in for a sampler crate, so
 //! that both sides of the benchmark run the identical sampler).
 #![allow(dead_code)]
 
@@ -44,7 +44,7 @@ pub fn set_prep_seconds(s: f64) {
 
 /// The value of environment variable `name` as an integer, or `dflt` when it
 /// is unset. bench/same_sampler sets MINT_BASELINE_{DRAWS,WARMUP,CHAINS,SEED}
-/// so that every baseline runs with the same sampler settings as the Mint
+/// so that every baseline runs with the same sampler settings as the Martin
 /// and Stan programs it is compared with; unset, each baseline keeps its own.
 fn env_or(name: &str, dflt: i64) -> i64 {
     match std::env::var(name) {

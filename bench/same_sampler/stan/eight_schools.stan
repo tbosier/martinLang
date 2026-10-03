@@ -1,6 +1,6 @@
 // Eight schools, non-centred, examples/eight_schools.mint written directly.
-// tau is sampled as log(tau) with its Jacobian, as Mint does for a Positive
-// parameter. Unconstrained order: mu, log(tau), eta[1:J] (Mint's order).
+// tau is sampled as log(tau) with its Jacobian, as Martin does for a Positive
+// parameter. Unconstrained order: mu, log(tau), eta[1:J] (Martin's order).
 data {
   int<lower=1> J;
   vector[J] y;

@@ -565,14 +565,14 @@ sys.exit(0 if len(a) == len(b) == ${np#* } and max(abs(x - y) for x, y in zip(a,
   python3 tests/rowfuse/make_data.py
 fi
 
-# ---- Mint's own vector exp, as emitted: within 2 ulp of long double expl
+# ---- Martin's own vector exp, as emitted: within 2 ulp of long double expl
 # over 3e6 inputs across the range, and NaN, infinities, -0, the overflow and
 # underflow thresholds and subnormal results.
 
 $M emit examples/dynamic_poisson.mint -o build/exp_check.ll 2>/dev/null \
   && python3 tests/exp/check_exp.py build/exp_check.ll && pass "vector exp accuracy and special values" || bad "vector exp accuracy"
 
-# ---- Mint's own vector log, as emitted in the fission kernel (here for a
+# ---- Martin's own vector log, as emitted in the fission kernel (here for a
 # Normal's indexed scale): within 2 ulp of long double logl over 4e6 inputs
 # (every binade including subnormals, around 1, around every table
 # boundary), and 0, -0, negatives, subnormals, the extreme doubles,

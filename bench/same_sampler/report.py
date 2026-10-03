@@ -13,7 +13,7 @@ import common  # noqa: E402
 
 R = common.RESULTS
 NAMES = {
-    "mint": "Mint",
+    "mint": "Martin",
     "rust_max": "Rust, max effort (dynpois_max.rs / logistic_bayes_max.rs)",
     "rust_par": "Rust, max effort v2 (dynpois_par.rs: table exp, threaded)",
     "rust_par[fused]": "dynpois_par.rs, exp fused into the forward pass",
@@ -22,9 +22,9 @@ NAMES = {
     "rust": "Rust, straightforward (eight_schools.rs)",
     "stan": "Stan 2.40 via BridgeStan (stanc --O1)",
     "stan_glm": "Stan, bernoulli_logit_glm written by hand",
-    "mint[no-scan-layout]": "Mint, mintc --no-scan-layout (innov row-major)",
-    "mint[no-narrow-data]": "Mint, mintc --no-narrow-data (counts read as double)",
-    "mint[no-scan-layout+no-narrow-data]": "Mint, both of the above",
+    "mint[no-scan-layout]": "Martin, mintc --no-scan-layout (innov row-major)",
+    "mint[no-narrow-data]": "Martin, mintc --no-narrow-data (counts read as double)",
+    "mint[no-scan-layout+no-narrow-data]": "Martin, both of the above",
 }
 
 
@@ -50,7 +50,7 @@ def grad_section(g, out):
                f"{max(loads):.1f} (24 hardware threads; other agents were running). A run is *clean* when the "
                "other hardware thread of its core was at most 10% busy and the run got at least 95% of its "
                "CPU time; the clean median is the figure to read, the all-run median and range show the noise.\n")
-    out.append("| problem | implementation | kernel threads | clean median, µs | clean runs | all-run median, µs | range, µs | vs Mint (clean) |")
+    out.append("| problem | implementation | kernel threads | clean median, µs | clean runs | all-run median, µs | range, µs | vs Martin (clean) |")
     out.append("|---|---|---|---|---|---|---|---|")
     base = {}
     for row in g["rows"]:
@@ -130,9 +130,9 @@ def nutpie_section(n, out, title):
     out.append(f"nutpie {n['versions']['nutpie']}, BridgeStan {n['versions']['bridgestan']}; both run the same "
                f"compiled Stan model, {how}, 1000 warmup + 1000 draws. Bulk and tail ESS and R-hat "
                "come from the same ArviZ code over every parameter's constrained draws. nutpie's adaptation "
-               "differs from Mint's (Stan's), so this compares samplers, not languages. The times do not cover "
+               "differs from Martin's (Stan's), so this compares samplers, not languages. The times do not cover "
                "the same work: nutpie's is the whole nutpie.sample() call (setting up the sampler and threads, "
-               "storing warmup and kept draws, building the trace), Mint's is the runtime's sampling loop. "
+               "storing warmup and kept draws, building the trace), Martin's is the runtime's sampling loop. "
                "\"Minus the gradient alone\" subtracts the pinned single-thread gradient time (grad.json); the "
                "residual mixes sampler cost, fixed costs and the gradient running slower inside a run, so it is "
                "an upper bound on sampler overhead, not a measurement of it. 1-minute load average "
@@ -152,8 +152,8 @@ def verify_section(v, out):
     out.append("## Verification (results/verify.json)\n")
     s = v["summary"]
     out.append(f"- At the benchmark point, through each program's own entry point: worst gradient difference from "
-               f"Mint, per component relative to max(|g|, 1): {s['worst_grad_vs_mint']:.1e}. Log density minus "
-               f"Mint's equals the constant that implementation drops to {s['worst_constant_error']:.1e} relative.")
+               f"Martin, per component relative to max(|g|, 1): {s['worst_grad_vs_mint']:.1e}. Log density minus "
+               f"Martin's equals the constant that implementation drops to {s['worst_constant_error']:.1e} relative.")
     out.append(f"- Stan at 6 random points per model against numpy references: the log density differs by the "
                f"expected constant to within {s['worst_random_point_constant']:.1e} (absolute), gradients to "
                f"{s['worst_random_point_grad']:.1e}.")
@@ -184,7 +184,7 @@ def main():
             note = ""
             if name == "whole_large.json":
                 note = ("Order of the runs: Stan seed 1 first (alone, while other work kept about 16 hardware "
-                        "threads busy), then Mint and both Rust versions for seeds 1 to 3, then Stan seeds 2 and 3 "
+                        "threads busy), then Martin and both Rust versions for seeds 1 to 3, then Stan seeds 2 and 3 "
                         "on a quiet machine. Stan was therefore not interleaved with the others, and its seed-1 "
                         "time reflects the load more than the code.")
             whole_section(w, title, out, note)
@@ -198,10 +198,10 @@ def main():
                       "times: up to 3x.")
     n = load("nutpie.json")
     if n:
-        nutpie_section(n, out, "Sampler check: Mint's NUTS against nutpie, same Stan gradient, 4 chains")
+        nutpie_section(n, out, "Sampler check: Martin's NUTS against nutpie, same Stan gradient, 4 chains")
     n = load("nutpie_1chain.json")
     if n:
-        nutpie_section(n, out, "Sampler overhead: one pinned chain, Mint's NUTS against nutpie, same Stan gradient")
+        nutpie_section(n, out, "Sampler overhead: one pinned chain, Martin's NUTS against nutpie, same Stan gradient")
     path = os.path.join(R, "results.md")
     open(path, "w").write("\n".join(out))
     print(f"wrote {path}")

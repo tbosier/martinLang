@@ -1,5 +1,5 @@
 //! Straightforward Rust: Bayesian logistic regression. The log density and its
-//! gradient are written by hand; the sampler is the Mint runtime's NUTS.
+//! gradient are written by hand; the sampler is the Martin runtime's NUTS.
 use std::sync::OnceLock;
 
 #[path = "common.rs"]

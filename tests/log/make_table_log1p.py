@@ -1,5 +1,5 @@
 """Generates LOG1P_TAB in compiler/src/ir.rs: -log(1 - m/256) for m = 0..128,
-each correctly rounded to double (50-digit decimal arithmetic), for Mint's
+each correctly rounded to double (50-digit decimal arithmetic), for Martin's
 log1p on [0, 1] (BernoulliLogit's softplus). Entries 129..255 are 0 (a NaN
 input can index them; its result is NaN whatever the entry).
 

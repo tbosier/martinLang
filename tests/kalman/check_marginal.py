@@ -9,7 +9,7 @@ computation in numpy: innov integrated out analytically, each series
 y_g ~ N(a_g + c L d_g, c^2 L diag(q_g) L' + diag(r_g)) with L the
 lower-triangular matrix of ones (the running sum), plus the remaining
 priors and Jacobians, all without the -0.5 log(2 pi) per observation that
-Mint drops. The reference gradient is a 5-point central difference of the
+Martin drops. The reference gradient is a 5-point central difference of the
 numpy function. Also runs the compiled finite-difference check
 (MINT_GRADCHECK) at each point.
 
@@ -42,7 +42,7 @@ def write_f64(path, a):
 
 
 def norm_lp(x, m, s):
-    """Mint's Normal log density: no -0.5 log(2 pi)."""
+    """Martin's Normal log density: no -0.5 log(2 pi)."""
     return np.sum(-0.5 * ((x - m) / s) ** 2 - np.log(s))
 
 
