@@ -1,0 +1,42 @@
+<!doctype html><html><head>
+<!-- Source of docs/assets/banner.png. Render at 1280 x 560 CSS pixels, device scale 2:
+     google-chrome-stable --headless=new --hide-scrollbars --force-device-scale-factor=2 --window-size=1280,800 --virtual-time-budget=5000 --screenshot=raw.png banner.html
+     (append #dark to the file URL for banner-dark.png), then crop raw.png to 2560 x 1120. tony-cut.png is src-logo.png with the outside background removed. --><meta charset="utf-8"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;1,8..60,400&family=Big+Shoulders+Stencil+Display:wght@800&display=swap">
+<style>
+
+:root{--crate-ink:#181815;--ground:#f7f8f7;--ink:#181815;--quiet:#545756;--beak:#f53814;--amber:#faaa04;--amber-deep:#d98f00;--rule:#d9dbda}
+html.dark{--ground:#0d1117;--ink:#eef0f1;--quiet:#a9aeb3;--rule:#30363d;--crate-ink:#181815}
+html.dark .tony{filter:drop-shadow(2px 0 0 #eef0f1) drop-shadow(-2px 0 0 #eef0f1) drop-shadow(0 2px 0 #eef0f1) drop-shadow(0 -2px 0 #eef0f1)}
+html.dark svg.crate rect:first-child{stroke:#eef0f1}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1280px;height:560px;background:var(--ground);overflow:hidden}
+.wrap{position:relative;width:1280px;height:560px}
+.text{position:absolute;left:72px;top:70px;width:640px}
+h1{font-family:'Archivo',sans-serif;font-weight:800;font-size:150px;line-height:.9;letter-spacing:-5px;color:var(--ink)}
+.tag{font-family:'Source Serif 4',serif;font-size:31px;line-height:1.3;color:var(--ink);margin-top:26px}
+.what{font-family:'Source Serif 4',serif;font-size:22px;line-height:1.4;color:var(--quiet);margin-top:16px;width:660px}
+.cap{position:absolute;left:72px;bottom:22px;font-family:'Source Serif 4',serif;font-style:italic;font-size:19px;color:var(--quiet)}
+.shadow{position:absolute;left:800px;width:200px;bottom:57px;height:12px;border-radius:50%;background:var(--rule)}
+.rule{position:absolute;left:72px;right:72px;bottom:62px;height:2px;background:var(--rule)}
+.tony{position:absolute;left:770px;top:14px;height:330px;z-index:2}
+svg.crate{position:absolute;left:770px;top:300px;z-index:1}
+</style></head><body><script>if(location.hash==="#dark")document.documentElement.className="dark"</script><div class="wrap">
+<div class="text"><h1>Martin</h1>
+<p class="tag">You describe the problem.<br>Martin handles the weight.</p>
+<p class="what">A prototype compiled language for Bayesian inference. Where the compiler recognises a model's structure, it integrates parts of the model out so the sampler has less to do.</p></div>
+<svg class="crate" width="250" height="160" viewBox="0 0 250 160">
+ <g transform="rotate(-2 125 80)">
+ <rect x="4" y="6" width="242" height="148" rx="3" fill="var(--amber)" stroke="var(--ink)" stroke-width="5"/>
+ <line x1="6" y1="40" x2="244" y2="40" stroke="var(--amber-deep)" stroke-width="3"/>
+ <line x1="6" y1="78" x2="244" y2="78" stroke="var(--amber-deep)" stroke-width="3"/>
+ <line x1="6" y1="116" x2="244" y2="116" stroke="var(--amber-deep)" stroke-width="3"/>
+ <rect x="6" y="8" width="16" height="144" fill="var(--amber-deep)"/><rect x="228" y="8" width="16" height="144" fill="var(--amber-deep)"/>
+ <line x1="22" y1="8" x2="22" y2="152" stroke="var(--crate-ink)" stroke-width="3"/><line x1="228" y1="8" x2="228" y2="152" stroke="var(--crate-ink)" stroke-width="3"/>
+ <text x="125" y="71" text-anchor="middle" font-family="Big Shoulders Stencil Display" font-weight="800" font-size="31" fill="var(--crate-ink)" letter-spacing="1">GROSS 37,753</text>
+ <text x="125" y="109" text-anchor="middle" font-family="Big Shoulders Stencil Display" font-weight="800" font-size="31" fill="var(--crate-ink)" letter-spacing="1">NET 253</text>
+ <text x="125" y="143" text-anchor="middle" font-family="Big Shoulders Stencil Display" font-weight="800" font-size="20" fill="var(--crate-ink)" letter-spacing="3">PARAMETERS</text>
+ </g></svg>
+<img class="tony" src="tony-cut.png">
+<div class="rule"></div><div class="shadow"></div>
+<p class="cap">One simulated example: 250 random walks have 37,753 parameters as written; 253 are left once the walks are integrated out.</p>
+</div></body></html>

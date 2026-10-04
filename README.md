@@ -1,6 +1,7 @@
-<img src="docs/assets/tony/src-logo.png" width="150" alt="Tony, Martin's bald eagle mascot">
-
-# Martin
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
+  <img src="docs/assets/banner.png" width="100%" alt="Martin: Tony the eagle carrying a crate stencilled gross 37,753, net 253 parameters">
+</picture>
 
 Martin is a prototype language for Bayesian inference and small numerical
 programs. You write the model as mathematics, with its intent stated in the

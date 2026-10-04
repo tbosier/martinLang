@@ -10,7 +10,7 @@ carrying it away. The artwork is in [assets/tony](assets/tony).
 
 | file | use |
 |---|---|
-| `src-logo.png` | the logo on a white background (1254 x 1254); used at the top of the README |
+| `src-logo.png` | the logo on a white background (1254 x 1254) |
 | `tony-logo.png` | the logo with a transparent background (1000 x 900) |
 | `tony-primary.png` | primary pose (canonical) |
 | `tony-landing.png` | landing |
@@ -23,6 +23,9 @@ carrying it away. The artwork is in [assets/tony](assets/tony).
 | `tony-loading.png` | loading |
 | `tony-head.png` | head only, for small sizes |
 | `src-sheet.png` | the sheet of all variations, with the brand palette |
+
+The README banner (`assets/banner.png`) is built from `src-logo.png`; its
+source and rendering command are in [assets/banner](assets/banner).
 
 The pose images are small (190 to 420 pixels on a side). All the `tony-*.png`
 files have transparent backgrounds, and the white head and tail are
