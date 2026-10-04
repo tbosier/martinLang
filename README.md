@@ -93,6 +93,81 @@ What to read into this:
   reversed the time-series ranking (max-effort Rust 7.28 s, Martin 9.98 s;
   `bench/same_sampler/results/whole_small_loaded.json`).
 
+## Every framework on the hardest model
+
+The large dynamic Poisson panel (250 series, 150 time points, 37,901
+parameters), written as it stands in each framework with no reformulation, and with each
+framework's own defaults apart from the options listed: 4 chains of 1000
+warmup and 1000 draws (Martin's opt-in fast warmup uses 200 of them; rustmc
+keeps 125 draws thinned by 8 because of its storage cap), every run pinned to
+the same 12 cores, one run at a time. A run
+counts only if it finished within 20 minutes, compilation included, and
+mixed: R-hat at most 1.01 and bulk and tail ESS at least 400 over 501
+quantities, from one ArviZ script for all. Every implementation's log density
+and gradient matched the specification to 2e-13 or better, except rustmc,
+which exposes no log density and was checked by its posterior means only
+([rules, settings and caveats](bench/shootout/README.md);
+[every run](bench/shootout/results.md)).
+
+Seed 1, on a quiet machine; the mixing column counts all three seeds where
+three were run:
+
+| implementation | lines of code | total time | peak memory | mixed? | verdict |
+|---|---|---|---|---|---|
+| Martin, opt-in sampler options | 18 | 42 s | 0.68 GiB | 3 of 3 seeds | ranked |
+| Martin, default settings | 18 | 82 s | 0.31 GiB | 3 of 3 seeds | ranked |
+| Rust gradient under Martin's sampler | 982 | 84 s | 0.31 GiB | 2 of 3 seeds | ranked on 2 seeds |
+| Rust gradient with nuts-rs, diagonal | 1,166 | 118 s | 0.53 GiB | 0 of 3 seeds | did not mix |
+| Rust gradient with nuts-rs, low rank | 1,166 | 828 s | 6.25 GiB | no (1 seed) | did not mix |
+| rustmc (elliptical slice sampling) | 12 | 111 s | 0.20 GiB | 0 of 3 seeds | did not mix |
+| PyMC + nutpie, numba | 24 | 264 s | 5.11 GiB | 0 of 3 seeds | did not mix |
+| PyMC + nutpie, JAX | 24 | 596 s | 5.39 GiB | 0 of 3 seeds | did not mix |
+| nutpie with the Stan model, diagonal | 44 | 1,139 s | 5.01 GiB | no (seeds 2 and 3 timed out) | did not mix |
+| NumPyro | 25 | 1,488 s | 2.75 GiB | yes (1 seed) | over 20 minutes |
+| nutpie with the Stan model, low rank | 44 | 1,878 s | 5.45 GiB | no (1 seed) | over 20 minutes |
+| Stan, reduce_sum, 3 threads per chain | 57 | 2,399 s | 1.59 GiB | yes (1 seed) | over 20 minutes |
+| Stan | 48 | 4,076 s | 1.86 GiB | no (1 seed; R-hat 1.017, bulk ESS 363) | over 20 minutes |
+
+What to read into this:
+
+- This is the out-of-the-box test: the model as written, nothing
+  reformulated. Most engines failed by not mixing within 1000 tuning
+  iterations, not by running slowly. A statistician who reparameterised the
+  model or integrated the walk out would change these results; that
+  comparison, with the expert's extra code and time measured, has not been
+  run yet.
+- The sampler matters more than the language here. The same tuned Rust
+  gradient mixed in 2 of 3 seeds under Martin's sampler and in 0 of 3 under
+  nuts-rs. Against that Rust under the same sampler, Martin took 82 s against
+  84 s on seed 1; the later seeds ran under different outside loads, so they
+  do not separate the two. Martin mixing in 3 of 3 seeds against the Rust's
+  2 of 3 is not a finding either: Martin's default seed 1 passed at R-hat
+  1.0097 against the 1.01 bar, the Rust's failed at 1.017, and one more seed
+  could change either verdict.
+  Martin's sampler is a port of Stan's NUTS with its own warmup and
+  threading; the opt-in options (a low-rank metric, and 200 warmup
+  iterations instead of 1000) are runtime algorithms, not compiler output.
+  The fast warmup starts every chain near the same optimised point, which
+  makes split R-hat a weaker test of mixing for those runs.
+- The 20-minute limit was chosen after the first results had been seen;
+  real times are shown for every run. Seeds 2 and 3 ran while other work
+  loaded the machine, from 14% to 76% slower than seed 1 depending on the
+  configuration. Some seed-1 runs were redone after fixes to the harness
+  (Martin's default run after a post-processing fix that had inflated its
+  memory, 87.5 s first time; the Rust under Martin's sampler, 88.0 s first
+  time; nuts-rs diagonal, 214 s first time); the first records are kept in
+  `bench/shootout/results/probes/`. Configurations over 20
+  minutes on seed 1 were mostly run once. This is a model Martin had already
+  been tuned on.
+- Lines of code count the model plus loading the data and running it; the
+  Rust counts include a self-test and instrumentation. Memory is each
+  framework's default trace handling (nutpie keeps the whole trace in
+  memory; Martin streams draws to a file). Martin uses 3 threads per chain;
+  Stan without reduce_sum, nutpie and rustmc use one; JAX can use all 12
+  cores.
+- Not tried: longer warmup for the nuts-rs samplers, nutpie's `draw_diag`
+  adaptation, and longer runs.
+
 ## Work the compiler removes
 
 **A latent random walk integrated out** ([details](docs/kalman.md)). In
