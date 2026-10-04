@@ -1,0 +1,69 @@
+{
+ "name": "nutpie_stan_low_rank_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_nutpie_stan.py",
+  "--seed",
+  "1",
+  "--adapt",
+  "low_rank"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  1.43,
+  2.97,
+  4.76
+ ],
+ "loadavg_after": [
+  1.14,
+  1.69,
+  2.77
+ ],
+ "waited_for_load_seconds": 0.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 1877.6079139959984,
+ "cpu_user_seconds": 4714.450984,
+ "cpu_system_seconds": 24.091731,
+ "cpu_seconds": 4738.5427150000005,
+ "maxrss_largest_process_bytes": 5853351936,
+ "peak_rss_tree_sum_bytes": 5854257152,
+ "peak_pss_tree_sum_bytes": 5834875904,
+ "peak_memory_bytes": 5854257152,
+ "peak_threads": 42,
+ "busy_cpus_inside_set": 2.815932096376077,
+ "busy_cpus_outside_set": 0.29120417505336565,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "import": 1.2994898699980695,
+  "load_data": 0.0004140429991821293,
+  "compile": 13.36473128900252,
+  "sampling": 1862.5297470349979,
+  "postprocess": 0.01740544200220029
+ },
+ "extra": {
+  "implementation": "nutpie_stan_low_rank",
+  "seed": 1,
+  "gradients": 2587019,
+  "warmup_gradients": 523131,
+  "sampling_gradients": 2063884,
+  "gradients_note": "sum of n_steps over warmup and draws plus one per chain for the initial point",
+  "divergences": 0,
+  "step_size": [
+   0.03503871022138925,
+   8.33390736026192e-11,
+   0.000948500043066435,
+   0.012173313726332504
+  ],
+  "leapfrog_per_draw": [
+   127.0,
+   1023.0,
+   15.492,
+   898.392
+  ],
+  "threads_per_chain": 1,
+  "sampling_note": "the nutpie.sample() call (sampling and storing the trace in memory, warmup included)",
+  "settings": "nutpie 0.16.11 adaptation='low_rank', tune 1000, draws 1000, chains 4, cores 4, save_warmup default (True), other settings default (maxdepth 10, target accept 0.8); model built by BridgeStan 2.9.0 with stanc --O1, CXXFLAGS=-march=native, STAN_THREADS"
+ }
+}

@@ -1,0 +1,71 @@
+{
+ "name": "martin_optin_s2",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_martin.py",
+  "--seed",
+  "2",
+  "--optin"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.83,
+  7.26,
+  9.05
+ ],
+ "loadavg_after": [
+  10.56,
+  8.61,
+  9.41
+ ],
+ "waited_for_load_seconds": 120.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 1200.0,
+ "total_wall_seconds": 54.98052808799548,
+ "cpu_user_seconds": 620.460184,
+ "cpu_system_seconds": 10.114215,
+ "cpu_seconds": 630.574399,
+ "maxrss_largest_process_bytes": 681791488,
+ "peak_rss_tree_sum_bytes": 729976832,
+ "peak_pss_tree_sum_bytes": 705633280,
+ "peak_memory_bytes": 729976832,
+ "peak_threads": 35,
+ "busy_cpus_inside_set": 11.610755167291018,
+ "busy_cpus_outside_set": 3.2804585539045004,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "compile": 0.857226793996233,
+  "run": 53.62554883999837,
+  "postprocess": 0.40308207600173773,
+  "sampling": 53.601625
+ },
+ "extra": {
+  "implementation": "martin_optin",
+  "seed": 2,
+  "gradients": 1289916,
+  "warmup_gradients": 269916,
+  "gradients_note": "all gradients, warmup and sampling (the runtime's count)",
+  "divergences": 0,
+  "step_size": [
+   0.0227,
+   0.0218,
+   0.0225,
+   0.0217
+  ],
+  "leapfrog_per_draw": [
+   255.0,
+   255.0,
+   255.0,
+   255.0
+  ],
+  "threads_per_chain": 3,
+  "smallest_team": 3,
+  "warmup_kind": "fast",
+  "prep_seconds": 0.000274,
+  "sampling_note": "the runtime's own 'sampling took' (warmup + draws, all chains)",
+  "settings": "MINT_METRIC=lowrank MINT_WARMUP=fast (the program asks for 1000 warmup iterations; the fast warmup runs 200 of them) + 1000 draws; 4 chains, max tree depth 10, target acceptance 0.8",
+  "warmup_iterations": 200,
+  "settings_corrected": "settings text corrected after the run from the run's log ('warmup=fast, 200 iterations'); the earlier text said 1000 warmup"
+ }
+}

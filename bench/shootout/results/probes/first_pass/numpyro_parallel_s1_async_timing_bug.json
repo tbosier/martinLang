@@ -1,0 +1,80 @@
+{
+ "name": "numpyro_parallel_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_numpyro.py",
+  "--seed",
+  "1",
+  "--chain-method",
+  "parallel"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.51,
+  5.56,
+  4.82
+ ],
+ "loadavg_after": [
+  8.16,
+  9.0,
+  8.29
+ ],
+ "waited_for_load_seconds": 60.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 1487.9112762549994,
+ "cpu_user_seconds": 9760.176496,
+ "cpu_system_seconds": 502.22356,
+ "cpu_seconds": 10262.400056,
+ "maxrss_largest_process_bytes": 2948231168,
+ "peak_rss_tree_sum_bytes": 2933866496,
+ "peak_pss_tree_sum_bytes": 2914074624,
+ "peak_memory_bytes": 2948231168,
+ "peak_threads": 84,
+ "busy_cpus_inside_set": 7.173734774731708,
+ "busy_cpus_outside_set": 0.37449073143241257,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "import": 0.4816123630007496,
+  "load_data": 0.0002978529992105905,
+  "compile": 1.685807228088379,
+  "sampling": 0.012766673909936799,
+  "postprocess": 1485.507439295001
+ },
+ "extra": {
+  "implementation": "numpyro_parallel",
+  "seed": 1,
+  "gradients": 2044000,
+  "warmup_gradients": null,
+  "gradients_note": "sampling iterations only (sum of num_steps over the kept draws); warmup not recorded",
+  "divergences": 0,
+  "step_size": [
+   0.010908365392623503,
+   0.010229289551788598,
+   0.01055801815187358,
+   0.011365134517851427
+  ],
+  "leapfrog_per_draw": [
+   511.0,
+   511.0,
+   511.0,
+   511.0
+  ],
+  "compile_events": {
+   "/jax/core/compile/jaxpr_trace_duration": 0.18399357795715332,
+   "/jax/core/compile/jaxpr_to_mlir_module_duration": 0.1408846378326416,
+   "/jax/core/compile/backend_compile_duration": 1.360929012298584
+  },
+  "mcmc_run_seconds": 1.6985739019983157,
+  "devices": [
+   "cpu:0",
+   "cpu:1",
+   "cpu:2",
+   "cpu:3"
+  ],
+  "compile_note": "sum of JAX's reported trace, lowering and backend compile durations inside mcmc.run",
+  "sampling_note": "mcmc.run wall time minus the compile durations",
+  "settings": "NumPyro 0.22.0, JAX 0.11.2 CPU, x64; NUTS defaults (max_tree_depth 10, target_accept_prob 0.8, diagonal mass matrix); 4 chains, chain_method='parallel', 4 XLA host devices, 1000 warmup + 1000 draws"
+ }
+}

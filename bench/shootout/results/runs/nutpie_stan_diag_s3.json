@@ -1,0 +1,41 @@
+{
+ "name": "nutpie_stan_diag_s3",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_nutpie_stan.py",
+  "--seed",
+  "3",
+  "--adapt",
+  "diag"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.65,
+  7.32,
+  7.72
+ ],
+ "loadavg_after": [
+  3.25,
+  5.55,
+  6.88
+ ],
+ "waited_for_load_seconds": 105.0,
+ "busy_cpus_before": 1.3046409960272283,
+ "exit_status": -15,
+ "timed_out": true,
+ "timeout_seconds": 1200.0,
+ "total_wall_seconds": 1210.0858558429973,
+ "cpu_user_seconds": 4038.523737,
+ "cpu_system_seconds": 3.064593,
+ "cpu_seconds": 4041.58833,
+ "maxrss_largest_process_bytes": 2705027072,
+ "peak_rss_tree_sum_bytes": 2705715200,
+ "peak_pss_tree_sum_bytes": 2684172288,
+ "peak_memory_bytes": 2705715200,
+ "peak_threads": 42,
+ "busy_cpus_inside_set": 4.605919408948219,
+ "busy_cpus_outside_set": 1.8758841146914094,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {},
+ "extra": {}
+}

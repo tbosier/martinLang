@@ -1,0 +1,94 @@
+{
+ "name": "cmdstan_reduce_sum_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_cmdstan.py",
+  "--seed",
+  "1",
+  "--reduce-sum"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.6,
+  3.88,
+  4.24
+ ],
+ "loadavg_after": [
+  6.43,
+  7.61,
+  7.58
+ ],
+ "waited_for_load_seconds": 15.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 2398.567393849,
+ "cpu_user_seconds": 15643.785908,
+ "cpu_system_seconds": 1898.929308,
+ "cpu_seconds": 17542.715216,
+ "maxrss_largest_process_bytes": 1510649856,
+ "peak_rss_tree_sum_bytes": 1704968192,
+ "peak_pss_tree_sum_bytes": 1647294464,
+ "peak_memory_bytes": 1704968192,
+ "peak_threads": 28,
+ "busy_cpus_inside_set": 7.527747267817111,
+ "busy_cpus_outside_set": 0.3173318802411455,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "compile": 9.0,
+  "sampling": 2372.0,
+  "postprocess": 8.9438067029987
+ },
+ "extra": {
+  "seed": 1,
+  "gradients": 2048000,
+  "warmup_gradients": null,
+  "gradients_note": "sampling iterations only: sum of n_leapfrog__ plus one per transition; warmup not recorded",
+  "divergences": 0,
+  "step_size": [
+   0.010763189,
+   0.01046595,
+   0.0095613643,
+   0.010213332
+  ],
+  "leapfrog_per_draw": [
+   511.0,
+   511.0,
+   511.0,
+   511.0
+  ],
+  "treedepth_10_hits": 0,
+  "chain_elapsed_warmup_sampling": [
+   [
+    1159.17,
+    1213.01
+   ],
+   [
+    1007.0,
+    1276.16
+   ],
+   [
+    997.758,
+    1276.34
+   ],
+   [
+    1026.71,
+    1263.5
+   ]
+  ],
+  "csv_bytes": 1876039541,
+  "implementation": "cmdstan_reduce_sum",
+  "threads_per_chain": 3,
+  "sampling_note": "the cmdstanpy sample() call: CmdStan processes including writing CSV",
+  "settings": "models/dynpois_reduce_sum.stan, STAN_THREADS, threads_per_chain=3, grainsize 1; stanc --O1, CXXFLAGS=-march=native (CmdStan's -O3); default NUTS (diag_e, adapt_delta 0.8, max_treedepth 10); 4 chains, parallel_chains=4, 1000 warmup + 1000 draws"
+ },
+ "recovered": {
+  "why": "post-processing crashed on CSV column names (beta[1] instead of CmdStan's beta.1) after sampling finished; the CSV files were post-processed afterwards by recover_cmdstan.py",
+  "measured_total_wall_seconds": 2389.6235871460012,
+  "measured_cpu_seconds": 17533.790046000002,
+  "postprocess_wall_seconds": 8.9438067029987,
+  "postprocess_cpu_seconds": 8.92517,
+  "postprocess_peak_rss_bytes": 231579648,
+  "compile_and_sampling_from": "cmdstanpy log timestamps (1 s resolution)"
+ }
+}

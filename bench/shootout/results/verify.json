@@ -1,0 +1,127 @@
+{
+ "points": {
+  "P1": "runtime benchmark point",
+  "P2": "near-posterior point, default_rng(2026)"
+ },
+ "reference": {
+  "P1": 49751.5392291831,
+  "P2": 85462.41604995474
+ },
+ "frameworks": {
+  "martin": {
+   "lp_P1": 49751.53922918646,
+   "lp_P2": 85462.4160499549,
+   "constant_offset_P1": 3.3614924177527428e-09,
+   "constant_offset_P2": 1.6007106751203537e-10,
+   "lp_difference_rel_error": 8.964835465419218e-14,
+   "max_grad_rel_error": 6.039613253960852e-14,
+   "us_per_gradient": 45.091,
+   "note": "Martin-compiled model, MINT_BENCH_GRAD at MINT_THETA, 1 kernel thread",
+   "ok": true
+  },
+  "rust_under_martin": {
+   "lp_P1": 49751.5392291831,
+   "lp_P2": 85462.41604995473,
+   "constant_offset_P1": 0.0,
+   "constant_offset_P2": -1.4551915228366852e-11,
+   "lp_difference_rel_error": 4.0749252115541906e-16,
+   "max_grad_rel_error": 6.039613253960852e-14,
+   "us_per_gradient": 49.8224,
+   "note": "baselines/dynpois_par.rs, 1 kernel thread",
+   "ok": true
+  },
+  "rust_nuts_1thread": {
+   "lp_P1": 49751.5392291831,
+   "lp_P2": 85462.41604995473,
+   "constant_offset_P1": 0.0,
+   "constant_offset_P2": -1.4551915228366852e-11,
+   "lp_difference_rel_error": 4.0749252115541906e-16,
+   "max_grad_rel_error": 6.039613253960852e-14,
+   "us_per_gradient": 46.153459000000005,
+   "note": "bench/shootout/rust_nuts, gradient on 1 thread(s)",
+   "ok": true
+  },
+  "rust_nuts_3thread": {
+   "lp_P1": 49751.539229183094,
+   "lp_P2": 85462.41604995473,
+   "constant_offset_P1": -7.275957614183426e-12,
+   "constant_offset_P2": -1.4551915228366852e-11,
+   "lp_difference_rel_error": 2.0374626057770953e-16,
+   "max_grad_rel_error": 6.039613253960852e-14,
+   "us_per_gradient": 22.891561499999998,
+   "note": "bench/shootout/rust_nuts, gradient on 3 thread(s)",
+   "ok": true
+  },
+  "cmdstan_plain": {
+   "lp_P1": -45641.71745637814,
+   "lp_P2": -9930.840635606486,
+   "constant_offset_P1": -95393.25668556124,
+   "constant_offset_P2": -95393.25668556122,
+   "lp_difference_rel_error": 2.0374626057770953e-16,
+   "max_grad_rel_error": 2.6726884594374667e-14,
+   "us_per_gradient": null,
+   "note": "cmdstanpy log_prob (CmdStan log_prob method, jacobian, propto)",
+   "ok": true
+  },
+  "cmdstan_reduce_sum": {
+   "lp_P1": -45641.71745637814,
+   "lp_P2": -9930.840635606495,
+   "constant_offset_P1": -95393.25668556124,
+   "constant_offset_P2": -95393.25668556124,
+   "lp_difference_rel_error": 0.0,
+   "max_grad_rel_error": 2.6726884594374667e-14,
+   "us_per_gradient": null,
+   "note": "cmdstanpy log_prob (CmdStan log_prob method, jacobian, propto)",
+   "ok": true
+  },
+  "nutpie_stan (BridgeStan)": {
+   "lp_P1": -45641.71745637814,
+   "lp_P2": -9930.840635606486,
+   "constant_offset_P1": -95393.25668556124,
+   "constant_offset_P2": -95393.25668556122,
+   "lp_difference_rel_error": 2.0374626057770953e-16,
+   "max_grad_rel_error": 2.6645352591003757e-14,
+   "us_per_gradient": 643.4384699969087,
+   "note": "BridgeStan 2.9.0 library built with nutpie's flags (stanc --O1, STAN_THREADS, CXXFLAGS=-march=native); log_density_gradient(propto, jacobian)",
+   "ok": true
+  },
+  "numpyro": {
+   "lp_P1": -169980.2663029265,
+   "lp_P2": -134269.38948215492,
+   "constant_offset_P1": -219731.8055321096,
+   "constant_offset_P2": -219731.80553210966,
+   "lp_difference_rel_error": 1.8337163451993858e-15,
+   "max_grad_rel_error": 1.7759182957408285e-13,
+   "us_per_gradient": 410.7127000042965,
+   "note": "numpyro.infer.util.log_density + jax.value_and_grad, jit, x64 (all XLA threads)",
+   "ok": true
+  },
+  "pymc_numba": {
+   "lp_P1": -169980.26630292775,
+   "lp_P2": -134269.38948215384,
+   "constant_offset_P1": -219731.80553211085,
+   "constant_offset_P2": -219731.80553210858,
+   "lp_difference_rel_error": 6.336508703966766e-14,
+   "max_grad_rel_error": 1.593657360473945e-14,
+   "us_per_gradient": 322.81114499710384,
+   "note": "PyMC model.compile_logp/compile_dlogp(jacobian=True, mode='NUMBA'); the timing includes PyTensor's Python call overhead",
+   "ok": true
+  },
+  "pymc_jax": {
+   "lp_P1": -169980.2663029265,
+   "lp_P2": -134269.38948215486,
+   "constant_offset_P1": -219731.8055321096,
+   "constant_offset_P2": -219731.8055321096,
+   "lp_difference_rel_error": 2.0374626057770953e-16,
+   "max_grad_rel_error": 1.6449750112622423e-13,
+   "us_per_gradient": 373.75351000264345,
+   "note": "PyMC model.compile_logp/compile_dlogp(jacobian=True, mode='JAX'); the timing includes PyTensor's Python call overhead",
+   "ok": true
+  }
+ },
+ "pymc_jax_gradient_backends": {
+  "pytensor_us_per_gradient": 315.2091699939774,
+  "note": "PyTensor-derived gradient compiled to JAX, called through pytensor.function; jax.grad variant timed below if available",
+  "jax_grad_us_per_gradient": 428.3316050077701
+ }
+}

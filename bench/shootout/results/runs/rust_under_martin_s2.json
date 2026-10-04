@@ -1,0 +1,69 @@
+{
+ "name": "rust_under_martin_s2",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_martin.py",
+  "--seed",
+  "2",
+  "--rust"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.61,
+  6.34,
+  8.5
+ ],
+ "loadavg_after": [
+  16.58,
+  10.27,
+  9.64
+ ],
+ "waited_for_load_seconds": 105.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 1200.0,
+ "total_wall_seconds": 135.45385742600047,
+ "cpu_user_seconds": 1531.727518,
+ "cpu_system_seconds": 22.696998,
+ "cpu_seconds": 1554.4245159999998,
+ "maxrss_largest_process_bytes": 282759168,
+ "peak_rss_tree_sum_bytes": 331399168,
+ "peak_pss_tree_sum_bytes": 307750912,
+ "peak_memory_bytes": 331399168,
+ "peak_threads": 25,
+ "busy_cpus_inside_set": 11.717146943362868,
+ "busy_cpus_outside_set": 4.651242458082374,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "compile": 1.0456379450042732,
+  "run": 133.77446977500222,
+  "postprocess": 0.48740135099797044,
+  "sampling": 133.753686
+ },
+ "extra": {
+  "implementation": "rust_under_martin",
+  "seed": 2,
+  "gradients": 3688391,
+  "warmup_gradients": 1644391,
+  "gradients_note": "all gradients, warmup and sampling (the runtime's count)",
+  "divergences": 0,
+  "step_size": [
+   0.0113,
+   0.0108,
+   0.00996,
+   0.0109
+  ],
+  "leapfrog_per_draw": [
+   511.0,
+   511.0,
+   511.0,
+   511.0
+  ],
+  "threads_per_chain": 3,
+  "smallest_team": 3,
+  "warmup_kind": "stan",
+  "prep_seconds": 0.000124,
+  "sampling_note": "the runtime's own 'sampling took' (warmup + draws, all chains)",
+  "settings": "runtime defaults; 4 chains, 1000 warmup + 1000 draws, max tree depth 10, target acceptance 0.8"
+ }
+}

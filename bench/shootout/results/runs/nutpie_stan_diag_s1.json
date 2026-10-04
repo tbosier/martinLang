@@ -1,0 +1,69 @@
+{
+ "name": "nutpie_stan_diag_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_nutpie_stan.py",
+  "--seed",
+  "1",
+  "--adapt",
+  "diag"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.53,
+  6.22,
+  7.1
+ ],
+ "loadavg_after": [
+  1.43,
+  2.97,
+  4.76
+ ],
+ "waited_for_load_seconds": 15.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 1138.5985928419977,
+ "cpu_user_seconds": 3520.701413,
+ "cpu_system_seconds": 2.925385,
+ "cpu_seconds": 3523.626798,
+ "maxrss_largest_process_bytes": 5375393792,
+ "peak_rss_tree_sum_bytes": 5372649472,
+ "peak_pss_tree_sum_bytes": 5078415360,
+ "peak_memory_bytes": 5375393792,
+ "peak_threads": 42,
+ "busy_cpus_inside_set": 3.4824433345453643,
+ "busy_cpus_outside_set": 0.5023529122566216,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "import": 1.3149285360013891,
+  "load_data": 0.0003899770017596893,
+  "compile": 13.293876918000024,
+  "sampling": 1123.6365670269988,
+  "postprocess": 0.017858535000414122
+ },
+ "extra": {
+  "implementation": "nutpie_stan_diag",
+  "seed": 1,
+  "gradients": 1594485,
+  "warmup_gradients": 432449,
+  "sampling_gradients": 1162032,
+  "gradients_note": "sum of n_steps over warmup and draws plus one per chain for the initial point",
+  "divergences": 0,
+  "step_size": [
+   0.03462326438524501,
+   0.010537059770958954,
+   0.0288897377444493,
+   0.03464570615695991
+  ],
+  "leapfrog_per_draw": [
+   127.64,
+   692.712,
+   203.288,
+   138.392
+  ],
+  "threads_per_chain": 1,
+  "sampling_note": "the nutpie.sample() call (sampling and storing the trace in memory, warmup included)",
+  "settings": "nutpie 0.16.11 adaptation='diag', tune 1000, draws 1000, chains 4, cores 4, save_warmup default (True), other settings default (maxdepth 10, target accept 0.8); model built by BridgeStan 2.9.0 with stanc --O1, CXXFLAGS=-march=native, STAN_THREADS"
+ }
+}

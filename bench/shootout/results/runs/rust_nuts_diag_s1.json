@@ -1,0 +1,85 @@
+{
+ "name": "rust_nuts_diag_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_rust_nuts.py",
+  "--seed",
+  "1",
+  "--adapt",
+  "diag"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.81,
+  5.63,
+  7.04
+ ],
+ "loadavg_after": [
+  9.61,
+  7.38,
+  7.51
+ ],
+ "waited_for_load_seconds": 75.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 117.99672258399733,
+ "cpu_user_seconds": 1218.436728,
+ "cpu_system_seconds": 1.686341,
+ "cpu_seconds": 1220.123069,
+ "maxrss_largest_process_bytes": 489504768,
+ "peak_rss_tree_sum_bytes": 567656448,
+ "peak_pss_tree_sum_bytes": 529108992,
+ "peak_memory_bytes": 567656448,
+ "peak_threads": 25,
+ "busy_cpus_inside_set": 10.396500067748121,
+ "busy_cpus_outside_set": 0.36412744302445404,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "compile": 9.044550104001246,
+  "run": 108.80739969099886,
+  "postprocess": 0.08138809799856972,
+  "sampling": 108.789959121
+ },
+ "extra": {
+  "implementation": "rust_nuts_diag",
+  "seed": 1,
+  "gradients": 1187033,
+  "warmup_gradients": 628213,
+  "gradients_note": "leapfrog steps over warmup and draws plus one per initial point, all chains",
+  "divergences": 0,
+  "step_size": [
+   0.0336915237075815,
+   0.035335922330416374,
+   0.032941274350522846,
+   0.03759024644395607
+  ],
+  "leapfrog_per_draw": [
+   147.1,
+   149.27,
+   135.19,
+   127.26
+  ],
+  "threads_per_chain": 3,
+  "chain_seconds": [
+   88.867,
+   107.497,
+   108.786,
+   99.889
+  ],
+  "logp_seconds_per_chain": [
+   12.561,
+   25.193,
+   25.407,
+   23.152
+  ],
+  "logp_calls_per_chain": [
+   310432,
+   309932,
+   292192,
+   274538
+  ],
+  "sampling_note": "the program's own timer around the 4 chain threads (warmup + draws)",
+  "settings": "nuts-rs 0.19.0 diag (DiagNutsSettings::default), num_tune 1000, num_draws 1000, maxdepth 10; 4 chains on their own threads, gradient on 3 threads per chain"
+ }
+}

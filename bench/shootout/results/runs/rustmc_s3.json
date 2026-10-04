@@ -1,0 +1,61 @@
+{
+ "name": "rustmc_s3",
+ "command": [
+  "/home/taylo/projects/testRandomShiz/rustmc_demo/.venv/bin/python",
+  "bench/shootout/run_rustmc.py",
+  "--seed",
+  "3"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.56,
+  8.76,
+  8.96
+ ],
+ "loadavg_after": [
+  4.49,
+  7.54,
+  8.49
+ ],
+ "waited_for_load_seconds": 90.0,
+ "busy_cpus_before": 1.324803742801239,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 1200.0,
+ "total_wall_seconds": 110.88575745599519,
+ "cpu_user_seconds": 436.555224,
+ "cpu_system_seconds": 0.119349,
+ "cpu_seconds": 436.674573,
+ "maxrss_largest_process_bytes": 214523904,
+ "peak_rss_tree_sum_bytes": 208429056,
+ "peak_pss_tree_sum_bytes": 201757696,
+ "peak_memory_bytes": 214523904,
+ "peak_threads": 24,
+ "busy_cpus_inside_set": 4.196062336695222,
+ "busy_cpus_outside_set": 0.3174965555711698,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "import": 0.005760913998528849,
+  "load_data": 0.0004037039980175905,
+  "sampling": 110.67727644999832,
+  "postprocess": 0.012254902998392936,
+  "compile": 0.0
+ },
+ "extra": {
+  "implementation": "rustmc",
+  "seed": 3,
+  "gradients": null,
+  "likelihood_evaluations": [
+   5580126,
+   5584252,
+   5578229,
+   5580969
+  ],
+  "gradients_note": "no gradients (elliptical slice sampling); likelihood evaluations per chain recorded",
+  "divergences": null,
+  "kept_draws_per_chain": 125,
+  "thin": 8,
+  "sampling_note": "the fit() call: 1000 warmup + 1000 sweeps per chain, every 8th kept",
+  "settings": "rustmc 0.13.0 BayesianDynamicPoisson(initial_mean=0, coefficient_sd=1, group_sd=0.4, process_sd=0.08, shared_process_sd=0.05); fit(chains=4, warmup=1000, draws=125, thin=8): its documented example settings (4 chains, 1000 + 1000) thinned to fit its 25M stored-value cap"
+ }
+}

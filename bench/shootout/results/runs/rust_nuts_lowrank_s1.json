@@ -1,0 +1,85 @@
+{
+ "name": "rust_nuts_lowrank_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_rust_nuts.py",
+  "--seed",
+  "1",
+  "--adapt",
+  "lowrank"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.84,
+  5.77,
+  6.93
+ ],
+ "loadavg_after": [
+  8.12,
+  10.77,
+  9.72
+ ],
+ "waited_for_load_seconds": 75.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 828.228977273,
+ "cpu_user_seconds": 9374.851672,
+ "cpu_system_seconds": 39.606642,
+ "cpu_seconds": 9414.458314000001,
+ "maxrss_largest_process_bytes": 6659678208,
+ "peak_rss_tree_sum_bytes": 6705782784,
+ "peak_pss_tree_sum_bytes": 6684113920,
+ "peak_memory_bytes": 6705782784,
+ "peak_threads": 25,
+ "busy_cpus_inside_set": 11.394569886793148,
+ "busy_cpus_outside_set": 0.3699582681662456,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "compile": 8.916880038999807,
+  "run": 819.1399552399998,
+  "postprocess": 0.09156619400164345,
+  "sampling": 819.121630091
+ },
+ "extra": {
+  "implementation": "rust_nuts_lowrank",
+  "seed": 1,
+  "gradients": 1437814,
+  "warmup_gradients": 653714,
+  "gradients_note": "leapfrog steps over warmup and draws plus one per initial point, all chains",
+  "divergences": 0,
+  "step_size": [
+   0.032740336019511665,
+   0.0243521770399979,
+   0.03730788594481014,
+   0.02001715765951961
+  ],
+  "leapfrog_per_draw": [
+   141.98,
+   255.0,
+   132.12,
+   255.0
+  ],
+  "threads_per_chain": 3,
+  "chain_seconds": [
+   807.502,
+   781.19,
+   734.093,
+   819.111
+  ],
+  "logp_seconds_per_chain": [
+   15.405,
+   21.225,
+   14.525,
+   22.135
+  ],
+  "logp_calls_per_chain": [
+   283460,
+   444076,
+   280008,
+   430333
+  ],
+  "sampling_note": "the program's own timer around the 4 chain threads (warmup + draws)",
+  "settings": "nuts-rs 0.19.0 low rank (LowRankNutsSettings::default), num_tune 1000, num_draws 1000, maxdepth 10; 4 chains on their own threads, gradient on 3 threads per chain"
+ }
+}

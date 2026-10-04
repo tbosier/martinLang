@@ -1,0 +1,66 @@
+{
+ "name": "martin_optin_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_martin.py",
+  "--seed",
+  "1",
+  "--optin"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.77,
+  4.21,
+  2.42
+ ],
+ "loadavg_after": [
+  7.66,
+  5.26,
+  2.85
+ ],
+ "waited_for_load_seconds": 45.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 41.60024664500088,
+ "cpu_user_seconds": 464.705524,
+ "cpu_system_seconds": 6.908255,
+ "cpu_seconds": 471.613779,
+ "maxrss_largest_process_bytes": 681619456,
+ "peak_rss_tree_sum_bytes": 718876672,
+ "peak_pss_tree_sum_bytes": 700816384,
+ "peak_memory_bytes": 718876672,
+ "peak_threads": 25,
+ "phases": {
+  "compile": 0.8399713979997614,
+  "run": 40.29411234100007,
+  "postprocess": 0.3421213700003136,
+  "sampling": 40.275728
+ },
+ "extra": {
+  "implementation": "martin_optin",
+  "seed": 1,
+  "gradients": 1282244,
+  "warmup_gradients": 262244,
+  "gradients_note": "all gradients, warmup and sampling (the runtime's count)",
+  "divergences": 0,
+  "step_size": [
+   0.0234,
+   0.0203,
+   0.022,
+   0.0201
+  ],
+  "leapfrog_per_draw": [
+   255.0,
+   255.0,
+   255.0,
+   255.0
+  ],
+  "threads_per_chain": 3,
+  "smallest_team": 3,
+  "warmup_kind": "fast",
+  "prep_seconds": 0.000224,
+  "sampling_note": "the runtime's own 'sampling took' (warmup + draws, all chains)",
+  "settings": "MINT_METRIC=lowrank MINT_WARMUP=fast; 4 chains, 1000 warmup + 1000 draws, max tree depth 10, target acceptance 0.8"
+ }
+}

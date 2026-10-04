@@ -1,0 +1,72 @@
+{
+ "name": "pymc_jax_s3",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_pymc.py",
+  "--seed",
+  "3",
+  "--backend",
+  "jax"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.25,
+  5.03,
+  6.25
+ ],
+ "loadavg_after": [
+  9.77,
+  11.78,
+  9.86
+ ],
+ "waited_for_load_seconds": 60.0,
+ "busy_cpus_before": 0.5669869878333621,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 1200.0,
+ "total_wall_seconds": 941.2023645200024,
+ "cpu_user_seconds": 4626.303329,
+ "cpu_system_seconds": 228.345019,
+ "cpu_seconds": 4854.648348000001,
+ "maxrss_largest_process_bytes": 5794447360,
+ "peak_rss_tree_sum_bytes": 5795082240,
+ "peak_pss_tree_sum_bytes": 5762439168,
+ "peak_memory_bytes": 5795082240,
+ "peak_threads": 99,
+ "busy_cpus_inside_set": 6.9848507526171755,
+ "busy_cpus_outside_set": 2.7874470339585176,
+ "busy_cpus_note": "average number of busy logical CPUs during the run, inside and outside the taskset list; work outside it is other work on the machine (CPUs 12-23 are the SMT siblings of 0-11, so it competes for the same cores)",
+ "phases": {
+  "import": 1.8959998189966427,
+  "load_data": 0.00033498299308121204,
+  "build_model": 0.12139873900014209,
+  "compile": 0.5947834459948353,
+  "sampling": 937.692197917997,
+  "postprocess": 0.09529381500033196
+ },
+ "extra": {
+  "implementation": "pymc_jax",
+  "seed": 3,
+  "gradients": 1200026,
+  "warmup_gradients": 656054,
+  "sampling_gradients": 543968,
+  "gradients_note": "sum of n_steps over warmup and draws plus one per chain for the initial point",
+  "divergences": 0,
+  "step_size": [
+   0.031893848085178526,
+   0.03438318987387807,
+   0.031075264854676606,
+   0.03188520492764598
+  ],
+  "leapfrog_per_draw": [
+   132.12,
+   141.976,
+   137.112,
+   132.76
+  ],
+  "threads_per_chain": 1,
+  "compile_note": "build_model (PyMC graph) is reported separately; compile = nutpie.compile_pymc_model (PyTensor rewrites and numba/JAX compilation); JAX also traces and compiles lazily on first call, which then falls in sampling",
+  "sampling_note": "the nutpie.sample() call (sampling and storing the trace in memory, warmup included)",
+  "settings": "PyMC 5.28.5, nutpie 0.16.11 compile_pymc_model(backend='jax', gradient_backend='pytensor'), sample(tune 1000, draws 1000, chains 4, cores 4), defaults otherwise (adaptation 'diag', maxdepth 10, target accept 0.8, save_warmup True)"
+ }
+}

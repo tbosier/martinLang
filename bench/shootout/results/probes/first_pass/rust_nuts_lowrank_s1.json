@@ -1,0 +1,70 @@
+{
+ "name": "rust_nuts_lowrank_s1",
+ "command": [
+  ".venv/bin/python",
+  "bench/shootout/run_rust_nuts.py",
+  "--seed",
+  "1",
+  "--adapt",
+  "lowrank"
+ ],
+ "cpus": "0-11",
+ "loadavg_before": [
+  2.53,
+  6.1,
+  4.51
+ ],
+ "loadavg_after": [
+  9.02,
+  11.25,
+  9.05
+ ],
+ "waited_for_load_seconds": 90.0,
+ "exit_status": 0,
+ "timed_out": false,
+ "timeout_seconds": 7200.0,
+ "total_wall_seconds": 874.7860968420009,
+ "cpu_user_seconds": 10054.126357,
+ "cpu_system_seconds": 47.067927,
+ "cpu_seconds": 10101.194284,
+ "maxrss_largest_process_bytes": 6654910464,
+ "peak_rss_tree_sum_bytes": 6703394816,
+ "peak_pss_tree_sum_bytes": 6687032320,
+ "peak_memory_bytes": 6703394816,
+ "peak_threads": 25,
+ "phases": {
+  "compile": 8.93175403100031,
+  "run": 865.7073406639993,
+  "postprocess": 0.03426276199934364,
+  "sampling": 865.687690099
+ },
+ "extra": {
+  "implementation": "rust_nuts_lowrank",
+  "seed": 1,
+  "gradients": 1437814,
+  "warmup_gradients": 653714,
+  "gradients_note": "leapfrog steps over warmup and draws plus one per initial point, all chains",
+  "divergences": 0,
+  "step_size": [
+   0.032740336019511665,
+   0.0243521770399979,
+   0.03730788594481014,
+   0.02001715765951961
+  ],
+  "leapfrog_per_draw": [
+   141.98,
+   255.0,
+   132.12,
+   255.0
+  ],
+  "threads_per_chain": 3,
+  "chain_seconds": [
+   857.175,
+   825.107,
+   865.675,
+   822.352
+  ],
+  "sampling_note": "the program's own timer around the 4 chain threads (warmup + draws)",
+  "settings": "nuts-rs 0.19.0 low rank (LowRankNutsSettings::default), num_tune 1000, num_draws 1000, maxdepth 10; 4 chains on their own threads, gradient on 3 threads per chain"
+ }
+}
