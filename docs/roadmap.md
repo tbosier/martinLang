@@ -1,7 +1,7 @@
-# Roadmap: further optimisations
+# Roadmap
 
 Ideas for making Martin faster, from the profiles and reviews of the last
-rounds. None of this is done; expected gains are hypotheses until measured.
+rounds, and, at the end, for how people get to use it. None of this is done; expected gains are hypotheses until measured.
 
 What Martin can offer over hand-written code is automation: the compiler
 reads the model and decides, for every model a user writes, things an expert
@@ -136,6 +136,53 @@ and would be reported separately.
     (a sampler generated with the model) moves it into code the compiler
     emits for each model, which is where moving more of the system into
     Martin's own code would buy speed.
+24. **A Python package, and later a Rust macro, as other ways in.** Most
+    people who fit Bayesian models work in Python or R, and asking them to
+    switch languages is a large cost of Martin being a language (see
+    below). A Python package would take a Martin model as text, compile it
+    with `mintc`, run it on NumPy or pandas data and return the draws as
+    arrays or an ArviZ object, the way cmdstanpy and cmdstanr let people
+    use Stan without leaving Python or R. A Rust procedural macro
+    (`martin! { ... }`) could do the same for Rust programs. The compiler
+    and its optimisations stay the same; only the front end changes.
+
+## Why a language rather than a library
+
+The optimisations depend on seeing the whole model as mathematics before
+it runs: which quantities are data and which are unknown, their shapes and
+constraints, and how the statements connect. That is how the compiler finds
+a Gaussian random walk to integrate out, chooses the memory layout and
+derives the gradient at compile time. A library of ordinary functions sees
+one call at a time and cannot do this. A library that can do it has to
+capture the model first, either as a small language inside the host (a Rust
+macro) or as an expression graph built at run time and then optimised,
+which is what JAX does (traced and compiled by XLA; NumPyro builds on it),
+as do PyMC through PyTensor and TensorFlow inside `tf.function`. Either way it
+contains a compiler; the choice is where the compiler's input comes from.
+
+A separate language was chosen because:
+
+- intent such as `Positive`, symmetric positive definite, or data versus
+  parameter is part of the language and checked by the compiler, rather
+  than encoded in wrapper types or checked at run time;
+- errors can be stated in terms of the model rather than the host
+  language's machinery;
+- the compiler sees exactly the model and nothing else, with no host-language
+  code mixed in that it must work around; compared with a library of
+  ordinary functions, nothing limits what it may reorder, fuse or remove
+  (graph-capturing frameworks such as JAX get much of this too).
+
+Brevity is not on the list: the model reads like the mathematics, but it
+does in Stan, PyMC and NumPyro too (18 lines of Martin against 24 to 48 for
+those in the [shootout](../bench/shootout/results.md)). The case for a
+language is a modest one, and a library that captures the whole model could
+do most of the same optimisations.
+
+The costs are adoption, tooling (editor support, debugging, packaging) and
+interoperation with the rest of an analysis, which happens in Python or R.
+Stan made the same choice and is widely used through R and Python. Item 24
+is the answer to those costs: keep the compiler as the core and offer other
+ways in.
 
 ## Not planned
 
